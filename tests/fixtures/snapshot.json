@@ -1,0 +1,57 @@
+{
+  "adapters": [
+    {"InterfaceIndex": 11, "Name": "Ethernet", "InterfaceDescription": "Intel(R) Ethernet Connection",
+     "InterfaceOperationalStatus": 1, "MediaConnectState": 1, "InterfaceAdminStatus": 1,
+     "PermanentAddress": "001122334455", "Speed": 1000000000,
+     "InterfaceGuid": "{00000000-0000-0000-0000-000000000011}", "Hidden": false},
+    {"InterfaceIndex": 12, "Name": "Wi-Fi", "InterfaceDescription": "Wireless Adapter",
+     "InterfaceOperationalStatus": 2, "MediaConnectState": 2, "InterfaceAdminStatus": 1,
+     "PermanentAddress": "66778899AABB", "Speed": 0,
+     "InterfaceGuid": "{00000000-0000-0000-0000-000000000012}", "Hidden": false},
+    {"InterfaceIndex": 13, "Name": "Lab NIC", "InterfaceDescription": "USB Ethernet",
+     "InterfaceOperationalStatus": 2, "MediaConnectState": 0, "InterfaceAdminStatus": 2,
+     "PermanentAddress": "A0B1C2D3E4F5", "Speed": 100000000,
+     "InterfaceGuid": "{00000000-0000-0000-0000-000000000013}", "Hidden": false},
+    {"InterfaceIndex": 20, "Name": "Hidden Miniport", "InterfaceDescription": "WAN Miniport",
+     "InterfaceOperationalStatus": 1, "MediaConnectState": 1, "InterfaceAdminStatus": 1,
+     "PermanentAddress": "", "Speed": 0, "InterfaceGuid": "{00000000-0000-0000-0000-000000000020}", "Hidden": true}
+  ],
+  "ipInterfaces": [
+    {"InterfaceIndex": 11, "InterfaceAlias": "Ethernet", "AddressFamily": 2, "Dhcp": 0, "NlMtu": 1500,
+     "InterfaceMetric": 25, "ConnectionState": 1},
+    {"InterfaceIndex": 11, "InterfaceAlias": "Ethernet", "AddressFamily": 23, "Dhcp": 1, "NlMtu": 1500,
+     "InterfaceMetric": 25, "ConnectionState": 1},
+    {"InterfaceIndex": 12, "InterfaceAlias": "Wi-Fi", "AddressFamily": 2, "Dhcp": 1, "NlMtu": 1500,
+     "InterfaceMetric": 35, "ConnectionState": 0},
+    {"InterfaceIndex": 1, "InterfaceAlias": "Loopback Pseudo-Interface 1", "AddressFamily": 2, "Dhcp": 0,
+     "NlMtu": 4294967295, "InterfaceMetric": 75, "ConnectionState": 1},
+    {"InterfaceIndex": 1, "InterfaceAlias": "Loopback Pseudo-Interface 1", "AddressFamily": 23, "Dhcp": 0,
+     "NlMtu": 4294967295, "InterfaceMetric": 75, "ConnectionState": 1}
+  ],
+  "addresses": [
+    {"InterfaceIndex": 11, "IPAddress": "192.168.1.10", "PrefixLength": 24, "AddressFamily": 2, "PrefixOrigin": 1},
+    {"InterfaceIndex": 11, "IPAddress": "192.168.1.11", "PrefixLength": 24, "AddressFamily": 2, "PrefixOrigin": 1},
+    {"InterfaceIndex": 11, "IPAddress": "fe80::1234%11", "PrefixLength": 64, "AddressFamily": 23, "PrefixOrigin": 2},
+    {"InterfaceIndex": 1, "IPAddress": "127.0.0.1", "PrefixLength": 8, "AddressFamily": 2, "PrefixOrigin": 2},
+    {"InterfaceIndex": 1, "IPAddress": "::1", "PrefixLength": 128, "AddressFamily": 23, "PrefixOrigin": 2}
+  ],
+  "dns": [
+    {"InterfaceIndex": 11, "AddressFamily": 2, "ServerAddresses": ["1.1.1.1", "8.8.8.8"]},
+    {"InterfaceIndex": 11, "AddressFamily": 23, "ServerAddresses": []},
+    {"InterfaceIndex": 12, "AddressFamily": 2, "ServerAddresses": []}
+  ],
+  "routes": [
+    {"InterfaceIndex": 11, "DestinationPrefix": "0.0.0.0/0", "NextHop": "192.168.1.1", "RouteMetric": 0, "AddressFamily": 2},
+    {"InterfaceIndex": 11, "DestinationPrefix": "192.168.1.0/24", "NextHop": "0.0.0.0", "RouteMetric": 256, "AddressFamily": 2},
+    {"InterfaceIndex": 11, "DestinationPrefix": "192.168.1.10/32", "NextHop": "0.0.0.0", "RouteMetric": 256, "AddressFamily": 2},
+    {"InterfaceIndex": 11, "DestinationPrefix": "10.0.0.0/8", "NextHop": "192.168.1.254", "RouteMetric": 5, "AddressFamily": 2},
+    {"InterfaceIndex": 1, "DestinationPrefix": "127.0.0.0/8", "NextHop": "0.0.0.0", "RouteMetric": 256, "AddressFamily": 2},
+    {"InterfaceIndex": 1, "DestinationPrefix": "224.0.0.0/4", "NextHop": "0.0.0.0", "RouteMetric": 256, "AddressFamily": 2},
+    {"InterfaceIndex": 11, "DestinationPrefix": "fe80::/64", "NextHop": "::", "RouteMetric": 256, "AddressFamily": 23},
+    {"InterfaceIndex": 11, "DestinationPrefix": "::/0", "NextHop": "fe80::1", "RouteMetric": 16, "AddressFamily": 23}
+  ],
+  "persistentRoutes": [
+    {"InterfaceIndex": 11, "DestinationPrefix": "10.0.0.0/8", "NextHop": "192.168.1.254", "RouteMetric": 5, "AddressFamily": 2},
+    {"InterfaceIndex": 12, "DestinationPrefix": "172.16.0.0/12", "NextHop": "192.168.50.1", "RouteMetric": 10, "AddressFamily": 2}
+  ]
+}

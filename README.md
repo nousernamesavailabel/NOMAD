@@ -32,6 +32,13 @@ Running the tests and building a standalone exe (dist\NOMAD.exe):
     python -m pytest
     .\build.ps1
 
+Versions and releases: the version is set in nomad\__init__.py and shows in Help > About, the log and the exe's Properties > Details. Note changes under Unreleased in CHANGELOG.md as you go, then release with:
+
+    python -m nomad.version bump patch     (or minor / major)
+    git commit -am "Release X.Y.Z"
+    git tag vX.Y.Z
+    .\build.ps1
+
 Screenshots below are from the previous version.
 
 NIC Tab:

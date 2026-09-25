@@ -10,6 +10,7 @@ import traceback
 from PyQt5.QtCore import QSettings
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
+from nomad import __version__
 from nomad.logs import log_file_path, setup_logging
 from nomad.system import APP_NAME, LEGACY_APP_NAME
 from nomad.ui.main_window import MainWindow
@@ -45,12 +46,14 @@ def main():
     """Main entry point for the application."""
     memory_log_handler = setup_logging()
     install_exception_hook()
+    log.info("Starting %s %s", APP_NAME, __version__)
     if sys.platform == "win32":
         # Show NOMAD's own icon on the taskbar instead of grouping it under python.exe
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("NOMAD.NOMAD")
     app = QApplication(sys.argv)
     app.setOrganizationName(APP_NAME)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(__version__)
     migrate_settings()
     apply_theme(app)
     app.setWindowIcon(app_icon())
