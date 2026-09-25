@@ -3,8 +3,8 @@ import logging
 import os
 import time
 
-from PyQt5.QtCore import QSettings, Qt, pyqtSignal
-from PyQt5.QtWidgets import QAction, QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, \
+from PyQt5.QtCore import QSettings, Qt, QTimer, pyqtSignal
+from PyQt5.QtWidgets import QAction, QActionGroup, QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, \
     QProgressBar, QPushButton, QTabWidget, QVBoxLayout, QWidget
 
 from .. import __version__
@@ -14,18 +14,29 @@ from ..snapshot import NetworkSnapshot, load_snapshot
 from ..system import APP_FULL_NAME, APP_NAME, is_admin, relaunch_as_admin
 from .adapter_tab import AdapterTab
 from .common import run_in_background
-from .dialogs import LogDialog
+from .connections_tab import ConnectionsTab
+from .dialogs import AboutDialog, LogDialog
 from .iperf_tab import IperfTab
 from .latency_tab import LatencyTab
 from .lookup_tab import LookupTab
 from .mtu_tab import MtuTab
+from .neighbors_tab import NeighborsTab
 from .ping_tab import PingTab
+from .ports_tab import PortsTab
+from .report_dialog import ReportDialog
 from .routing_tab import RoutingTab
+from .services_tab import ServicesTab
 from .sweep_tab import SweepTab
-from .theme import COLORS
+from .switch_tab import SwitchTab
+from .theme import COLORS, DEFAULT_TEXT_SCALE, TEXT_SCALES, set_text_scale
 from .traceroute_tab import TracerouteTab
+from .utilities_tab import UtilitiesTab
 
 log = logging.getLogger(__name__)
+
+# After a change, keep re-reading the network settings while an adapter waits for its DHCP lease
+DHCP_SETTLE_SECONDS = 60
+DHCP_RECHECK_MILLISECONDS = 3000
 
 AUTO_REFRESH_AFTER_SECONDS = 3  # Refresh when switching to a tab if the data is older than this
 
@@ -45,12 +56,15 @@ class MainWindow(QMainWindow):
         self.refreshing = False
         self.refresh_pending = False
         self.refresh_callbacks = []
+        self.settle_until = 0.0  # Monotonic time until which to recheck adapters waiting for DHCP
+        self.recheck_scheduled = False
         self.change_running = None  # Description of the change in progress
         self.busy_reasons = {}
         self.log_dialog = None
+        self.text_scale = DEFAULT_TEXT_SCALE
 
-        self.setWindowTitle(f"{APP_NAME} - {APP_FULL_NAME}" + (" (Administrator)" if self.admin else ""))
-        self.resize(960, 760)
+        self.setWindowTitle(f"{APP_NAME} {__version__} - {APP_FULL_NAME}" + (" (Administrator)" if self.admin else ""))
+        self.resize(1100, 760)
         self.init_ui()
         self.init_menus()
         self.restore_settings()
@@ -70,8 +84,8 @@ class MainWindow(QMainWindow):
                                         "QLabel { border: none; }")
         banner_layout = QHBoxLayout(self.admin_banner)
         banner_layout.setContentsMargins(8, 4, 8, 4)
-        banner_label = QLabel("Running without administrator rights: you can view settings, ping, trace, sweep "
-                              "and look up names, but changing settings needs administrator rights.")
+        banner_label = QLabel("Running without administrator rights: you can view settings, ping, trace, sweep, "
+                              "scan ports and look up names, but changing settings needs administrator rights.")
         banner_label.setWordWrap(True)
         banner_layout.addWidget(banner_label, 1)
         restart_button = QPushButton("Restart as Administrator")
@@ -97,17 +111,26 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget(central)
         self.adapter_tab = AdapterTab(self)
         self.routing_tab = RoutingTab(self)
+        self.neighbors_tab = NeighborsTab(self)
+        self.connections_tab = ConnectionsTab(self)
         self.mtu_tab = MtuTab(self)
         self.ping_tab = PingTab(self)
         self.latency_tab = LatencyTab(self)
         self.traceroute_tab = TracerouteTab(self)
+        self.ports_tab = PortsTab(self)
         self.iperf_tab = IperfTab(self)
         self.lookup_tab = LookupTab(self)
         self.sweep_tab = SweepTab(self)
-        self.all_tabs = [self.adapter_tab, self.routing_tab, self.mtu_tab, self.ping_tab, self.latency_tab,
-                         self.traceroute_tab, self.iperf_tab, self.lookup_tab, self.sweep_tab]
-        for tab, title in zip(self.all_tabs, ["Interfaces", "Routing Table", "MTU", "Ping", "Latency",
-                                              "Traceroute", "iperf", "DNS Lookup", "Sweep"]):
+        self.switch_tab = SwitchTab(self)
+        self.services_tab = ServicesTab(self)
+        self.utilities_tab = UtilitiesTab(self)
+        tabs = [(self.adapter_tab, "Interfaces"), (self.routing_tab, "Routing Table"), (self.neighbors_tab, "ARP"),
+                (self.connections_tab, "Connections"), (self.switch_tab, "Switch Port"), (self.mtu_tab, "MTU"),
+                (self.ping_tab, "Ping"), (self.latency_tab, "Latency"), (self.traceroute_tab, "Traceroute"),
+                (self.ports_tab, "Ports"), (self.services_tab, "Services"), (self.iperf_tab, "iperf"),
+                (self.lookup_tab, "DNS Lookup"), (self.sweep_tab, "Sweep"), (self.utilities_tab, "Utilities")]
+        self.all_tabs = [tab for tab, _ in tabs]
+        for tab, title in tabs:
             self.tabs.addTab(tab, title)
         self.tabs.currentChanged.connect(self.on_tab_changed)
         layout.addWidget(self.tabs, 1)
@@ -136,7 +159,29 @@ class MainWindow(QMainWindow):
             file_menu.addAction("Restart as &Administrator", self.restart_as_admin)
         file_menu.addAction("E&xit", self.close)
 
+        view_menu = self.menuBar().addMenu("&View")
+        text_menu = view_menu.addMenu("&Text Size")
+        self.text_scale_group = QActionGroup(self)
+        for scale, label in TEXT_SCALES:
+            action = text_menu.addAction(label, lambda scale=scale: self.set_text_scale(scale))
+            action.setCheckable(True)
+            action.setData(scale)
+            self.text_scale_group.addAction(action)
+        text_menu.addSeparator()
+        for label, shortcuts, step in (("&Larger Text", ["Ctrl+=", "Ctrl++"], 1), ("&Smaller Text", ["Ctrl+-"], -1),
+                                       ("&Default Size", ["Ctrl+0"], 0)):
+            action = QAction(label, self)
+            action.setShortcuts(shortcuts)
+            action.triggered.connect(lambda _, step=step: self.step_text_scale(step))
+            text_menu.addAction(action)
+            self.addAction(action)  # Shortcuts work even while the menu is closed
+
         tools_menu = self.menuBar().addMenu("&Tools")
+        report_action = QAction("Run &Diagnostics Report...", self)
+        report_action.setShortcut("Ctrl+R")
+        report_action.triggered.connect(self.show_report)
+        tools_menu.addAction(report_action)
+        tools_menu.addSeparator()
         refresh_action = QAction("&Refresh", self)
         refresh_action.setShortcut("F5")
         refresh_action.triggered.connect(lambda: self.refresh())
@@ -164,6 +209,7 @@ class MainWindow(QMainWindow):
         if geometry is not None:
             self.restoreGeometry(geometry)
         self.saved_adapter_name = self.settings.value("window/adapter", "", str)
+        self.set_text_scale(self.settings.value("view/text_scale", DEFAULT_TEXT_SCALE, float))
         self.tabs.setCurrentWidget(self.adapter_tab)  # Always start on Interfaces rather than the last tab used
         for tab in self.all_tabs:
             tab.restore_settings(self.settings)
@@ -182,6 +228,27 @@ class MainWindow(QMainWindow):
         for tab in self.all_tabs:
             tab.shutdown()
         super().closeEvent(event)
+
+    # ----------------------------------------------------------------- Text size
+
+    def set_text_scale(self, scale):
+        """Change the size of all text (saved for next time)."""
+        scales = [choice for choice, _ in TEXT_SCALES]
+        scale = min(scales, key=lambda choice: abs(choice - scale))  # Settings may hold an old or edited value
+        self.text_scale = scale
+        set_text_scale(QApplication.instance(), scale)
+        for action in self.text_scale_group.actions():
+            action.setChecked(action.data() == scale)
+        self.settings.setValue("view/text_scale", scale)
+
+    def step_text_scale(self, step):
+        """Go one size larger (step 1) or smaller (-1), or back to the default (0)."""
+        scales = [choice for choice, _ in TEXT_SCALES]
+        if step == 0:
+            self.set_text_scale(DEFAULT_TEXT_SCALE)
+        else:
+            index = scales.index(self.text_scale) + step
+            self.set_text_scale(scales[max(0, min(len(scales) - 1, index))])
 
     # ----------------------------------------------------------------- Snapshot and adapter picker
 
@@ -208,6 +275,19 @@ class MainWindow(QMainWindow):
         self.update_adapter_picker()
         self.snapshot_changed.emit(snapshot)
         self.run_refresh_callbacks()
+        self.schedule_dhcp_recheck()
+
+    def schedule_dhcp_recheck(self):
+        """Windows gets a DHCP lease a few seconds after the change that asked for it, so look again shortly."""
+        if self.recheck_scheduled or time.monotonic() > self.settle_until:
+            return
+        if any(adapter.awaiting_dhcp for adapter in self.snapshot.real_adapters()):
+            self.recheck_scheduled = True
+            QTimer.singleShot(DHCP_RECHECK_MILLISECONDS, self.dhcp_recheck)
+
+    def dhcp_recheck(self):
+        self.recheck_scheduled = False
+        self.refresh()
 
     def on_snapshot_failed(self, error):
         self.refreshing = False
@@ -249,9 +329,13 @@ class MainWindow(QMainWindow):
 
     def on_tab_changed(self, index):
         """Refresh data that may have changed outside the app when switching to a tab that shows it."""
-        if self.tabs.widget(index) in (self.adapter_tab, self.routing_tab):
+        widget = self.tabs.widget(index)
+        if widget in (self.adapter_tab, self.routing_tab):
             if time.monotonic() - self.last_refresh > AUTO_REFRESH_AFTER_SECONDS:
                 self.refresh()
+        elif widget in (self.neighbors_tab, self.connections_tab):
+            widget.refresh_if_stale()
+        self.connections_tab.update_timer()  # Auto refresh only while its tab is showing
 
     # ----------------------------------------------------------------- Changes, admin and status
 
@@ -274,7 +358,6 @@ class MainWindow(QMainWindow):
             for tab in self.all_tabs:
                 tab.shutdown()
             self.hide()
-            from PyQt5.QtWidgets import QApplication
             QApplication.quit()
         else:
             self.show_status("Restarting as administrator was cancelled.", "warning")
@@ -298,12 +381,14 @@ class MainWindow(QMainWindow):
             self.change_running = None
             self.clear_busy("change")
             log.info("Finished: %s", description)
+            self.settle_until = time.monotonic() + DHCP_SETTLE_SECONDS
             self.refresh(then=(lambda: on_success(result)) if on_success else None)
 
         def failed(error):
             self.change_running = None
             self.clear_busy("change")
             log.error("%s failed: %s", description, error)
+            self.settle_until = time.monotonic() + DHCP_SETTLE_SECONDS
             self.refresh()
             if on_error:
                 on_error(error)
@@ -339,6 +424,18 @@ class MainWindow(QMainWindow):
         self.run_change("Flushing the DNS cache", flush_dns,
                         on_success=lambda _: self.show_status("DNS cache flushed."))
 
+    def show_report(self):
+        adapter = self.current_adapter()
+        if adapter is None:
+            QMessageBox.information(self, "Diagnostics Report", "Choose an adapter to check first.")
+            return
+        ReportDialog(self, adapter).exec_()
+
+    def wake_device(self, mac, name=""):
+        """Open Wake-on-LAN on the Utilities tab with a device filled in (from the Sweep and ARP tabs)."""
+        self.tabs.setCurrentWidget(self.utilities_tab)
+        self.utilities_tab.wake_device(mac, name)
+
     def focus_route_filter(self):
         self.tabs.setCurrentWidget(self.routing_tab)
         self.routing_tab.focus_filter()
@@ -360,11 +457,12 @@ class MainWindow(QMainWindow):
     def show_shortcuts(self):
         QMessageBox.information(self, "Keyboard Shortcuts",
                                 "F5\tRefresh network settings\n"
+                                "Ctrl+R\tRun a diagnostics report on the selected adapter\n"
+                                "Ctrl+= / Ctrl+-\tLarger / smaller text (Ctrl+0 for the default size)\n"
                                 "Ctrl+F\tFilter the routing table\n"
                                 "Delete\tDelete the selected route (Routing Table tab)\n"
-                                "Enter\tStart ping / traceroute / iperf / lookup / sweep from their input fields")
+                                "Enter\tStart ping / traceroute / port scan / iperf / lookup / sweep from their "
+                                "input fields")
 
     def show_about(self):
-        QMessageBox.about(self, f"About {APP_NAME}",
-                          f"{APP_NAME} {__version__}: {APP_FULL_NAME}\n\nA friendlier front end for Windows network settings: adapters, "
-                          "routes, MTU, ping, traceroute, latency monitoring, iperf bandwidth tests, DNS lookups and subnet sweeps.")
+        AboutDialog(self).exec_()

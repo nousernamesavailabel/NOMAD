@@ -1,13 +1,18 @@
-"""Dialogs: keep/revert countdown, log viewer, and save profile."""
+"""Dialogs: keep/revert countdown, log viewer, save profile, and about."""
 import os
+import platform
+import sys
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import PYQT_VERSION_STR, QT_VERSION_STR, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, \
     QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout
 
+from .. import __version__
 from ..logs import log_file_path
-from .theme import COLORS
+from ..system import APP_FULL_NAME, APP_NAME
+from .icon import app_icon
+from .theme import COLORS, monospace_font
 
 
 class KeepChangesDialog(QDialog):
@@ -76,7 +81,7 @@ class LogDialog(QDialog):
         self.text = QPlainTextEdit(self)
         self.text.setReadOnly(True)
         self.text.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.text.setFont(QFont("Consolas", 9))
+        self.text.setFont(monospace_font())
         self.text.setPlainText("\n".join(memory_handler.lines))
         self.text.moveCursor(self.text.textCursor().End)
         layout.addWidget(self.text)
@@ -148,3 +153,62 @@ class SaveProfileDialog(QDialog):
     @property
     def include_mtu(self):
         return self.include_mtu_check.isChecked()
+
+
+class AboutDialog(QDialog):
+    """Help > About: the app's name, version and what it does, with version details that can be copied."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle(f"About {APP_NAME}")
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        layout = QVBoxLayout(self)
+        header = QHBoxLayout()
+        icon_label = QLabel()
+        icon_label.setPixmap(app_icon().pixmap(64, 64))
+        icon_label.setAlignment(Qt.AlignTop)
+        header.addWidget(icon_label)
+        header.addSpacing(12)
+        titles = QVBoxLayout()
+        name_label = QLabel(APP_NAME)
+        font = QFont(name_label.font())
+        font.setPointSizeF(font.pointSizeF() * 1.8)
+        font.setBold(True)
+        name_label.setFont(font)
+        titles.addWidget(name_label)
+        version_label = QLabel(f"Version {__version__}")
+        version_label.setStyleSheet(f"color: {COLORS['accent']}; font-weight: bold;")
+        titles.addWidget(version_label)
+        full_name_label = QLabel(APP_FULL_NAME)
+        full_name_label.setStyleSheet(f"color: {COLORS['muted']};")
+        titles.addWidget(full_name_label)
+        header.addLayout(titles)
+        header.addStretch()
+        layout.addLayout(header)
+
+        description = QLabel("A friendlier front end for Windows network settings: adapters, routes, MTU, ping, "
+                             "traceroute, latency monitoring, iperf bandwidth tests, DNS lookups and subnet sweeps.")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        self.details = version_details()
+        details_label = QLabel(self.details)
+        details_label.setStyleSheet(f"color: {COLORS['muted']};")
+        details_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(details_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        copy_button = buttons.addButton("Copy Version Info", QDialogButtonBox.ActionRole)
+        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(f"{APP_NAME} {__version__}\n{self.details}"))
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.setMinimumWidth(460)
+
+
+def version_details():
+    """Build and runtime versions, for bug reports."""
+    build = "packaged exe" if getattr(sys, "frozen", False) else "running from source"
+    return (f"Build: {build}\n"
+            f"Python {platform.python_version()}, Qt {QT_VERSION_STR}, PyQt {PYQT_VERSION_STR}\n"
+            f"{platform.platform()}")

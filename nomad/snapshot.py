@@ -26,8 +26,9 @@ SYSTEM_ROUTE_NETWORKS = [
 ]
 
 # Querying CIM directly avoids loading the NetAdapter/NetTCPIP/DnsClient modules, which takes
-# several seconds in a fresh PowerShell process.
-SNAPSHOT_SCRIPT = r"""
+# several seconds in a fresh PowerShell process. Get-Instances returns the chosen properties of every
+# instance of a class, optionally from a policy store such as 'PersistentStore'.
+CIM_FUNCTIONS = r"""
 $namespace = 'root/StandardCimv2'
 $session = New-CimSession
 function Get-Instances($class, $properties, $store) {
@@ -39,6 +40,9 @@ function Get-Instances($class, $properties, $store) {
         $row
     }
 }
+"""
+
+SNAPSHOT_SCRIPT = CIM_FUNCTIONS + r"""
 $routeProperties = 'InterfaceIndex', 'DestinationPrefix', 'NextHop', 'RouteMetric', 'AddressFamily'
 $snapshot = [ordered]@{
     adapters = @(Get-Instances 'MSFT_NetAdapter' @('InterfaceIndex', 'Name', 'InterfaceDescription',
@@ -100,6 +104,12 @@ class Adapter:
                 value = self.speed_bps / divisor
                 return f"{value:g} {unit}" if value == int(value) else f"{value:.1f} {unit}"
         return f"{self.speed_bps} bps"
+
+    @property
+    def awaiting_dhcp(self):
+        """Connected and using DHCP, but with no leased IPv4 address yet (only 169.254.x.x or nothing)."""
+        return (self.status == "Up" and bool(self.dhcp)
+                and not any(not address.ip.is_link_local for address in self.ipv4))
 
     def metric(self, family):
         return self.metric4 if family == 4 else self.metric6

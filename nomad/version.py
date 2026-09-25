@@ -4,6 +4,7 @@ Run as a script:
     python -m nomad.version                           print the current version
     python -m nomad.version bump patch|minor|major    raise the version and date its CHANGELOG entry
     python -m nomad.version resource build\\version.txt  write the Windows version resource for the packaged exe
+    python -m nomad.version exe-name                  print the packaged exe's name without .exe (e.g. NOMAD-1.2.3)
 """
 import datetime
 import re
@@ -58,6 +59,11 @@ def release_changelog(new_version, changelog_path=CHANGELOG, today=None):
     changelog_path.write_text(text.replace(UNRELEASED_HEADING, heading, 1), encoding="utf-8")
 
 
+def exe_name(version=__version__):
+    """The packaged exe's name without the .exe, so each build says which version it is."""
+    return f"{APP_NAME}-{version}"
+
+
 def version_resource(version=__version__):
     """PyInstaller's --version-file contents, which fill in the exe's Properties > Details tab."""
     numbers = parse_version(version) + (0,)
@@ -71,7 +77,7 @@ def version_resource(version=__version__):
       StringStruct('FileVersion', '{version}'),
       StringStruct('ProductVersion', '{version}'),
       StringStruct('InternalName', '{APP_NAME}'),
-      StringStruct('OriginalFilename', '{APP_NAME}.exe')])]),
+      StringStruct('OriginalFilename', '{exe_name(version)}.exe')])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]
 )
@@ -87,6 +93,8 @@ def main(args):
         release_changelog(new_version)
         print(f"{__version__} -> {new_version}\n"
               f"Next:\n  git commit -am \"Release {new_version}\"\n  git tag v{new_version}\n  .\\build.ps1")
+    elif args[0] == "exe-name" and len(args) == 1:
+        print(exe_name())
     elif args[0] == "resource" and len(args) == 2:
         output = Path(args[1])
         output.parent.mkdir(parents=True, exist_ok=True)

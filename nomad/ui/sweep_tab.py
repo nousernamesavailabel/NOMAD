@@ -1,4 +1,5 @@
-"""Sweep tab: find the hosts on a subnet that answer ping, then SSH, browse, ping or trace to them."""
+"""Sweep tab: find the hosts on a subnet, with their names, MAC addresses and vendors, then SSH, browse, ping,
+trace or port scan them."""
 import csv
 import ipaddress
 import logging
@@ -6,32 +7,43 @@ import os
 import subprocess
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QAbstractItemView, QApplication, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, \
-    QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox, QTableWidget, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, \
+    QHeaderView, QLabel, QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox, QTableWidget, \
+    QVBoxLayout, QWidget
 
-from ..sweep import LARGE_SWEEP_HOSTS, SWEEP_PASSES, add_to_user_path, find_putty, ping_once, putty_locations, \
-    run_sweep, sweep_hosts
+from ..oui import vendor
+from ..sweep import LARGE_SWEEP_HOSTS, SWEEP_PASSES, add_to_user_path, find_putty, local_networks, lookup_host, \
+    make_probe, putty_locations, run_sweep, sweep_hosts
 from .common import SortableTableItem, StoppableThread, set_hint, set_invalid
 from .theme import accent_button
 
 log = logging.getLogger(__name__)
 
 DEFAULTS = {"workers": 100, "timeout": 1000}
-COLUMNS = ["IP Address", "Response Time"]
+COLUMNS = ["IP Address", "Response Time", "Host Name", "MAC Address", "Vendor"]
+COL_ADDRESS, COL_RTT, COL_NAME, COL_MAC, COL_VENDOR = range(len(COLUMNS))
 PROGRESS_INTERVAL_SECONDS = 0.05  # Limit progress updates so big sweeps don't flood the UI
+NAME_LOOKUP_WORKERS = 16
+ARP_ONLY_SORT_KEY = 10 ** 9  # Hosts that only answered ARP sort after every response time
 
 
 class SweepThread(StoppableThread):
-    found = pyqtSignal(str, int)  # (address, round trip ms)
+    found = pyqtSignal(str, object)  # (address, SweepHit)
+    host_details = pyqtSignal(str, str, str)  # (address, name, MAC reported over NetBIOS)
     progress = pyqtSignal(int, int, int, int)  # (done, total, pass number, hosts in this pass)
+    looking_up_names = pyqtSignal(int)  # Name lookups still running after the sweep itself finished
     finished_sweep = pyqtSignal(str)
 
-    def __init__(self, hosts, workers, timeout, parent=None):
+    def __init__(self, hosts, workers, timeout, arp_networks, find_by_arp, resolve_names, parent=None):
         super().__init__(parent)
         self.hosts, self.workers, self.timeout = hosts, workers, timeout
+        self.arp_networks, self.find_by_arp, self.resolve_names = arp_networks, find_by_arp, resolve_names
         self.last_progress = 0.0
+        self.resolver = None
+        self.pending_names = []
 
     def report_progress(self, done, total, pass_number, remaining):
         now = time.monotonic()
@@ -39,12 +51,36 @@ class SweepThread(StoppableThread):
             self.last_progress = now
             self.progress.emit(done, total, pass_number, remaining)
 
+    def on_found(self, address, hit):
+        self.found.emit(str(address), hit)
+        if self.resolver is not None:
+            future = self.resolver.submit(lambda: None if self.stopping else lookup_host(address))
+            future.add_done_callback(lambda done, address=str(address): self.report_details(address, done))
+            self.pending_names.append(future)
+
+    def report_details(self, address, future):
+        if future.cancelled() or future.exception() is not None or future.result() is None:
+            return
+        name, mac = future.result()
+        if (name or mac) and not self.stopping:
+            self.host_details.emit(address, name, mac)
+
     def run(self):
         started = time.monotonic()
-        alive = run_sweep(self.hosts, lambda address: ping_once(address, self.timeout), self.workers,
-                          should_stop=lambda: self.stopping,
-                          found=lambda address, rtt: self.found.emit(str(address), rtt),
-                          progress=self.report_progress)
+        probe = make_probe(self.timeout, self.arp_networks, self.find_by_arp)
+        self.resolver = ThreadPoolExecutor(max_workers=NAME_LOOKUP_WORKERS) if self.resolve_names else None
+        alive = []
+        try:
+            alive = run_sweep(self.hosts, probe, self.workers, should_stop=lambda: self.stopping,
+                              found=self.on_found, progress=self.report_progress)
+            if self.resolver is not None and not self.stopping:
+                remaining = sum(1 for future in self.pending_names if not future.done())
+                if remaining:
+                    self.looking_up_names.emit(remaining)
+        finally:
+            if self.resolver is not None:
+                # When stopped, drop queued lookups; DNS can be slow to give up when there's no DNS server
+                self.resolver.shutdown(wait=not self.stopping, cancel_futures=self.stopping)
         elapsed = time.monotonic() - started
         found = f"{len(alive)} host{'' if len(alive) == 1 else 's'} found in {elapsed:.1f} seconds"
         self.finished_sweep.emit(f"Sweep stopped: {found}." if self.stopping else f"Sweep complete: {found}.")
@@ -81,10 +117,25 @@ class SweepTab(QWidget):
         for spin_box in (self.workers_input, self.timeout_input):
             spin_box.setButtonSymbols(QSpinBox.NoButtons)  # Like the other tabs' number fields
 
+        self.arp_check = QCheckBox("Find hosts that block ping (ARP)")
+        self.arp_check.setChecked(True)
+        self.arp_check.setToolTip("On subnets this computer is directly connected to, also ask each address for "
+                                  "its MAC address.\nFinds devices whose firewall drops ping, but makes the "
+                                  "first pass slower.")
+        self.names_check = QCheckBox("Look up host names")
+        self.names_check.setChecked(True)
+        self.names_check.setToolTip("Look up each host's name in DNS, falling back to its NetBIOS (Windows) "
+                                    "name,\nwhich works on networks without a DNS server.")
+        options = QHBoxLayout()
+        options.addWidget(self.arp_check)
+        options.addWidget(self.names_check)
+        options.addStretch()
+
         form = QFormLayout()
         form.addRow("Subnet:", subnet_row)
         form.addRow("Parallel pings:", self.workers_input)
         form.addRow("Timeout (ms):", self.timeout_input)
+        form.addRow("Options:", options)
         layout.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -126,8 +177,11 @@ class SweepTab(QWidget):
         self.web_button.setToolTip("Open https://<host> in the default browser.")
         self.ping_button = QPushButton("Ping")
         self.trace_button = QPushButton("Traceroute")
+        self.ports_button = QPushButton("Scan Ports")
+        self.ports_button.setToolTip("Check the host's common TCP ports on the Ports tab.")
+        self.host_buttons = (self.ssh_button, self.web_button, self.ping_button, self.trace_button, self.ports_button)
         host_buttons.addWidget(QLabel("Selected host:"))
-        for button in (self.ssh_button, self.web_button, self.ping_button, self.trace_button):
+        for button in self.host_buttons:
             host_buttons.addWidget(button)
         host_buttons.addStretch()
         layout.addLayout(host_buttons)
@@ -146,6 +200,7 @@ class SweepTab(QWidget):
         self.web_button.clicked.connect(lambda: self.open_web(self.selected_host()))
         self.ping_button.clicked.connect(lambda: self.ping(self.selected_host()))
         self.trace_button.clicked.connect(lambda: self.trace(self.selected_host()))
+        self.ports_button.clicked.connect(lambda: self.scan_ports(self.selected_host()))
 
     # ----------------------------------------------------------------- Tab interface
 
@@ -153,11 +208,15 @@ class SweepTab(QWidget):
         settings.setValue("sweep/subnet", self.subnet_input.text())
         settings.setValue("sweep/workers", self.workers_input.value())
         settings.setValue("sweep/timeout", self.timeout_input.value())
+        settings.setValue("sweep/arp", self.arp_check.isChecked())
+        settings.setValue("sweep/names", self.names_check.isChecked())
 
     def restore_settings(self, settings):
         self.subnet_input.setText(settings.value("sweep/subnet", "", str))
         self.workers_input.setValue(settings.value("sweep/workers", DEFAULTS["workers"], int))
         self.timeout_input.setValue(settings.value("sweep/timeout", DEFAULTS["timeout"], int))
+        self.arp_check.setChecked(settings.value("sweep/arp", True, bool))
+        self.names_check.setChecked(settings.value("sweep/names", True, bool))
 
     def shutdown(self):
         if self.worker is not None:
@@ -202,10 +261,15 @@ class SweepTab(QWidget):
 
         self.clear_results()
         self.progress_bar.setRange(0, len(hosts) * SWEEP_PASSES)
-        set_hint(self.status_label, f"Sweeping {network} ({len(hosts):,} addresses)...", "info")
-        log.info("Sweeping %s", network)
-        self.worker = SweepThread(hosts, self.workers_input.value(), self.timeout_input.value(), self)
+        arp_networks = [local for local in local_networks(self.window.snapshot) if local.overlaps(network)]
+        via_arp = " with ARP" if arp_networks and self.arp_check.isChecked() else ""
+        set_hint(self.status_label, f"Sweeping {network} ({len(hosts):,} addresses){via_arp}...", "info")
+        log.info("Sweeping %s (ARP on %s)", network, ", ".join(map(str, arp_networks)) or "no local subnets")
+        self.worker = SweepThread(hosts, self.workers_input.value(), self.timeout_input.value(), arp_networks,
+                                  self.arp_check.isChecked(), self.names_check.isChecked(), self)
         self.worker.found.connect(self.add_host)
+        self.worker.host_details.connect(self.set_host_details)
+        self.worker.looking_up_names.connect(self.on_looking_up_names)
         self.worker.progress.connect(self.on_progress)
         self.worker.finished_sweep.connect(self.on_sweep_finished)
         self.worker.finished.connect(self.on_thread_finished)
@@ -226,6 +290,11 @@ class SweepTab(QWidget):
         set_hint(self.status_label, f"Pass {pass_number} of {SWEEP_PASSES}: {what}  ·  "
                                     f"{found} host{'' if found == 1 else 's'} found", "info")
 
+    def on_looking_up_names(self, remaining):
+        self.progress_bar.setValue(self.progress_bar.maximum())
+        set_hint(self.status_label, f"Looking up names for {remaining} host{'' if remaining == 1 else 's'}...",
+                 "info")
+
     def on_sweep_finished(self, message):
         if not self.worker.stopping:
             self.progress_bar.setValue(self.progress_bar.maximum())
@@ -238,14 +307,47 @@ class SweepTab(QWidget):
         self.window.clear_busy("sweep")
         self.update_buttons()
 
-    def add_host(self, address, rtt):
+    def local_addresses(self):
+        return {str(address.ip): adapter for adapter in self.window.snapshot.real_adapters()
+                for address in adapter.ipv4}
+
+    def add_host(self, address, hit):
         self.table.setSortingEnabled(False)  # Sorting while inserting would scramble the row
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, SortableTableItem(address, int(ipaddress.ip_address(address)), address))
-        self.table.setItem(row, 1, SortableTableItem("<1 ms" if rtt < 1 else f"{rtt} ms", rtt))
+        self.table.setItem(row, COL_ADDRESS, SortableTableItem(address, int(ipaddress.ip_address(address)), address))
+        if hit.rtt is None:
+            rtt_item = SortableTableItem("No ping reply", ARP_ONLY_SORT_KEY)
+            rtt_item.setToolTip("Found by ARP: the host is there, but its firewall drops ping.")
+        else:
+            rtt_item = SortableTableItem("<1 ms" if hit.rtt < 1 else f"{hit.rtt} ms", hit.rtt)
+        self.table.setItem(row, COL_RTT, rtt_item)
+        local = self.local_addresses().get(address)
+        self.table.setItem(row, COL_NAME, SortableTableItem("(this computer)" if local else ""))
+        self.set_mac(row, hit.mac or (local.mac if local else ""))
         self.table.setSortingEnabled(True)
         self.update_buttons()
+
+    def set_mac(self, row, mac):
+        self.table.setItem(row, COL_MAC, SortableTableItem(mac))
+        self.table.setItem(row, COL_VENDOR, SortableTableItem(vendor(mac)))
+
+    def row_for(self, address):
+        return next((row for row in range(self.table.rowCount())
+                     if self.table.item(row, COL_ADDRESS).text() == address), None)
+
+    def set_host_details(self, address, name, mac):
+        row = self.row_for(address)
+        if row is None:
+            return
+        self.table.setSortingEnabled(False)
+        if name:
+            this_computer = address in self.local_addresses()
+            self.table.setItem(row, COL_NAME, SortableTableItem(f"{name} (this computer)" if this_computer else name))
+        if mac and not self.table.item(row, COL_MAC).text():
+            self.set_mac(row, mac)
+            self.table.item(row, COL_MAC).setToolTip("Reported by the host over NetBIOS.")
+        self.table.setSortingEnabled(True)
 
     def clear_results(self):
         self.table.setRowCount(0)
@@ -267,14 +369,17 @@ class SweepTab(QWidget):
                                               "CSV files (*.csv);;All files (*)")
         if not path:
             return
-        by_address = {self.table.item(row, 0).text(): self.table.item(row, 1).sort_key
-                      for row in range(self.table.rowCount())}
+        by_address = {self.table.item(row, COL_ADDRESS).text(): row for row in range(self.table.rowCount())}
         try:
             with open(path, "w", newline="", encoding="utf-8") as file:
                 writer = csv.writer(file)
-                writer.writerow(["IP Address", "Response Time (ms)"])
+                writer.writerow(["IP Address", "Response Time (ms)", "Host Name", "MAC Address", "Vendor"])
                 for address in self.addresses():
-                    writer.writerow([address, by_address[address]])
+                    row = by_address[address]
+                    rtt = self.table.item(row, COL_RTT).sort_key
+                    writer.writerow([address, "" if rtt == ARP_ONLY_SORT_KEY else rtt] +
+                                    [self.table.item(row, column).text()
+                                     for column in (COL_NAME, COL_MAC, COL_VENDOR)])
         except OSError as error:
             QMessageBox.critical(self, "Export Failed", f"Couldn't save {path}:\n\n{error}")
             return
@@ -289,7 +394,7 @@ class SweepTab(QWidget):
         self.copy_button.setEnabled(has_results)
         self.export_button.setEnabled(has_results)
         selected = self.selected_host() is not None
-        for button in (self.ssh_button, self.web_button, self.ping_button, self.trace_button):
+        for button in self.host_buttons:
             button.setEnabled(selected)
 
     # ----------------------------------------------------------------- Host actions
@@ -313,9 +418,15 @@ class SweepTab(QWidget):
             menu.addAction("Ping"): lambda: self.ping(host),
             menu.addAction("Traceroute"): lambda: self.trace(host),
             menu.addAction("Monitor Latency"): lambda: self.monitor_latency(host),
+            menu.addAction("Scan Ports"): lambda: self.scan_ports(host),
         }
         menu.addSeparator()
         actions[menu.addAction("Copy Address")] = lambda: QApplication.clipboard().setText(host)
+        mac = self.table.item(item.row(), COL_MAC).text()
+        if mac:
+            actions[menu.addAction("Copy MAC Address")] = lambda: QApplication.clipboard().setText(mac)
+            name = self.table.item(item.row(), COL_NAME).text().replace(" (this computer)", "")
+            actions[menu.addAction("Wake-on-LAN...")] = lambda: self.window.wake_device(mac, name)
         chosen = menu.exec_(self.table.viewport().mapToGlobal(position))
         if chosen in actions:
             actions[chosen]()
@@ -349,18 +460,18 @@ class SweepTab(QWidget):
 
     def trace(self, host):
         if host:
-            trace_tab = self.window.traceroute_tab
-            self.window.tabs.setCurrentWidget(trace_tab)
-            if trace_tab.worker is None:
-                trace_tab.host_input.setText(host)
-                trace_tab.start_trace()
-            else:
-                self.window.show_status("A traceroute is already running; stop it first.", "warning")
+            self.window.tabs.setCurrentWidget(self.window.traceroute_tab)
+            self.window.traceroute_tab.trace_host(host)
 
     def monitor_latency(self, host):
         if host:
             self.window.tabs.setCurrentWidget(self.window.latency_tab)
             self.window.latency_tab.add_target(host, host)
+
+    def scan_ports(self, host):
+        if host:
+            self.window.tabs.setCurrentWidget(self.window.ports_tab)
+            self.window.ports_tab.scan_host(host)
 
     # ----------------------------------------------------------------- Menu actions
 

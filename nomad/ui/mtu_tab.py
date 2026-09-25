@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPlainT
 from ..icmp import IcmpClient, find_path_mtu, make_mtu_probe, path_mtu_steps, resolve_host
 from ..ipconfig import MAX_MTU, MIN_MTU
 from .common import StoppableThread, set_hint
-from .theme import COLORS, accent_button
+from .theme import COLORS, accent_button, monospace_font
 
 log = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ class MtuTab(QWidget):
 
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
-        self.output.setFont(QFont("Consolas", 9))
+        self.output.setFont(monospace_font())
         layout.addWidget(self.output, 1)
 
         self.run_button.clicked.connect(self.start_test)

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from nomad.snapshot import parse_snapshot
+from nomad.snapshot import Adapter, parse_snapshot
 
 FIXTURE = Path(__file__).parent / "fixtures" / "snapshot.json"
 
@@ -79,3 +79,16 @@ def test_single_items_are_not_lists():
     # ConvertTo-Json can collapse single-item arrays into objects
     data = {"adapters": {"InterfaceIndex": 5, "Name": "Solo", "InterfaceOperationalStatus": 1}}
     assert parse_snapshot(data).adapters["5"].name == "Solo"
+
+
+@pytest.mark.parametrize("status, dhcp, addresses, expected", [
+    ("Up", True, ["169.254.10.20/16"], True),  # Automatic (APIPA) address while the lease is pending
+    ("Up", True, [], True),
+    ("Up", True, ["169.254.10.20/16", "192.168.1.50/24"], False),
+    ("Up", False, ["169.254.10.20/16"], False),  # Static
+    ("Disconnected", True, ["169.254.10.20/16"], False),
+])
+def test_awaiting_dhcp(status, dhcp, addresses, expected):
+    adapter = Adapter("1", "Ethernet", status=status, dhcp=dhcp,
+                      ipv4=[ipaddress.ip_interface(address) for address in addresses])
+    assert adapter.awaiting_dhcp is expected

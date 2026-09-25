@@ -3,7 +3,7 @@ import datetime
 import pytest
 
 from nomad import __version__
-from nomad.version import bumped, parse_version, release_changelog, set_version, version_resource
+from nomad.version import bumped, exe_name, parse_version, release_changelog, set_version, version_resource
 
 
 def test_current_version_is_valid():
@@ -39,3 +39,8 @@ def test_version_resource():
     resource = version_resource("2.3.4")
     assert "filevers=(2, 3, 4, 0)" in resource
     assert "StringStruct('FileVersion', '2.3.4')" in resource
+    assert "StringStruct('OriginalFilename', 'NOMAD-2.3.4.exe')" in resource
+
+
+def test_exe_name():
+    assert exe_name("2.3.4") == "NOMAD-2.3.4"

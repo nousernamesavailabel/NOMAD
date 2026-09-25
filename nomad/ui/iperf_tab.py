@@ -2,13 +2,13 @@
 import logging
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QDoubleValidator, QFont, QIntValidator
+from PyQt5.QtGui import QDoubleValidator, QIntValidator
 from PyQt5.QtWidgets import QButtonGroup, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, \
     QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QVBoxLayout, QWidget
 
 from ..iperf import DEFAULT_PORT, IperfClient, IperfError, IperfParams, IperfServer, open_firewall_port
 from .common import StoppableThread, set_hint
-from .theme import COLORS, accent_button
+from .theme import COLORS, accent_button, monospace_font
 
 log = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ class IperfTab(QWidget):
         layout.addWidget(self.hint_label)
 
         self.result_label = QLabel()
-        self.result_label.setFont(QFont("Consolas", 10, QFont.Bold))
+        self.result_label.setFont(monospace_font(bold=True))
         self.result_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.result_label)
 
@@ -165,7 +165,7 @@ class IperfTab(QWidget):
         layout.addLayout(output_buttons)
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
-        self.output.setFont(QFont("Consolas", 9))
+        self.output.setFont(monospace_font())
         self.output.setMaximumBlockCount(20000)
         layout.addWidget(self.output, 1)
 

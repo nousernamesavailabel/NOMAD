@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import QCheckBox, QFormLayout, QHBoxLayout, QLabel, QLineEd
 
 from ..icmp import IcmpClient, PingStats, format_reply, resolve_host
 from .common import StoppableThread
-from .theme import accent_button
+from .theme import accent_button, monospace_font
 
 log = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ class PingTab(QWidget):
 
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
-        self.output.setFont(QFont("Consolas", 9))
+        self.output.setFont(monospace_font())
         self.output.setMaximumBlockCount(10000)  # Keep continuous pings from growing without limit
         layout.addWidget(self.output, 1)
 

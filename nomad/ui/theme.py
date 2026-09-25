@@ -3,8 +3,8 @@ import ctypes
 import sys
 
 from PyQt5.QtCore import QEvent, QObject, Qt
-from PyQt5.QtGui import QColor, QPalette
-from PyQt5.QtWidgets import QPushButton
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPalette
+from PyQt5.QtWidgets import QPushButton, QTableView
 
 COLORS = {
     "background": "#11161c",
@@ -92,6 +92,7 @@ def apply_theme(app):
         palette.setColor(QPalette.Disabled, role, QColor(COLORS["disabled"]))
     app.setPalette(palette)
     app.setStyleSheet(STYLESHEET.format(**COLORS))
+    app.setProperty("base_point_size", app.font().pointSizeF())  # Windows' text size, for set_text_scale
     if sys.platform == "win32":
         app.title_bar_styler = TitleBarStyler(app)  # Kept on app so it lives as long as the app does
         app.installEventFilter(app.title_bar_styler)
@@ -139,6 +140,37 @@ class TitleBarStyler(QObject):
             except (AttributeError, OSError):  # No DWM (e.g. very old Windows); keep the default title bar
                 pass
         return False
+
+
+# Text Size menu choices: (scale, label)
+TEXT_SCALES = [(0.9, "90%"), (1.0, "100% (default)"), (1.1, "110%"), (1.25, "125%"), (1.5, "150%"),
+               (1.75, "175%"), (2.0, "200%")]
+DEFAULT_TEXT_SCALE = 1.0
+TABLE_ROW_PADDING = 8
+
+
+def set_text_scale(app, scale):
+    """Make all text scale times Windows' normal size, updating windows that are already open."""
+    base = app.property("base_point_size") or app.font().pointSizeF()
+    font = QFont(app.font())
+    font.setPointSizeF(base * scale)
+    app.setFont(font)
+    # Widgets styled by the stylesheet keep their old font until it's applied again
+    app.setStyleSheet(app.styleSheet())
+    row_height = QFontMetrics(font).height() + TABLE_ROW_PADDING
+    for widget in app.allWidgets():
+        if isinstance(widget, QTableView):
+            widget.verticalHeader().setDefaultSectionSize(row_height)
+
+
+def monospace_font(bold=False):
+    """Consolas at the app's current text size: only the family is set, so it follows set_text_scale."""
+    font = QFont()
+    font.setFamily("Consolas")
+    font.setStyleHint(QFont.Monospace)
+    if bold:
+        font.setBold(True)
+    return font
 
 
 def accent_button(text):

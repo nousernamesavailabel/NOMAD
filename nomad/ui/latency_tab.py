@@ -4,7 +4,7 @@ import logging
 import time
 
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon, QPixmap
+from PyQt5.QtGui import QColor, QIcon, QPixmap
 from PyQt5.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGroupBox, \
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QSplitter, \
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
@@ -14,7 +14,7 @@ from ..latency import DEFAULT_WINDOW_SECONDS, WINDOW_OPTIONS, CsvLog, LatencyTar
 from ..system import log_dir
 from .common import StoppableThread, set_hint, set_invalid
 from .latency_charts import GaugePanel, LatencyGauge, LatencyGraph, series_color
-from .theme import COLORS, accent_button
+from .theme import COLORS, accent_button, monospace_font
 
 log = logging.getLogger(__name__)
 
@@ -202,7 +202,7 @@ class LatencyTab(QWidget):
         live_layout = QVBoxLayout(live_box)
         self.output = QPlainTextEdit()
         self.output.setReadOnly(True)
-        self.output.setFont(QFont("Consolas", 9))
+        self.output.setFont(monospace_font())
         self.output.setMaximumBlockCount(MAX_LIVE_LINES)
         self.output.setLineWrapMode(QPlainTextEdit.NoWrap)
         live_layout.addWidget(self.output)
