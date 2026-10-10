@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 
+from ..system import replace_file
 from .model import LogCleaner
 
 
@@ -59,7 +60,7 @@ def write_config(path, text):
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as file:
             file.write(text)
-        os.replace(temporary, path)
+        replace_file(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

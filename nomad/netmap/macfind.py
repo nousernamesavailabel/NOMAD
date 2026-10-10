@@ -11,6 +11,9 @@ There are two ways to look:
   MACs, rather than asking every switch about each). An IP address is turned into its MAC from this computer's ARP
   table, the ARP tables of the routers with an interface in its subnet, or the map; a name into an IP address by DNS
   (or the map, for phones and other devices that name themselves over CDP or LLDP).
+- Over SSH too, when asked (macssh.SshAsker): switches that don't answer SNMP are asked the same at their command
+  line, and a MAC learned on a port with a switch beyond it (in CDP or LLDP) is followed there, onto switches the
+  map doesn't have. With no map, the search starts at a switch named for it.
 
 Qt-free: the MAC Finder page runs Locator on a worker thread.
 """
@@ -28,10 +31,10 @@ from dataclasses import dataclass, field
 from ..oui import format_mac, normalize_mac, vendor
 from ..snmp import SnmpClient, SnmpError, parse_oid
 from ..snmpv3 import is_v3
-from . import collect, vlans
+from . import collect, macssh, vlans
 from .crawl import VLAN_WORKERS, Crawler
-from .model import AP, FIREWALL, HOST, NETWORK_KINDS, PHONE, ROUTER, SERVER, SHARED_PORT_HOSTS, SNMP, SWITCH, \
-    NetworkMap, port_key, short_port
+from .model import AP, FIREWALL, HOST, NEIGHBOR, NETWORK_KINDS, PHONE, ROUTER, SERVER, SHARED_PORT_HOSTS, SNMP, \
+    SWITCH, Device, Link, NetworkMap, normalize_name, port_key, short_port
 
 log = logging.getLogger(__name__)
 
@@ -361,6 +364,30 @@ def search_map(network_map, query):
 
 # --------------------------------------------------------------------- Asking the network now
 
+ANSWERED, NO_ANSWER = "Answered", "No answer"  # A device's SNMP, in its report
+LOGGED_IN, LOGIN_FAILED = "Logged in", "Login failed"  # Its SSH
+
+
+@dataclass
+class DeviceReport:
+    """How asking one device went, for the page to show as it happens."""
+    key: str
+    name: str
+    address: str
+    snmp: str = ""  # ANSWERED, NO_ANSWER, or "" when it wasn't asked over SNMP
+    ssh: str = ""  # LOGGED_IN, LOGIN_FAILED, or "" when it wasn't asked over SSH
+    login: str = ""  # What SSH logged in with ("credential TACACS", "saved session sw1")
+    note: str = ""  # Why it couldn't be asked
+
+    @property
+    def asked(self):
+        return self.snmp == ANSWERED or self.ssh == LOGGED_IN
+
+    @property
+    def failed(self):
+        return not self.asked and bool(self.snmp or self.ssh)
+
+
 @dataclass
 class Hit:
     """A switch has a MAC in its table now."""
@@ -423,12 +450,16 @@ def now():
 
 class Locator:
     def __init__(self, network_map, settings, client_factory=SnmpClient, should_stop=lambda: False,
-                 events=lambda kind, *details: None, arp_lookup=None, resolve=resolve_name, workers=16):
+                 events=lambda kind, *details: None, arp_lookup=None, resolve=resolve_name, workers=16, ssh=None,
+                 start=None):
         """network_map: a snapshot_map copy. settings: a CrawlSettings with the map's credentials (communities,
         overrides, version, timeout). events(kind, *details), from this and its worker threads:
             ("step", text)                              what it's doing now
             ("result", index, [Location], problem)      what was found for queries[index] ("" problem if it was)
-        arp_lookup(ip): this computer's ARP for an address on one of its own subnets: the MAC, or None."""
+            ("device", DeviceReport)                    how asking a device went (a copy), each time that changes
+        arp_lookup(ip): this computer's ARP for an address on one of its own subnets: the MAC, or None.
+        ssh: a macssh.SshAsker, to ask switches that don't answer SNMP over SSH (None: SNMP only). start: the key of
+        the switch to start at when the map doesn't say where a MAC was (a search with no map)."""
         self.map = network_map
         self.settings = settings
         self.client_factory = client_factory
@@ -447,12 +478,34 @@ class Locator:
         self.port_counts = {}  # (device key, port key) -> MACs learned on that port, from the tables
         self.paths = network_paths(network_map)
         self.fan_outs = 0  # MACs every switch was asked about
+        self.ssh = ssh
+        self.start = start
+        self.ssh_read = set()  # Devices answered over SSH
+        self.over_ssh = False  # Asking again over SSH what SNMP didn't find: every device at its command line
+        self.ssh_tables_read = False  # Every switch's MAC table read over SSH too (searching for part of a MAC)
+        self.reports = {}  # Device key -> DeviceReport, for each device asked
+        if ssh is not None:
+            ssh.listener = self.on_ssh_login
 
     # ----------------------------------------------------------------- Devices
 
     def readable(self, key, kinds=FDB_KINDS):
+        """Whether a device can be asked: one that answered SNMP, or any with an address when SSH may be used."""
         device = self.map.devices.get(key)
-        return device is not None and device.source == SNMP and bool(device.mgmt_ip) and device.kind in kinds
+        return device is not None and (device.source == SNMP or self.ssh is not None) and bool(device.mgmt_ip) \
+            and device.kind in kinds
+
+    def by_snmp(self, key):
+        """Whether to ask a device over SNMP: it answered when the map was made, and does now (and this isn't the
+        second look, over SSH)."""
+        if self.over_ssh:
+            return False
+        return self.map.devices[key].source == SNMP and self.client_for(key) is not None
+
+    def names(self, key):
+        """A device's name and addresses, for finding its saved SSH session."""
+        device = self.map.devices[key]
+        return [name for name in (device.name, *device.addresses) if name]
 
     def switches(self, kinds=FDB_KINDS):
         return [key for key in self.map.devices if self.readable(key, kinds)]
@@ -474,7 +527,36 @@ class Locator:
             log.info("MAC Finder: %s (%s) didn't answer SNMP", device.label, device.mgmt_ip)
         with self.lock:
             self.clients[key] = entry
+        if not self.should_stop():
+            self.report(key, snmp=ANSWERED if entry is not None else NO_ANSWER,
+                        note="" if entry is not None else "Didn't answer SNMP with the map's credentials.")
         return entry
+
+    def report(self, key, **changes):
+        """Note how asking a device went, and say so."""
+        device = self.map.devices.get(key)
+        with self.lock:
+            report = self.reports.get(key)
+            if report is None:
+                report = self.reports[key] = DeviceReport(key, device.label if device else key,
+                                                          device.mgmt_ip if device else key)
+            for name, value in changes.items():
+                setattr(report, name, value)
+            if report.asked and "note" not in changes:
+                report.note = ""
+            shown = copy.copy(report)
+        self.events("device", shown)
+
+    def on_ssh_login(self, address, ok, login, problem):
+        """From the SshAsker: a switch logged into, or not."""
+        key = next((key for key, device in list(self.map.devices.items()) if device.mgmt_ip == address), address)
+        label = self.label(key)
+        if ok:
+            self.report(key, ssh=LOGGED_IN, login=login, note="")
+            self.events("step", f"Logged in to {label} over SSH ({login})")
+        else:
+            self.report(key, ssh=LOGIN_FAILED, login=login, note=problem)
+            self.events("step", f"{label}: couldn't ask over SSH: {problem}")
 
     def vlan_client(self, key, vlan):
         client, community = self.clients[key]
@@ -624,10 +706,11 @@ class Locator:
     def ask(self, key, digits, hints=()):
         """Whether a switch has a MAC in its table now: [Hit] (one per VLAN it's in, usually one), or None when
         the switch couldn't be asked."""
-        entry = self.client_for(key)
-        if entry is None or self.should_stop():
+        if self.should_stop():
             return None
-        client, _ = entry
+        if not self.by_snmp(key):
+            return self.ask_ssh(key, digits)
+        client, _ = self.clients[key]
         device = self.map.devices[key]
         index = ".".join(str(byte) for byte in bytes.fromhex(digits))
         found = []
@@ -655,6 +738,67 @@ class Locator:
             return None
         return [self.make_hit(key, client, if_index, vlan, status) for if_index, vlan, status in found]
 
+    def ask_ssh(self, key, digits):
+        """ask(), at the switch's command line: [Hit], or None when it can't be asked (or SSH isn't to be used)."""
+        if self.ssh is None:
+            return None
+        device = self.map.devices[key]
+        entries = self.ssh.mac_entries(device.mgmt_ip, digits, self.names(key))
+        if entries is None:
+            return None
+        with self.lock:
+            self.ssh_read.add(key)
+        hits = []
+        for entry in entries:
+            if entry.own:
+                hits.append(Hit(key, "", entry.vlan, own=True))
+                continue
+            description = self.ssh.description(device.mgmt_ip, entry.port, self.names(key)) \
+                if entry.port != macssh.PEER_LINK else ""
+            hits.append(Hit(key, entry.port, entry.vlan, description, members=self.ssh_members(key, entry.port)))
+        return hits
+
+    def ssh_members(self, key, port):
+        """A port-channel's members: as the map has them, else as the switch says."""
+        if not port_key(port).startswith("po"):
+            return []
+        device = self.map.devices[key]
+        members = [member for member, channel in device.port_channels.items() if port_key(channel) == port_key(port)]
+        if members:
+            return members
+        channels = self.ssh.channels(device.mgmt_ip, self.names(key))
+        return next((found for channel, found in channels.items() if port_key(channel) == port_key(port)), [])
+
+    def ssh_neighbor(self, key, hit):
+        """For a MAC a switch answered about over SSH: the network device its CDP or LLDP has on that port (added to
+        the map, linked, when the map doesn't have it), or None."""
+        device = self.map.devices[key]
+        ports = {port_key(port) for port in [hit.port] + hit.members}
+        for neighbor in self.ssh.neighbors(device.mgmt_ip, self.names(key)):
+            if port_key(neighbor.local_port) not in ports:
+                continue
+            kind = collect.classify(capabilities=neighbor.capabilities, platform=neighbor.platform)
+            if kind in NETWORK_KINDS:
+                return self.neighbor_device(key, neighbor, kind)
+        return None
+
+    def neighbor_device(self, key, neighbor, kind):
+        devices = self.map.devices
+        with self.lock:
+            name = normalize_name(neighbor.name)
+            other = next((other for other, device in devices.items() if other != key and (
+                (neighbor.address and device.owns(neighbor.address)) or
+                (name and normalize_name(device.name) == name))), None)
+            if other is None:
+                other = f"ssh:{neighbor.address or name}"
+                devices[other] = Device(other, name=neighbor.name, mgmt_ip=neighbor.address, kind=kind,
+                                        platform=neighbor.platform, source=NEIGHBOR)
+            elif not devices[other].mgmt_ip and neighbor.address:
+                devices[other].mgmt_ip = neighbor.address
+            self.map.add_link(Link(key, neighbor.local_port, other, neighbor.port, protocols=[neighbor.protocol]))
+            self.paths = network_paths(self.map)
+        return other
+
     def leads_to(self, key, hit):
         """The device a hit's port leads to (an uplink): its key, UNKNOWN_DEVICE for a port another switch's MAC
         was learned on (a link the map hasn't), or None for an edge port."""
@@ -662,7 +806,11 @@ class Locator:
         for port in [hit.port] + hit.members:
             if port_key(port) in uplinks:
                 return uplinks[port_key(port)]
-        if port_key(hit.port) in self.network_ports.get(key, ()):
+        if key in self.ssh_read and hit.port and not hit.own and hit.port != macssh.PEER_LINK:
+            found = self.ssh_neighbor(key, hit)
+            if found is not None:
+                return found
+        if port_key(hit.port) in self.network_ports.get(key, ()) or hit.port == macssh.PEER_LINK:
             return UNKNOWN_DEVICE
         return None
 
@@ -699,6 +847,8 @@ class Locator:
             key, hit, other = max(beyond, key=lambda item: (self.depth(item[0]), item[0]))
             if other == UNKNOWN_DEVICE:
                 what = "another switch (not linked on the map)"
+            elif self.ssh is not None and self.map.devices[other].mgmt_ip in self.ssh.problems:
+                what = f"{self.label(other)}, which NOMAD couldn't ask over SSH"
             elif self.readable(other):
                 what = f"{self.label(other)}, which doesn't have it in its table now"
             else:
@@ -720,6 +870,8 @@ class Locator:
             location.path = path_to(self.map, key, "", self.paths)
             return location
         counts = self.port_counts.get((key, port_key(hit.port))) if self.tables is not None else None
+        if counts is None and key in self.ssh_read and hit.port != macssh.PEER_LINK:
+            counts = self.ssh.port_macs(device.mgmt_ip, hit.port, self.names(key))
         describe(self.map, location, self.paths, port_macs=counts if counts is not None else 0)
         location.seen_on = [[self.label(other), other_hit.port] for other, other_hit in
                             sorted(hits.items(), key=lambda item: (self.depth(item[0]), item[0])) if other != key]
@@ -727,13 +879,29 @@ class Locator:
 
     def locate_mac(self, query, digits, hint=None, ip=""):
         """Where a whole MAC is now: [Location], or [] when no switch has it in its table. hint: where the map last
-        had it (a Location), asked first and followed along uplinks; then every switch is asked."""
+        had it (a Location), asked first and followed along uplinks; then every switch is asked. With SSH, what SNMP
+        doesn't find is looked for again at the switches' command lines (SNMP can miss what show mac address-table
+        has: a VLAN whose table it can't read, say)."""
+        found = self.find_mac(query, digits, hint, ip)
+        if found or self.ssh is None or self.over_ssh or self.ssh_tables_read or self.should_stop():
+            return found
+        self.events("step", f"{format_mac(digits)}: not found over SNMP; asking the switches over SSH")
+        self.over_ssh, tables = True, self.tables
+        self.tables = None  # Ask each switch for it, rather than search the tables SNMP read
+        try:
+            return self.find_mac(query, digits, hint, ip)
+        finally:
+            self.over_ssh, self.tables = False, tables
+
+    def find_mac(self, query, digits, hint=None, ip=""):
         mac = format_mac(digits)
         if self.tables is not None:
             return self.from_tables(query, digits, ip)
         hits, asked = {}, set()
         hints = (hint.vlan,) if hint is not None and hint.vlan else ()
         key = hint.device if hint is not None and self.readable(hint.device) else None
+        if key is None and self.start is not None and self.readable(self.start):
+            key = self.start  # No idea where it was: start at the switch chosen for it
         while key is not None and key not in asked and not self.should_stop():
             asked.add(key)
             self.events("step", f"{mac}: asking {self.label(key)}")
@@ -772,10 +940,11 @@ class Locator:
 
     def read_device(self, key):
         """A device's MAC table (switches and routers) and ARP table, as a crawl reads them. DeviceTables or None."""
-        entry = self.client_for(key)
-        if entry is None or self.should_stop():
+        if self.should_stop():
             return None
-        client, community = entry
+        if not self.by_snmp(key):
+            return self.read_device_ssh(key)
+        client, community = self.clients[key]
         device = self.map.devices[key]
         tables = collect.DeviceTables(info=collect.SystemInfo(device.name, device.sys_descr, device.sys_object_id))
         walk = self.crawler.walk
@@ -795,8 +964,51 @@ class Locator:
         self.crawler.read_mac_table(client, tables)
         return tables
 
+    def read_device_ssh(self, key):
+        """read_device(), at the command line: the ports get made-up ifIndexes. DeviceTables or None."""
+        if self.ssh is None:
+            return None
+        device = self.map.devices[key]
+        names = self.names(key)
+        tables = collect.DeviceTables(info=collect.SystemInfo(device.name, device.sys_descr, device.sys_object_id))
+        routes = device.kind != SWITCH or bool(device.interfaces_l3) or key == self.start
+        arp = self.ssh.arp(device.mgmt_ip, names=names) if routes else {}
+        if arp is None:
+            return None
+        tables.arp = arp
+        if device.kind not in FDB_KINDS:
+            return tables
+        entries = self.ssh.mac_table(device.mgmt_ip, names)
+        if entries is None:
+            return None
+        with self.lock:
+            self.ssh_read.add(key)
+        indexes = {}
+
+        def index(port):
+            if port_key(port) not in indexes:
+                indexes[port_key(port)] = len(indexes) + 1
+                tables.interfaces[indexes[port_key(port)]] = port
+            return indexes[port_key(port)]
+
+        for entry in entries:
+            if entry.own:
+                tables.own_macs.add(entry.mac)
+            else:
+                tables.fdb.append((entry.mac, index(entry.port), entry.vlan))
+        channels = {}
+        for member, channel in device.port_channels.items():
+            channels.setdefault(channel, []).append(member)
+        if not channels and any(port_key(entry.port).startswith("po") for entry in entries):
+            channels = self.ssh.channels(device.mgmt_ip, names)
+        for channel, members in channels.items():
+            for member in members:
+                tables.lag_parents[index(member)] = index(channel)
+        return tables
+
     def read_all_tables(self):
-        """Read every switch's MAC table (and every router's and firewall's ARP table) once."""
+        """Read every switch's MAC table (and every router's and firewall's ARP table) once. Over SSH (the second
+        look), what's read is added to the tables SNMP read, in place of the same device's."""
         keys = self.switches(ARP_KINDS)
         tables, done = {}, [0]
 
@@ -813,6 +1025,8 @@ class Locator:
             for key, result in zip(keys, executor.map(read, keys)):
                 if result is not None:
                     tables[key] = result
+        if self.over_ssh and self.tables is not None:
+            tables = {**self.tables, **tables}
         network_macs = set()
         for key, result in tables.items():
             if self.map.devices[key].kind in NETWORK_KINDS:
@@ -825,6 +1039,15 @@ class Locator:
                 if mac in network_macs and mac not in result.own_macs:
                     self.network_ports.setdefault(key, set()).add(port)
         self.tables = tables
+
+    def read_tables_over_ssh(self):
+        """The second look for part of a MAC: every switch's MAC table read again at its command line."""
+        self.over_ssh = True
+        try:
+            self.read_all_tables()
+        finally:
+            self.over_ssh = False
+        self.ssh_tables_read = True
 
     @staticmethod
     def fdb_port(tables, if_index):
@@ -887,11 +1110,21 @@ class Locator:
                     holders.append((key, interface[2] if len(interface) > 2 else ""))
                     break
         octets = ".".join(str(number) for number in ip.packed)
+        if self.ssh is not None and self.start is not None and self.start not in [key for key, _ in holders] \
+                and self.readable(self.start, ARP_KINDS):
+            holders.append((self.start, ""))  # With no map, the switch chosen to start at may route the subnet
         for key, port in holders:
-            entry = self.client_for(key)
-            if entry is None or self.should_stop():
+            if self.should_stop():
                 continue
-            client, _ = entry
+            if not self.by_snmp(key):
+                if self.ssh is not None:
+                    self.events("step", f"{address}: asking {self.label(key)} for its MAC (ARP, over SSH)")
+                    found = self.ssh.arp(self.map.devices[key].mgmt_ip, address, self.names(key)) or {}
+                    mac = next((mac for mac, addresses in found.items() if address in addresses), "")
+                    if mac:
+                        return mac
+                continue
+            client, _ = self.clients[key]
             self.events("step", f"{address}: asking {self.label(key)} for its MAC (ARP)")
             try:
                 names = self.interface_cache.get(key)
@@ -928,6 +1161,12 @@ class Locator:
             if mac:
                 return format_mac(mac), "this computer's ARP"
         mac = self.router_arp(address)
+        if not mac and self.ssh is not None and not self.over_ssh and not self.should_stop():
+            self.over_ssh = True  # Not in an ARP table SNMP read: ask the routers at their command line
+            try:
+                mac = self.router_arp(address)
+            finally:
+                self.over_ssh = False
         if mac:
             return mac, "ARP"
         known = next((location for location in hints if location.mac), None)
@@ -962,7 +1201,13 @@ class Locator:
 
     def run_one(self, query, hints):
         if query.kind == MAC_PART:
-            return self.search_tables(query), ""
+            found = self.search_tables(query)
+            if not found and self.ssh is not None and not self.ssh_tables_read and not self.should_stop():
+                self.events("step", f"Nothing with {query.digits} in the MAC tables read over SNMP: reading them "
+                                    "over SSH")
+                self.read_tables_over_ssh()
+                found = self.search_tables(query)
+            return found, ""
         if query.kind == MAC_FULL:
             hint = next((location for location in hints if location.mac == query.mac), None)
             return self.locate_mac(query.text, query.digits, hint), ""

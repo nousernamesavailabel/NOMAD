@@ -217,3 +217,10 @@ def test_settings_round_trip(setup, tmp_path):
     page.restore_settings(settings)
     assert page.search_input.text() == "aabb.ccdd.eeff" and page.list_button.isChecked()
     assert page.list_input.toPlainText() == "10.10.0.21"
+
+
+def test_the_main_window_has_its_sessions_before_mac_finder():
+    """MAC Finder's SSH row needs the saved sessions and credentials when it's made: without them it's hidden."""
+    from pathlib import Path
+    source = (Path(mac_finder_tab.__file__).parent / "main_window.py").read_text(encoding="utf-8")
+    assert source.index("self.session_store = SessionStore()") < source.index("MacFinderTab(self)")

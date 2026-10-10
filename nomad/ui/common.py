@@ -5,7 +5,7 @@ import threading
 from PyQt5 import sip
 from PyQt5.QtCore import QEvent, QObject, QRunnable, Qt, QThread, QThreadPool, QTimer, pyqtSignal
 from PyQt5.QtGui import QPainter
-from PyQt5.QtWidgets import QAbstractItemView, QApplication, QHeaderView, QLabel, QMenu, QSizePolicy, \
+from PyQt5.QtWidgets import QAbstractItemView, QAction, QApplication, QHeaderView, QLabel, QMenu, QSizePolicy, \
     QTableView, QTableWidget, QTableWidgetItem
 
 from .theme import COLORS
@@ -33,6 +33,16 @@ def add_submenu(menu, title):
     submenu = QMenu(title, menu)
     menu.addMenu(submenu)
     return submenu
+
+
+def add_action(menu, text, slot=None):
+    """An entry at the end of menu, for a page to keep (to enable or tick it later). Made in Python, not with
+    menu.addAction(text, slot), so its wrapper can't outlive it."""
+    action = QAction(text, menu)
+    if slot is not None:
+        action.triggered.connect(slot)
+    menu.addAction(action)
+    return action
 
 
 def drop_empty_submenus(menu, *submenus):

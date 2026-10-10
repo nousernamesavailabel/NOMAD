@@ -1,8 +1,10 @@
+import os
 import xml.etree.ElementTree as ElementTree
 
 import pytest
 from netmap_fakes import build_network
 
+from nomad import system
 from nomad.netmap import export, store
 from nomad.netmap.crawl import CrawlSettings, Crawler
 from nomad.netmap.layout import H_GAP, NODE_HEIGHT, NODE_WIDTH, SPACINGS, STYLE_NAMES, arrange, layout, \
@@ -71,17 +73,17 @@ def test_map_round_trips_through_a_file(crawled, tmp_path):
 
 def test_saving_waits_out_a_file_held_open_for_a_moment(tmp_path, monkeypatch):
     path = store.save(NetworkMap(), folder=tmp_path)
-    replace, refusals = type(path).replace, [2]
+    replace, refusals = os.replace, [2]
 
-    def held_open(self, target):  # As Windows refuses while the virus scanner has the file open
+    def held_open(source, target):  # As Windows refuses while the virus scanner has the file open
         if refusals[0]:
             refusals[0] -= 1
             raise PermissionError(13, "Access is denied")
-        return replace(self, target)
-    monkeypatch.setattr(type(path), "replace", held_open)
-    monkeypatch.setattr(store.time, "sleep", lambda seconds: None)
+        return replace(source, target)
+    monkeypatch.setattr(os, "replace", held_open)
+    monkeypatch.setattr(system.time, "sleep", lambda seconds: None)
     assert store.save(NetworkMap(), path) == path and not refusals[0]
-    refusals[0] = store.REPLACE_TRIES  # Held open for good: says so
+    refusals[0] = system.REPLACE_TRIES  # Held open for good: says so
     with pytest.raises(PermissionError):
         store.save(NetworkMap(), path)
 

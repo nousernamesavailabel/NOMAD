@@ -1,12 +1,11 @@
 """Named IPv4 configurations ("profiles") saved as JSON."""
 import json
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from .ipconfig import IPConfig, validate_ip_config, validate_mtu
-from .system import app_data_dir
+from .system import app_data_dir, replace_file
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +64,7 @@ def write_profiles_file(path, profiles):
     temporary = path.with_suffix(path.suffix + ".tmp")
     with open(temporary, "w", encoding="utf-8") as file:
         json.dump(data, file, indent=2)
-    os.replace(temporary, path)
+    replace_file(temporary, path)
 
 
 class ProfileStore:

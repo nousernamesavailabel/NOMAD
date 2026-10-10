@@ -6,6 +6,18 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.26.0] - 2026-10-10
+
+### Added
+
+- **MAC Finder over SSH:** tick **Also over SSH** to have Locate Now ask switches that don't answer SNMP at their command line, and, when SNMP doesn't find what's searched for, look again there: a whole MAC is asked for at every switch, part of a MAC searched for in every switch's MAC table read over SSH, and an IP address in the routers' ARP tables (Cisco IOS, IOS XE and NX-OS; only show commands, nothing is changed): `show mac address-table` for the MAC, the port's description and how many MACs are on it, port-channel members, and `show ip arp` for an IP address. A MAC learned on a port with a switch or router beyond it in `show cdp neighbors` / `show lldp neighbors` is followed there, onto switches the map doesn't have, until it's on an edge port. With no map open, the search starts at the switch named in **Start at switch** (with a map, that's where a MAC the map doesn't know starts). Switches with a saved SSH session log in with it; the others with the login chosen beside it: a saved credential (the default one to begin with), or a user name and password asked for at Locate Now and kept only for that search. Each switch is logged into once per search. **Trust new SSH keys** logs in to switches NOMAD hasn't connected to before, remembering their keys; a switch whose key has changed is never logged into. A **Switches Asked** tab beside Details lists every switch a search asked, filled in as it goes: whether it answered SNMP, whether the SSH login worked and what it logged in with (a saved session, or the credential), and why one couldn't be asked (password not accepted, key changed, no answer...), failures first. The status line says each login as it happens, and at the end how many were asked each way and how many couldn't be. Right-click a switch to try its SSH login again (after fixing the credential, say) or to connect to it.
+- **Saved credentials for quick connections:** an SSH connection with no user name (quick connect, Recent, or Connect > SSH on a host with no saved session, from the map, IP Addresses or Sweep) asks which saved credential to log in with, starting on the default one, or takes a user name typed instead; a password typed then can be saved in the credential. The RDP page's quick launch asks the same. Recent reopens the connection with the credential chosen.
+
+### Fixed
+
+- Saving sessions, credentials, command buttons, keyword highlighting, adapter profiles, terminal backups, captured configs, SecureCRT exports, downloaded files, TFTP transfers and the tribe server's settings and backups waits out Windows refusing for a moment while the virus scanner has the file open (as saving maps already did), instead of failing now and then with "Access is denied".
+- Menu entries the IP Addresses and VLANs pages and the View menu keep (to enable or tick later) are made so they can't outlive their menu: a possible cause of rare crashes.
+
 ## [1.25.1] - 2026-10-10
 
 ### Added

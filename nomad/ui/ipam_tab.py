@@ -31,7 +31,7 @@ from ..ipam.vlan_team import TeamVlanStore
 from ..oui import normalize_mac
 from ..sweep import SWEEP_PASSES
 from ..system import log_dir
-from .common import SortableTableItem, run_in_background, set_hint
+from .common import SortableTableItem, add_action, run_in_background, set_hint
 from .integration import MAP_DEVICE, MAP_SUBNET, PLACEMENT, VLAN, hub, link
 from .host_menu import HostActions
 from .ipam_dialogs import AddressDialog, ImportDialog, NetworkDialog, SubnetDialog
@@ -562,20 +562,20 @@ class IpamTab(QWidget):
         self.network_button = QPushButton("Network")
         network_menu = QMenu(self.network_button)
         network_menu.addAction("New Network...", self.new_network)
-        self.edit_network_action = network_menu.addAction("Edit Network...", self.edit_network)
-        self.delete_network_action = network_menu.addAction("Delete Network...", self.delete_network)
+        self.edit_network_action = add_action(network_menu, "Edit Network...", self.edit_network)
+        self.delete_network_action = add_action(network_menu, "Delete Network...", self.delete_network)
         network_menu.addSeparator()
-        self.check_action = network_menu.addAction("Check Data...", self.check_data)
-        self.compare_action = network_menu.addAction("Compare with Workbook...", self.compare_with_workbook)
+        self.check_action = add_action(network_menu, "Check Data...", self.check_data)
+        self.compare_action = add_action(network_menu, "Compare with Workbook...", self.compare_with_workbook)
         network_menu.addSeparator()
-        self.export_action = network_menu.addAction("Export to CSV...", self.export_csv)
-        self.export_workbook_action = network_menu.addAction("Export to Workbook...",
-                                                             lambda: self.export_workbook(every=False))
-        self.export_all_action = network_menu.addAction("Export All Networks to Workbook...",
-                                                        lambda: self.export_workbook(every=True))
+        self.export_action = add_action(network_menu, "Export to CSV...", self.export_csv)
+        self.export_workbook_action = add_action(network_menu, "Export to Workbook...",
+                                                 lambda: self.export_workbook(every=False))
+        self.export_all_action = add_action(network_menu, "Export All Networks to Workbook...",
+                                            lambda: self.export_workbook(every=True))
         network_menu.addSeparator()
-        self.history_action = network_menu.addAction("Network History...", self.show_network_history)
-        self.as_of_action = network_menu.addAction("View As Of...", self.view_as_of)
+        self.history_action = add_action(network_menu, "Network History...", self.show_network_history)
+        self.as_of_action = add_action(network_menu, "View As Of...", self.view_as_of)
         self.network_button.setMenu(network_menu)
         top.addWidget(self.network_button)
         self.import_button = QPushButton("Import Spreadsheet...")
@@ -583,8 +583,8 @@ class IpamTab(QWidget):
         top.addWidget(self.import_button)
         self.team_button = QPushButton("Tribe")
         team_menu = QMenu(self.team_button)
-        self.connect_action = team_menu.addAction("Connect with Tribe Key File...", self.connect_with_key_file)
-        self.sync_action = team_menu.addAction("Sync Now", lambda: self.sync_now(announce=True))
+        self.connect_action = add_action(team_menu, "Connect with Tribe Key File...", self.connect_with_key_file)
+        self.sync_action = add_action(team_menu, "Sync Now", lambda: self.sync_now(announce=True))
         self.team_button.setMenu(team_menu)
         top.addWidget(self.team_button)
         self.server_label = QLabel()

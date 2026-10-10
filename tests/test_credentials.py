@@ -202,3 +202,123 @@ def test_password_saved_at_login_goes_to_the_credential(store, monkeypatch):
     assert store.vault.reveal(other.saved_password) == "new-pw"
     assert store.vault.reveal(owner.session.saved_password) == "new-pw"
     assert "TACACS" in reports[0]
+
+
+# ----------------------------------------------------------------- Picking a credential for a quick connection
+
+def test_login_dialog_starts_on_the_default_credential(parent, store):
+    from nomad.ui.credential_dialogs import LoginDialog
+    credential = tacacs(store, default=True)
+    dialog = LoginDialog(parent, store, "SSH", "10.0.0.9")
+    log_in = dialog.buttons.buttons()[0]
+    assert dialog.credential() is credential and dialog.username_input.text() == "jsmith"
+    assert not dialog.username_input.isEnabled() and log_in.isEnabled()
+    dialog.picker.combo.setCurrentIndex(0)  # A user name typed here: needed for SSH
+    assert dialog.credential() is None and dialog.username_input.isEnabled()
+    assert dialog.username_input.text() == "" and not log_in.isEnabled()
+    dialog.username_input.setText("admin")
+    dialog.remember_typed("admin")
+    assert log_in.isEnabled() and dialog.username() == "admin"
+    dialog.picker.combo.setCurrentIndex(1)
+    dialog.picker.combo.setCurrentIndex(0)
+    assert dialog.username_input.text() == "admin"  # What was typed comes back
+
+    rdp = LoginDialog(parent, store, RDP, "pc1")
+    rdp.picker.combo.setCurrentIndex(0)
+    assert rdp.buttons.buttons()[0].isEnabled()  # Blank: Windows asks
+
+
+def test_no_default_starts_on_typing_a_user_name(parent, store):
+    from nomad.ui.credential_dialogs import LoginDialog
+    tacacs(store)
+    dialog = LoginDialog(parent, store, "SSH", "10.0.0.9")
+    assert dialog.credential() is None and dialog.picker.combo.count() == 2
+
+
+def accept_login(monkeypatch, choose):
+    """LoginDialog answers by itself: choose(dialog) sets it up, then it's accepted."""
+    from nomad.ui import credential_dialogs
+
+    def exec_(dialog):
+        choose(dialog)
+        return QDialog.Accepted
+    monkeypatch.setattr(credential_dialogs.LoginDialog, "exec_", exec_)
+
+
+def test_login_with_fills_in_the_credential(parent, store, monkeypatch):
+    from nomad.ui.credential_dialogs import login_with
+    credential = tacacs(store, default=True)
+    accept_login(monkeypatch, lambda dialog: None)
+    quick = Session("10.0.0.9", host="10.0.0.9")
+    assert login_with(parent, store, quick)
+    assert quick.credential_id == credential.id and quick.username == "jsmith"
+    assert store.vault.reveal(quick.saved_password) == "pw1"
+
+    def typed(dialog):
+        dialog.picker.combo.setCurrentIndex(0)
+        dialog.username_input.setText("admin")
+    accept_login(monkeypatch, typed)
+    other = Session("10.0.0.8", host="10.0.0.8")
+    assert login_with(parent, store, other)
+    assert other.username == "admin" and other.credential_id == "" and other.saved_password == ""
+
+
+def test_login_with_asks_only_when_it_could_help(parent, store, monkeypatch):
+    from nomad.ui import credential_dialogs
+    from nomad.ui.credential_dialogs import login_with
+    asked = []
+    monkeypatch.setattr(credential_dialogs.LoginDialog, "exec_", lambda dialog: asked.append(1) or QDialog.Rejected)
+    quick = Session("10.0.0.9", host="10.0.0.9")
+    assert login_with(parent, store, quick) and not asked  # No credentials
+    tacacs(store, auth=AUTH_KEY, key_file="id_rsa", saved_password="")
+    assert login_with(parent, store, Session("pc", protocol=RDP, host="pc")) and not asked  # None RDP can use
+    saved = Session("sw1", host="10.0.0.1")
+    store.put(saved)
+    assert login_with(parent, store, saved) and not asked  # A saved session keeps its own way
+    assert login_with(parent, store, Session("x", host="h", username="root")) and not asked
+    assert not login_with(parent, store, quick) and asked == [1]  # Cancelled
+    assert quick.username == "" and quick.credential_id == ""
+
+
+def test_ssh_login_offers_credentials_for_an_unsaved_connection(parent, store, monkeypatch):
+    credential = tacacs(store, default=True)
+    accept_login(monkeypatch, lambda dialog: None)
+    quick = Session("10.0.0.9", host="10.0.0.9")
+    view = Answers(store, quick)
+    assert view.ask_user("username", "10.0.0.9") == "jsmith"
+    assert quick.credential_id == credential.id
+    reopened = store.recent_session(store.recent[0])
+    assert reopened.credential_id == credential.id and store.vault.reveal(reopened.saved_password) == "pw1"
+
+
+class Answers(prompts.PromptAnswers, QWidget):
+    def __init__(self, store, session):
+        super().__init__()
+        self.store, self.session, self.reports = store, session, []
+
+    def report(self, message, warning):
+        self.reports.append(message)
+
+
+def test_saved_session_still_just_asks_for_a_user_name(parent, store, monkeypatch):
+    tacacs(store, default=True)
+    saved = Session("sw1", host="10.0.0.1")
+    store.put(saved)
+    monkeypatch.setattr(prompts.QInputDialog, "getText", lambda *args: ("admin", True))
+    assert Answers(store, saved).ask_user("username", "10.0.0.1") == "admin"
+    assert saved.credential_id == ""
+
+
+def test_password_typed_for_a_quick_connection_can_go_to_its_credential(store, monkeypatch):
+    credential = tacacs(store, saved_password="")
+    quick = store.credentials.apply(Session("10.0.0.9", host="10.0.0.9", credential_id=credential.id))
+    monkeypatch.setattr(prompts, "protect_secret", lambda parent, store, value: store.vault.protect(value))
+    reports = []
+    owner = SimpleNamespace(store=store, session=quick, report=lambda message, warning: reports.append(message))
+    prompts.PromptAnswers.save_secret(owner, "password", "typed-pw")
+    assert store.vault.reveal(credential.saved_password) == "typed-pw"
+    assert store.vault.reveal(quick.saved_password) == "typed-pw" and "TACACS" in reports[0]
+    plain = Session("10.0.0.8", host="10.0.0.8")
+    owner.session = plain
+    prompts.PromptAnswers.save_secret(owner, "password", "other")  # No credential and not saved: nowhere to keep it
+    assert plain.saved_password == "" and len(reports) == 1

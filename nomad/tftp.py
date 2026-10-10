@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from .system import replace_file
+
 log = logging.getLogger(__name__)
 
 TFTP_PORT = 69
@@ -403,7 +405,7 @@ class TftpServer:
 
         def commit():
             target.close()
-            os.replace(temporary, path)
+            replace_file(temporary, path)
 
         try:
             receive_file(channel, target, block_size, progress, oack_packet(accepted) if accepted else ack_packet(0),
@@ -489,7 +491,7 @@ def download(host, remote_name, local_path, port=TFTP_PORT, block_size=CLIENT_BL
                                                         ack_packet(1), first_block=2)
             else:
                 raise TftpError(ERR_ILLEGAL, "The server's reply didn't make sense.")
-        os.replace(temporary, local_path)
+        replace_file(temporary, local_path)
         return received
     except BaseException:
         try:

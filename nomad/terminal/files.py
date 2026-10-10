@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 import paramiko
 
+from ..system import replace_file
 from .transports import Cancelled, ConnectionFailed, SshTransport
 
 log = logging.getLogger(__name__)
@@ -1152,7 +1153,7 @@ class TransferRunner:
             raise
         if os.path.getsize(part) != remote.size:
             raise RemoteError(f"Got {os.path.getsize(part):,} of {remote.size:,} bytes; try again to resume.")
-        os.replace(part, transfer.local)
+        replace_file(part, transfer.local)
         if self.preserve_times and (mtime or remote.mtime):
             stamp = mtime or remote.mtime
             os.utime(transfer.local, (stamp, stamp))

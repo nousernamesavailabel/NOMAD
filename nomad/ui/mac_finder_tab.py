@@ -1,8 +1,10 @@
 """MAC Finder page: which switch and port a MAC address (or part of one, an IP address or a name) is on.
 
 Find searches the Network Map's last crawl (and the history of where MACs have been seen) at once, without touching
-the network. Locate Now asks the map's switches over SNMP, with the map's credentials (macfind.Locator). Every
-crawl of the map and every live lookup is noted in the history (sightings.SightingLog).
+the network. Locate Now asks the map's switches over SNMP, with the map's credentials (macfind.Locator), and with
+Also over SSH ticked, asks the ones that don't answer SNMP at their command line (macssh), following a MAC onto
+switches beyond the map; with no map, from a switch named to start at. Every crawl of the map and every live lookup
+is noted in the history (sightings.SightingLog).
 """
 import csv
 import datetime
@@ -15,19 +17,26 @@ from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, \
-    QPlainTextEdit, QProgressBar, QPushButton, QSplitter, QTextBrowser, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, \
+    QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSplitter, \
+    QTabWidget, QTextBrowser, QVBoxLayout, QWidget
 
 from ..neighbors import arp_lookup
-from ..netmap import macfind
-from ..netmap.macfind import HISTORY, LIVE, MAC_FULL, MAC_PART, MAP, NAME, SOURCE_NAMES, Location
-from ..netmap.model import NETWORK_KINDS, SNMP
+from ..netmap import macfind, macssh
+from ..netmap.crawl import CrawlSettings
+from ..netmap.macfind import FDB_KINDS, HISTORY, LIVE, MAC_FULL, MAC_PART, MAP, NAME, SOURCE_NAMES, Location
+from ..netmap.model import NEIGHBOR, NETWORK_KINDS, SNMP, SWITCH, Device, NetworkMap, normalize_name
 from ..netmap.sightings import SightingLog
 from ..oui import format_mac, normalize_mac, vendor
 from ..snmp import SnmpClient
-from .common import SortableTableItem, StoppableThread, read_only_table, set_hint
+from ..terminal.hostkeys import KnownHosts
+from ..terminal.sessions import AUTH_PASSWORD, SSH, Session, same_host
+from .common import SortableTableItem, StoppableThread, read_only_table, run_in_background, set_hint
+from .credential_dialogs import CredentialPicker
 from .host_menu import HostActions
+from .prompts import SecretDialog
 from .theme import COLORS, accent_button
+from .vault_dialog import ensure_unlocked
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +47,13 @@ COLUMNS = ["Searched For", "MAC Address", "Vendor", "IP Address", "Name", "Switc
 MAX_ROWS = 5000  # Shown at once (part of a MAC can match a great many)
 MAX_LIST_TEXT = 200000  # Characters of the list kept in the settings
 HISTORY_ROWS = 50  # Places shown in a MAC's history
+DEVICE_COLUMNS = ["Switch", "Address", "SNMP", "SSH", "Logged In With", "Note"]
+DEV_SWITCH, DEV_ADDRESS, DEV_SNMP, DEV_SSH, DEV_LOGIN, DEV_NOTE = range(len(DEVICE_COLUMNS))
+ASK_LOGIN = "A user name and password asked for"
+SSH_TIP = ("Ask switches that don't answer SNMP at their command line too (Cisco IOS, IOS XE and NX-OS show "
+           "commands: nothing is changed), and when SNMP doesn't find a MAC, ask every switch again over SSH. A MAC "
+           "is followed through CDP and LLDP onto switches the map doesn't have. Switches with a saved SSH session "
+           "log in with it; the others with the login chosen here.")
 
 
 @dataclass
@@ -96,36 +112,48 @@ class LocateThread(StoppableThread):
     step = pyqtSignal(str)
     result = pyqtSignal(int, object, str)  # Query index, [Location], problem
     names_found = pyqtSignal(object)  # {ip: name} from reverse DNS
+    device_report = pyqtSignal(object)  # macfind.DeviceReport: how asking a device went
     finished_locate = pyqtSignal(str, str)  # (message, kind)
 
     def __init__(self, network_map, settings, queries, hints, history, arp=None, client_factory=SnmpClient,
-                 map_name="", parent=None):
+                 map_name="", parent=None, ssh_logins=None, vault=None, trust_new=False, start=None):
         super().__init__(parent)
         self.network_map, self.settings, self.queries, self.hints = network_map, settings, queries, hints
         self.history, self.arp, self.client_factory, self.map_name = history, arp, client_factory, map_name
+        self.ssh_logins, self.vault, self.trust_new, self.start_key = ssh_logins, vault, trust_new, start
+        self.shell_factory = macssh.SshShell  # Tests swap in fake switches
 
     def on_event(self, kind, *details):
         if kind == "step":
+            log.debug("MAC Finder: %s", details[0])
             self.step.emit(details[0])
         elif kind == "result":
             self.result.emit(details[0], details[1], details[2])
+        elif kind == "device":
+            self.device_report.emit(details[0])
 
     def run(self):
+        asker = None
+        if self.ssh_logins is not None:
+            asker = macssh.SshAsker(self.ssh_logins, self.vault, KnownHosts(), self.trust_new,
+                                    lambda: self.stopping, self.shell_factory)
         locator = macfind.Locator(self.network_map, self.settings, client_factory=self.client_factory,
                                   should_stop=lambda: self.stopping, events=self.on_event, arp_lookup=self.arp,
-                                  workers=self.settings.workers)
+                                  workers=self.settings.workers, ssh=asker, start=self.start_key)
         try:
             results = locator.run(self.queries, self.hints)
         except Exception as error:  # A bug shouldn't take the page down with it
             log.exception("MAC Finder: locating failed")
             self.finished_locate.emit(f"Locating failed: {error}", "error")
             return
+        finally:
+            if asker is not None:
+                asker.close()
         found = [location for locations, _ in results.values() for location in locations]
         try:
             self.history.record(found)
         except (sqlite3.Error, OSError) as error:
             log.warning("Couldn't note the lookups in the MAC history: %s", error)
-        unread = sorted({key for key, entry in locator.clients.items() if entry is None})
         if found and not self.stopping:
             nameless = [location.ip for location in found if location.ip and not location.name]
             if nameless:
@@ -143,11 +171,40 @@ class LocateThread(StoppableThread):
         else:
             message = f"Found {located} of {searched} on the network now."
             kind = "warning" if located else "error"
-        if unread:
-            labels = [self.network_map.devices[key].label for key in unread]
-            message += (f" {len(unread)} device{'s' if len(unread) > 1 else ''} didn't answer SNMP: "
-                        f"{', '.join(labels[:5])}{'...' if len(labels) > 5 else ''}.")
+        message += summary_text(list(locator.reports.values()), asker is not None)
         self.finished_locate.emit(message, kind)
+
+
+def plural(count, word, many=None):
+    return f"{count} {word if count == 1 else many or word + 's'}"
+
+
+def summary_text(reports, ssh):
+    """What asking the devices came to, for the end of the status line: how many were asked each way, and the ones
+    that couldn't be (with why, for the first)."""
+    failed = [report for report in reports if report.failed]
+    if not ssh:
+        if not failed:
+            return ""
+        labels = [report.name for report in failed]
+        return (f" {plural(len(failed), 'device')} didn't answer SNMP: {', '.join(labels[:5])}"
+                f"{'...' if len(labels) > 5 else ''}.")
+    asked = [report for report in reports if report.asked]
+    if not asked and not failed:
+        return ""
+    snmp = sum(1 for report in asked if report.snmp == macfind.ANSWERED)
+    ssh_in = sum(1 for report in asked if report.ssh == macfind.LOGGED_IN)
+    text = f" Asked {plural(len(asked), 'switch', 'switches')}: {snmp} over SNMP, {ssh_in} over SSH."
+    refused = [report for report in reports if report.asked and report.ssh == macfind.LOGIN_FAILED]
+    if refused:
+        text += f" {plural(len(refused), 'SSH login')} failed ({refused[0].name}: " \
+                f"{(refused[0].note or 'no reason given').rstrip('.')}). See Switches Asked."
+    if failed:
+        first = failed[0]
+        reason = (first.note or "no answer").rstrip(".")
+        text += (f" {plural(len(failed), 'switch', 'switches')} couldn't be asked ({first.name}: {reason}"
+                 f"{'; and more' if len(failed) > 1 else ''}). See Switches Asked.")
+    return text
 
 
 class MacFinderTab(QWidget):
@@ -155,25 +212,29 @@ class MacFinderTab(QWidget):
         super().__init__(window)
         self.window = window
         self.history = history if history is not None else SightingLog()
+        self.store = getattr(window, "session_store", None)  # Saved sessions and credentials, for SSH
+        self.ssh_user = ""  # The user name last typed for "asked for"
         self.client_factory = SnmpClient  # Tests swap in a fake network
+        self.shell_factory = None  # And fake switches' command lines (None: real SSH)
         self.worker = None
         self.recorder = None
         self.recorded = None  # What was last noted in the history from the map
         self.entries = []
         self.queries = []
+        self.device_reports = {}  # Device key -> macfind.DeviceReport, from the last Locate Now
+        self.last_logins = None  # The SSH logins of the last Locate Now, for Try SSH Login Again
         self.init_ui()
         page = self.map_page()
         if page is not None:
             page.map_shown.connect(self.on_map_shown)
-        self.update_map_label()
-        self.update_buttons()
+        self.update_ssh()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         intro = QLabel("Find the switch and port a device is plugged into. Enter its MAC address in any format "
                        "(aa:bb:cc:dd:ee:ff, aabb.ccdd.eeff, AA-BB-..., or no separators), part of one, an IP "
                        "address or a name. Find searches the Network Map's last crawl at once; Locate Now asks the "
-                       "map's switches over SNMP.")
+                       "map's switches over SNMP (and over SSH, with Also over SSH ticked).")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -204,6 +265,41 @@ class MacFinderTab(QWidget):
         self.list_button.toggled.connect(self.set_list_mode)
         row.addWidget(self.list_button)
         layout.addLayout(row)
+
+        self.ssh_panel = QWidget()
+        ssh_row = QHBoxLayout(self.ssh_panel)
+        ssh_row.setContentsMargins(0, 0, 0, 0)
+        self.ssh_check = QCheckBox("Also over SSH")
+        self.ssh_check.setToolTip(SSH_TIP)
+        self.ssh_check.toggled.connect(self.update_ssh)
+        ssh_row.addWidget(self.ssh_check)
+        self.login_label = QLabel("Log in with:")
+        ssh_row.addWidget(self.login_label)
+        if self.store is not None:
+            default = self.store.credentials.default
+            self.login_picker = CredentialPicker(self, self.store, SSH, default.id if default else "", ASK_LOGIN)
+            self.login_picker.combo.setToolTip("For switches without a saved SSH session: a saved credential "
+                                               "(Manage... to add one), or a user name and password asked for at "
+                                               "Locate Now and kept only for that search.")
+            ssh_row.addWidget(self.login_picker, 2)
+        else:
+            self.login_picker = None
+        self.start_input = QLineEdit()
+        self.start_input.setPlaceholderText("Start at switch (no map: required)")
+        self.start_input.setToolTip("The switch to ask first when the map doesn't say where a MAC was: a core or "
+                                    "distribution switch, by address or name. With no map open, the search starts "
+                                    "here and follows the MAC from switch to switch.")
+        self.start_input.textChanged.connect(self.update_buttons)
+        self.start_input.textChanged.connect(self.update_map_label)
+        ssh_row.addWidget(self.start_input, 1)
+        self.trust_check = QCheckBox("Trust new SSH keys")
+        self.trust_check.setChecked(True)
+        self.trust_check.setToolTip("Log in to switches NOMAD hasn't connected to over SSH before, remembering their "
+                                    "keys (as Trust and Connect does on the Terminal page). A switch whose key has "
+                                    "changed is never logged into.")
+        ssh_row.addWidget(self.trust_check)
+        self.ssh_panel.setVisible(self.store is not None)
+        layout.addWidget(self.ssh_panel)
 
         self.list_panel = QWidget()
         list_layout = QHBoxLayout(self.list_panel)
@@ -252,7 +348,17 @@ class MacFinderTab(QWidget):
         self.details = QTextBrowser()
         self.details.setOpenLinks(False)
         self.details.setPlaceholderText("Choose a result to see the way to it and where it's been.")
-        self.splitter.addWidget(self.details)
+        self.devices_table = read_only_table(DEVICE_COLUMNS)
+        self.devices_table.setSortingEnabled(True)
+        self.devices_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.devices_table.customContextMenuRequested.connect(self.show_devices_menu)
+        self.devices_table.setToolTip("The switches Locate Now asked, and how: over SNMP, or logged into over SSH "
+                                      "(and with what), or why one couldn't be asked. Right-click one to connect "
+                                      "to it or try its SSH login again.")
+        self.bottom_tabs = QTabWidget()
+        self.bottom_tabs.addTab(self.details, "Details")
+        self.bottom_tabs.addTab(self.devices_table, "Switches Asked")
+        self.splitter.addWidget(self.bottom_tabs)
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
         layout.addWidget(self.splitter, 1)
@@ -286,6 +392,12 @@ class MacFinderTab(QWidget):
         settings.setValue("macfinder/list_mode", self.list_button.isChecked())
         settings.setValue("macfinder/list", self.list_input.toPlainText()[:MAX_LIST_TEXT])
         settings.setValue("macfinder/splitter", self.splitter.saveState())
+        settings.setValue("macfinder/ssh", self.ssh_check.isChecked())
+        settings.setValue("macfinder/ssh_start", self.start_input.text())
+        settings.setValue("macfinder/ssh_trust", self.trust_check.isChecked())
+        settings.setValue("macfinder/ssh_user", self.ssh_user)
+        if self.login_picker is not None:
+            settings.setValue("macfinder/ssh_login", self.login_picker.credential_id())
 
     def restore_settings(self, settings):
         self.search_input.setText(settings.value("macfinder/query", "", str))
@@ -294,6 +406,13 @@ class MacFinderTab(QWidget):
         state = settings.value("macfinder/splitter")
         if state is not None:
             self.splitter.restoreState(state)
+        self.ssh_check.setChecked(settings.value("macfinder/ssh", False, bool))
+        self.start_input.setText(settings.value("macfinder/ssh_start", "", str))
+        self.trust_check.setChecked(settings.value("macfinder/ssh_trust", True, bool))
+        self.ssh_user = settings.value("macfinder/ssh_user", "", str)
+        if self.login_picker is not None and settings.contains("macfinder/ssh_login"):
+            self.login_picker.fill(settings.value("macfinder/ssh_login", "", str))
+        self.update_ssh()
 
     def shutdown(self):
         for thread in (self.worker, self.recorder):
@@ -326,18 +445,43 @@ class MacFinderTab(QWidget):
         return [device for device in network_map.devices.values()
                 if device.source == SNMP and device.mgmt_ip and device.kind in NETWORK_KINDS]
 
-    def update_map_label(self):
+    def ssh_switches(self, network_map):
+        """The map's switches (and routers) that didn't answer SNMP, which SSH can ask."""
+        return [device for device in network_map.devices.values()
+                if device.source != SNMP and device.mgmt_ip and device.kind in FDB_KINDS]
+
+    def using_ssh(self):
+        return self.store is not None and self.ssh_check.isChecked()
+
+    def update_ssh(self, *_):
+        on = self.using_ssh()
+        for widget in (self.login_label, self.login_picker, self.start_input, self.trust_check):
+            if widget is not None:
+                widget.setEnabled(on)
+        self.update_map_label()
+        self.update_buttons()
+
+    def update_map_label(self, *_):
         network_map = self.open_map()
         if network_map is None:
-            set_hint(self.map_label, "No map is open on the Network Map page: Find searches only the history of "
-                                     "where MACs have been seen, and Locate Now needs a map (its switches and SNMP "
-                                     "credentials). Crawl or open one there first.", "warning")
+            if self.using_ssh():
+                set_hint(self.map_label, "No map is open on the Network Map page: Find searches only the history "
+                                         "of where MACs have been seen. Locate Now starts at the switch named in Start "
+                                         "at switch and follows the MAC over SSH.", "warning")
+            else:
+                set_hint(self.map_label, "No map is open on the Network Map page: Find searches only the history of "
+                                         "where MACs have been seen, and Locate Now needs a map (its switches and "
+                                         "SNMP credentials), or Also over SSH and a switch to start at. Crawl or "
+                                         "open one there first.", "warning")
             return
         when = seen_text(network_map.finished or network_map.started)
         switches = len(self.readable_switches(network_map))
-        set_hint(self.map_label, f"Map: {self.map_name() or 'the open map'}, crawled {when or 'at an unknown time'}"
-                                 f": {len(network_map.hosts)} hosts on the ports of {switches} switches and routers "
-                                 f"read over SNMP.", "info")
+        text = f"Map: {self.map_name() or 'the open map'}, crawled {when or 'at an unknown time'}: " \
+               f"{len(network_map.hosts)} hosts on the ports of {switches} switches and routers read over SNMP"
+        others = len(self.ssh_switches(network_map))
+        if self.using_ssh() and others:
+            text += f", and {others} more to ask over SSH"
+        set_hint(self.map_label, text + ".", "info")
 
     def on_map_shown(self):
         """The Network Map page shows a map (or the same one again): note its hosts in the history once per crawl."""
@@ -493,16 +637,26 @@ class MacFinderTab(QWidget):
             self.show_problems(problems or ["Enter a MAC address (or part of one), an IP address or a name."], 0)
             return
         network_map, page = self.open_map(), self.map_page()
+        ssh = self.using_ssh()
+        start_text = self.start_input.text().strip() if ssh else ""
         if network_map is None or page is None:
-            set_hint(self.status_label, "Locate Now asks the switches of a network map: crawl or open one on the "
-                                        "Network Map page first.", "error")
-            return
-        if not self.readable_switches(network_map):
+            if not start_text:
+                set_hint(self.status_label, "Locate Now asks the switches of a network map: crawl or open one on the "
+                                            "Network Map page first (or tick Also over SSH and name a switch to start "
+                                            "at).", "error")
+                return
+            network_map = None
+        elif not self.readable_switches(network_map) and not ssh:
             set_hint(self.status_label, "None of the map's devices answered SNMP, so there are no switches to ask. "
-                                        "Check its SNMP credentials on the Network Map page and crawl again.",
-                     "error")
+                                        "Check its SNMP credentials on the Network Map page and crawl again, or tick "
+                                        "Also over SSH.", "error")
             return
-        snapshot = macfind.snapshot_map(network_map)
+        logins = self.ssh_logins() if ssh else None
+        if ssh and logins is None:
+            return
+        snapshot = macfind.snapshot_map(network_map) if network_map is not None else NetworkMap()
+        start = self.start_device(snapshot, start_text) if start_text else None
+        settings = page.crawl_settings([]) if network_map is not None else CrawlSettings(seeds=[])
         hints = {index: macfind.search_map(snapshot, query) for index, query in enumerate(queries)}
         self.queries = queries
         self.entries = []
@@ -512,11 +666,19 @@ class MacFinderTab(QWidget):
             else:
                 self.entries.append(Entry(index, query, problem="Asking the switches..."))
         self.fill_table()
-        self.worker = LocateThread(snapshot, page.crawl_settings([]), queries, hints, self.history,
-                                   self.local_arp(), self.client_factory, self.map_name(), self)
+        self.worker = LocateThread(snapshot, settings, queries, hints, self.history, self.local_arp(),
+                                   self.client_factory, self.map_name() if network_map is not None else "", self,
+                                   ssh_logins=logins, vault=self.store.vault if ssh else None,
+                                   trust_new=self.trust_check.isChecked(), start=start)
+        if self.shell_factory is not None:
+            self.worker.shell_factory = self.shell_factory
+        self.last_logins = logins
+        self.device_reports = {}
+        self.fill_devices()
         self.worker.step.connect(self.on_step)
         self.worker.result.connect(self.on_result)
         self.worker.names_found.connect(self.on_names)
+        self.worker.device_report.connect(self.on_device_report)
         self.worker.finished_locate.connect(self.on_finished)
         self.worker.finished.connect(self.on_thread_finished)
         self.worker.start()
@@ -530,6 +692,71 @@ class MacFinderTab(QWidget):
         if problems:
             self.show_problems(problems, count)
         self.update_buttons()
+
+    def start_device(self, snapshot, text):
+        """The key of the switch to start at: the map's device with that address or name, else one added for it."""
+        name = normalize_name(text)
+        key = next((key for key, device in snapshot.devices.items() if device.owns(text) or
+                    same_host(device.mgmt_ip, text) or (name and normalize_name(device.name) == name)), None)
+        if key is None:
+            key = f"start:{text}"
+            snapshot.devices[key] = Device(key, name="" if macfind.same_ip(text, text) else text, mgmt_ip=text,
+                                           kind=SWITCH, source=NEIGHBOR)
+        if snapshot.root not in snapshot.devices:
+            snapshot.root = key  # Paths to what's found start there
+        return key
+
+    def ssh_logins(self):
+        """How to log in to the switches for this search (macssh.SshLogins), asking what's needed now; None if
+        cancelled."""
+        store = self.store
+        sessions = [store.credentials.apply(session.copy()) for session in store.sessions if session.protocol == SSH]
+        credential = self.login_picker.credential() if self.login_picker is not None else None
+        password = None
+        if credential is None:
+            asked = self.ask_login()
+            if asked is None:
+                return None
+            username, password = asked
+            fallback, label = Session("", username=username), f"user {username} (typed)"
+        else:
+            fallback = store.credentials.apply(Session("", credential_id=credential.id))
+            label = f"credential {credential.name}"
+            if credential.auth == AUTH_PASSWORD and not credential.saved_password:
+                dialog = SecretDialog(self, "Password", f"Password for {credential.username} (the credential "
+                                                       f"{credential.name}), used for this search only:", False)
+                if dialog.exec_() != QDialog.Accepted:
+                    return None
+                password = dialog.field.text()
+        secrets = any(item.saved_password or item.saved_passphrase for item in sessions + [fallback])
+        if secrets and not ensure_unlocked(self, store, "MAC Finder logs in to switches with saved passwords."):
+            return None
+        return macssh.SshLogins(sessions, fallback, password, label)
+
+    def ask_login(self):
+        """(user name, password) to log in to switches with for one search, or None if cancelled."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Log In to Switches")
+        layout = QVBoxLayout(dialog)
+        label = QLabel("For switches without a saved SSH session (kept only for this search):")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        form = QFormLayout()
+        username = QLineEdit(self.ssh_user)
+        password = QLineEdit()
+        password.setEchoMode(QLineEdit.Password)
+        form.addRow("User name:", username)
+        form.addRow("Password:", password)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        (password if self.ssh_user else username).setFocus()
+        if dialog.exec_() != QDialog.Accepted or not username.text().strip():
+            return None
+        self.ssh_user = username.text().strip()
+        return self.ssh_user, password.text()
 
     def stop(self):
         if self.worker is not None:
@@ -558,6 +785,88 @@ class MacFinderTab(QWidget):
         self.entries = [entry for entry in self.entries if entry.index != index]
         self.entries[first:first] = rows
         self.fill_table()
+
+    def on_device_report(self, report):
+        self.device_reports[report.key] = report
+        self.fill_devices()
+
+    def fill_devices(self):
+        """The Switches Asked tab: one row per device, failures first."""
+        table = self.devices_table
+        reports = sorted(self.device_reports.values(), key=lambda report: (not report.failed, report.name.lower()))
+        table.setSortingEnabled(False)
+        table.setRowCount(len(reports))
+        good, bad = QColor(COLORS["success"]), QColor(COLORS["error"])
+        for row, report in enumerate(reports):
+            values = [report.name, report.address, report.snmp, report.ssh, report.login, report.note]
+            for column, text in enumerate(values):
+                item = SortableTableItem(text, None, report if column == 0 else None)
+                if column == DEV_SNMP and text:
+                    item.setForeground(good if text == macfind.ANSWERED else bad)
+                elif column == DEV_SSH and text:
+                    item.setForeground(good if text == macfind.LOGGED_IN else bad)
+                elif column == DEV_NOTE and text:
+                    item.setToolTip(text)
+                table.setItem(row, column, item)
+        table.setSortingEnabled(True)
+        failed = sum(1 for report in reports if report.failed)
+        title = "Switches Asked"
+        if reports:
+            title += f" ({len(reports)}" + (f", {failed} couldn't be" if failed else "") + ")"
+        self.bottom_tabs.setTabText(1, title)
+
+    def show_devices_menu(self, position):
+        item = self.devices_table.itemAt(position)
+        if item is None:
+            return
+        report = self.devices_table.item(item.row(), 0).data_object
+        menu = QMenu(self)
+        actions = {}
+        if report.address:
+            retry = menu.addAction("Try SSH Login Again")
+            retry.setEnabled(self.worker is None and self.using_ssh())
+            actions[retry] = lambda: self.try_login(report)
+            connect = menu.addMenu(f"Switch: {report.name}")
+            actions.update(HostActions(self.window, menu).add_to(connect, report.address, name=report.name,
+                                                                 grouped=False))
+        menu.addSeparator()
+        actions[menu.addAction("Copy Row")] = lambda: QApplication.clipboard().setText("\t".join(
+            [report.name, report.address, report.snmp, report.ssh, report.login, report.note]))
+        chosen = menu.exec_(self.devices_table.viewport().mapToGlobal(position))
+        menu.deleteLater()
+        if chosen in actions:
+            actions[chosen]()
+
+    def try_login(self, report):
+        """Log in to one switch over SSH again (after fixing its credential, say), and say how it went."""
+        logins = self.ssh_logins()
+        if logins is None:
+            return
+        set_hint(self.status_label, f"Logging in to {report.name} over SSH...", "info")
+        trust, vault, factory = self.trust_check.isChecked(), self.store.vault, self.shell_factory or macssh.SshShell
+
+        def attempt():
+            asker = macssh.SshAsker(logins, vault, KnownHosts(), trust, shell_factory=factory)
+            try:
+                return asker.try_login(report.address, [report.name])
+            finally:
+                asker.close()
+
+        run_in_background(attempt, lambda outcome: self.on_login_tried(report, outcome),
+                          lambda error: self.on_login_tried(report, (False, "", str(error))))
+
+    def on_login_tried(self, report, outcome):
+        ok, login, problem = outcome
+        report = macfind.DeviceReport(report.key, report.name, report.address, report.snmp,
+                                      macfind.LOGGED_IN if ok else macfind.LOGIN_FAILED, login,
+                                      "" if ok else problem)
+        self.device_reports[report.key] = report
+        self.fill_devices()
+        if ok:
+            set_hint(self.status_label, f"Logged in to {report.name} over SSH ({login}). Locate Now again to ask "
+                                        "it.", "success")
+        else:
+            set_hint(self.status_label, f"{report.name}: couldn't log in over SSH: {problem}", "error")
 
     def on_names(self, names):
         for entry in self.entries:
@@ -828,12 +1137,18 @@ class MacFinderTab(QWidget):
         list_mode = self.list_button.isChecked()
         has_text = bool((self.list_input.toPlainText() if list_mode else self.search_input.text()).strip())
         network_map = self.open_map()
-        can_locate = network_map is not None and bool(self.readable_switches(network_map))
+        ssh = self.using_ssh()
+        can_locate = network_map is not None and bool(self.readable_switches(network_map) or (
+            ssh and (self.ssh_switches(network_map) or self.start_input.text().strip())))
+        can_locate = can_locate or (ssh and network_map is None and bool(self.start_input.text().strip()))
         self.find_button.setEnabled(not running and has_text)
         self.locate_button.setEnabled(not running and has_text and can_locate)
+        how = "over SNMP and SSH" if ssh else "over SNMP"
         self.locate_button.setToolTip(
-            "Ask the map's switches over SNMP where it is now (Shift+Enter)" if can_locate else
-            "Needs a network map with switches read over SNMP: crawl or open one on the Network Map page")
+            f"Ask the switches {how} where it is now (Shift+Enter)" if can_locate else
+            "Needs a network map with switches read over SNMP (crawl or open one on the Network Map page), or Also "
+            "over SSH with a switch to start at")
+        self.ssh_panel.setEnabled(not running)
         self.stop_button.setEnabled(running and not self.worker.stopping)
         self.list_button.setEnabled(not running)
         self.load_button.setEnabled(not running)

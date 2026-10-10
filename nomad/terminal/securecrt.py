@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from ..system import replace_file
 from .sessions import AUTH_KEY, DEFAULT_PORTS, RAW, SERIAL, SSH, TELNET, Session, normalize_folder
 
 IMPORT_FOLDER = "Imported from SecureCRT"
@@ -293,7 +294,7 @@ def write_securecrt_export(path, sessions, reveal=None, passphrase=""):
         with tempfile.NamedTemporaryFile(dir=os.path.dirname(os.path.abspath(path)), delete=False) as file:
             temporary = file.name
             ElementTree.ElementTree(root).write(file, encoding="utf-8", xml_declaration=True)
-        os.replace(temporary, path)
+        replace_file(temporary, path)
     finally:
         if temporary and os.path.exists(temporary):
             os.unlink(temporary)

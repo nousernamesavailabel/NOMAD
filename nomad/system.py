@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -140,3 +141,20 @@ def app_data_dir():
 
 def log_dir():
     return _data_dir("LOCALAPPDATA")
+
+
+REPLACE_TRIES = 20  # 50 ms apart: a second at most
+
+
+def replace_file(source, target):
+    """os.replace(source, target), putting a fully written file in place. Windows refuses it while something else has
+    either file open for a moment, as the virus scanner does just after one's written (about 1 in 30 saves in quick
+    succession): try again for a little while before giving up."""
+    for attempt in range(REPLACE_TRIES):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == REPLACE_TRIES - 1:
+                raise
+            time.sleep(0.05)

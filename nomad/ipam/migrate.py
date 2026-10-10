@@ -15,7 +15,6 @@ service, if the move is called off before anyone uses the new server.
 import datetime
 import io
 import json
-import os
 import secrets
 import shutil
 import socket
@@ -26,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import __version__
+from ..system import replace_file
 from .server import _map_secret_protection, load_config, save_config, server_dir
 from .store import IpamError
 
@@ -163,7 +163,7 @@ def export_server(path, password, new_hosts=(), new_port=None, directory=None):
     path = Path(path)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_bytes(blob)
-    os.replace(temporary, path)
+    replace_file(temporary, path)
     set_moved(new_hosts, new_port or config["port"], directory)
     return summary
 

@@ -200,3 +200,25 @@ def test_activation_in_address_column_launches_the_selected_session(page, monkey
     monkeypatch.setattr(page, "open_session", lambda session, **kwargs: calls.append(session))
     page.manager.tree.itemActivated.emit(page.manager.tree.currentItem(), 1)
     assert calls == [item]
+
+
+def test_quick_launch_can_log_in_with_a_saved_credential(page, monkeypatch):
+    from PyQt5.QtWidgets import QDialog
+    from nomad.terminal.sessions import Credential
+    from nomad.ui import credential_dialogs
+    store = page.store
+    credential = Credential("Domain", username="jsmith@corp", saved_password=store.vault.protect("pw1"))
+    store.credentials.put(credential, default=True)
+    monkeypatch.setattr(credential_dialogs.LoginDialog, "exec_", lambda dialog: QDialog.Accepted)
+    monkeypatch.setattr(rdp_tab, "ensure_unlocked", lambda *args: True)
+    calls = []
+    monkeypatch.setattr(rdp_tab, "launch_session", lambda session, password: calls.append((session.username, password)))
+    page.open_address("server", RDP)
+    assert calls == [("jsmith@corp", "pw1")]
+    assert store.recent[0].session.credential_id == credential.id  # Recent launches it the same way
+    page.open_session(store.recent_session(store.recent[0]))  # Without asking again
+    assert calls[-1] == ("jsmith@corp", "pw1")
+
+    monkeypatch.setattr(credential_dialogs.LoginDialog, "exec_", lambda dialog: QDialog.Rejected)
+    page.open_address("other", RDP)  # Cancelled: nothing launched or recorded
+    assert len(calls) == 2 and all(entry.session.host != "other" for entry in store.recent)

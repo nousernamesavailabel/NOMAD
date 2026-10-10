@@ -14,6 +14,7 @@ from .commands import CommandButton
 from .highlight import HighlightRule, Highlighter
 from .sessions import RDP, TERMINAL_PROTOCOLS, Credential, Session, SessionFolderStore, RecentEntry, \
     validate_credential, validate_session
+from ..system import replace_file
 from .vault import derive_key
 
 MAGIC = b"NOMAD-TERMINAL-BACKUP\x01"
@@ -66,7 +67,7 @@ def write_backup(path, password, store, commands, highlights, settings):
         with tempfile.NamedTemporaryFile(dir=os.path.dirname(os.path.abspath(path)), delete=False) as file:
             temporary = file.name
             file.write(MAGIC + salt + nonce + encrypted)
-        os.replace(temporary, path)
+        replace_file(temporary, path)
     finally:
         if temporary and os.path.exists(temporary):
             os.unlink(temporary)
@@ -228,7 +229,7 @@ def restore_backup(data, store, commands, highlights, settings):
             else:
                 with open(path + ".restore", "wb") as file:
                     file.write(content)
-                os.replace(path + ".restore", path)
+                replace_file(path + ".restore", path)
         for owner in (store, commands, highlights):
             for listener in list(owner.listeners):
                 listener()

@@ -7,7 +7,7 @@ import os
 import uuid
 from dataclasses import dataclass, field
 
-from ..system import app_data_dir
+from ..system import app_data_dir, replace_file
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class CommandStore:
         temporary = self.path + ".tmp"
         with open(temporary, "w", encoding="utf-8") as file:
             json.dump(data, file, indent=2)
-        os.replace(temporary, self.path)
+        replace_file(temporary, self.path)
         for listener in list(self.listeners):
             listener()
 

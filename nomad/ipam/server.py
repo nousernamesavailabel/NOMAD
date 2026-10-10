@@ -59,6 +59,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import __version__
+from ..system import replace_file
 from ..netmap.shared import MapError, MapStore
 from .store import IpamError, IpamStore
 from .placement import PlacementStore
@@ -118,7 +119,7 @@ def save_config(config, directory=None):
     directory = Path(directory or server_dir())
     temporary = directory / "config.json.tmp"
     temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    os.replace(temporary, directory / "config.json")
+    replace_file(temporary, directory / "config.json")
 
 
 def set_up(directory=None, port=DEFAULT_PORT):
@@ -618,12 +619,12 @@ class IpamServer:
                 self.store.db.backup(destination)
             finally:
                 destination.close()
-        os.replace(temporary, target)
+        replace_file(temporary, target)
         maps_target = folder / f"maps-{datetime.date.today().isoformat()}.db"
         maps_temporary = maps_target.with_name(f"{maps_target.stem}.{uuid.uuid4().hex[:8]}.tmp")
         with self.maps.lock:
             self.maps.backup(maps_temporary)
-        os.replace(maps_temporary, maps_target)
+        replace_file(maps_temporary, maps_target)
         keep = datetime.timedelta(days=int(self.config.get("backup_keep_days", BACKUP_KEEP_DAYS)))
         for old in list(folder.glob("ipam-*.db")) + list(folder.glob("maps-*.db")):
             try:

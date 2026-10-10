@@ -257,9 +257,9 @@ class CredentialsDialog(QDialog):
 class CredentialPicker(QWidget):
     """The "Credential:" row of a session editor: typed for this session, or a saved credential, plus Manage."""
 
-    def __init__(self, parent, store, protocol, credential_id=""):
+    def __init__(self, parent, store, protocol, credential_id="", own_text=OWN_LOGIN):
         super().__init__(parent)
-        self.store, self.protocol = store, protocol
+        self.store, self.protocol, self.own_text = store, protocol, own_text
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         self.combo = QComboBox()
@@ -274,7 +274,7 @@ class CredentialPicker(QWidget):
     def fill(self, select=""):
         self.combo.blockSignals(True)
         self.combo.clear()
-        self.combo.addItem(OWN_LOGIN, "")
+        self.combo.addItem(self.own_text, "")
         for credential in self.store.credentials.sorted(self.protocol):
             self.combo.addItem(f"{credential.name}  ({credential.summary()})", credential.id)
         self.combo.setCurrentIndex(max(0, self.combo.findData(select)))
@@ -295,6 +295,89 @@ class CredentialPicker(QWidget):
         CredentialsDialog(self.window(), self.store, before).exec_()
         self.fill(before)
         self.combo.currentIndexChanged.emit(self.combo.currentIndex())  # Its details may have changed
+
+
+class LoginDialog(QDialog):
+    """How to log in to a host with no saved session (a quick connection, or one from another page): with a saved
+    credential, starting on the default one, or as a user name typed here."""
+
+    def __init__(self, parent, store, protocol, host):
+        super().__init__(parent)
+        self.store, self.protocol = store, protocol
+        self.setWindowTitle("Log In")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Log in to {host} with:"))
+        form = QFormLayout()
+        default = store.credentials.default
+        usable = {credential.id for credential in store.credentials.sorted(protocol)}
+        self.picker = CredentialPicker(self, store, protocol, default.id if default and default.id in usable else "",
+                                       "A user name typed here")
+        form.addRow("Credential:", self.picker)
+        self.username_input = QLineEdit()
+        if protocol == RDP:
+            self.username_input.setPlaceholderText("Blank: Windows asks")
+        form.addRow("User name:", self.username_input)
+        layout.addLayout(form)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Log In")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self.typed = ""
+        self.picker.combo.currentIndexChanged.connect(self.update_fields)
+        self.username_input.textEdited.connect(self.remember_typed)
+        self.username_input.textChanged.connect(self.update_button)
+        self.update_fields()
+        self.setMinimumWidth(420)
+
+    def credential(self):
+        return self.picker.credential()
+
+    def username(self):
+        return self.username_input.text().strip()
+
+    def remember_typed(self, text):
+        self.typed = text
+
+    def update_fields(self):
+        """A credential shows its user name (fixed); typing one brings back what was typed."""
+        credential = self.credential()
+        self.username_input.setEnabled(credential is None)
+        self.username_input.setText(credential.username if credential is not None else self.typed)
+        self.update_button()
+        if credential is None:
+            self.username_input.setFocus()
+        else:
+            self.picker.combo.setFocus()
+
+    def update_button(self):
+        """SSH needs a user name; RDP can leave it to Windows to ask."""
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(self.protocol == RDP or self.credential() is not None
+                                                            or bool(self.username()))
+
+    def accept(self):
+        if self.credential() is None and self.protocol != RDP and not self.username():
+            return
+        super().accept()
+
+
+def login_with(parent, store, session):
+    """For a connection with no saved session and no user name: when there are saved credentials it could use, ask
+    which to log in with (or a user name typed instead) and fill it in. Returns False if cancelled, True otherwise
+    (also when there was nothing to ask)."""
+    if store is None or store.get(session.id) is not None or session.username or session.credential_id \
+            or not store.credentials.sorted(session.protocol):
+        return True
+    dialog = LoginDialog(parent, store, session.protocol, session.host)
+    if dialog.exec_() != QDialog.Accepted:
+        return False
+    credential = dialog.credential()
+    if credential is None:
+        session.username = dialog.username()
+    else:
+        session.credential_id = credential.id
+        store.credentials.apply(session)
+    return True
 
 
 def default_credential_id(store, session):

@@ -51,6 +51,11 @@ class Prompter:
         """A line of text (such as a user name), or None if cancelled."""
         return None
 
+    def username(self, host):
+        """The user name to log in to host as, or None if cancelled. The UI may have the session log in with a saved
+        credential instead, filling in its user name and password or key."""
+        return self.text("User Name", f"User name for {host}:")
+
     def unlock_vault(self):
         """Ask for the master password so saved secrets can be used. True once unlocked, False if declined."""
         return False
@@ -309,7 +314,7 @@ class SshTransport(Transport):
                 from None
 
         self.check_host_key(host, port)
-        username = session.username.strip() or self.prompter.text("User Name", f"User name for {host}:")
+        username = session.username.strip() or self.prompter.username(host)
         if not username:
             self.close()
             raise Cancelled()

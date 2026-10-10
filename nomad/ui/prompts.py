@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QInputDialog, 
     QVBoxLayout
 
 from ..terminal.transports import Prompter
+from .credential_dialogs import login_with
 from .vault_dialog import ensure_unlocked, protect_secret
 
 
@@ -17,7 +18,7 @@ class _Request:
 
 
 class SecretDialog(QDialog):
-    def __init__(self, parent, title, prompt, can_save):
+    def __init__(self, parent, title, prompt, can_save, save_text="Save it (encrypted for your Windows account)"):
         super().__init__(parent)
         self.setWindowTitle(title)
         layout = QVBoxLayout(self)
@@ -27,7 +28,7 @@ class SecretDialog(QDialog):
         self.field = QLineEdit()
         self.field.setEchoMode(QLineEdit.Password)
         layout.addWidget(self.field)
-        self.save_check = QCheckBox("Save it (encrypted for your Windows account)")
+        self.save_check = QCheckBox(save_text)
         self.save_check.setVisible(can_save)
         layout.addWidget(self.save_check)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -76,6 +77,9 @@ class UiPrompter(Prompter):
     def text(self, title, prompt):
         return self.ask("text", title, prompt)
 
+    def username(self, host):
+        return self.ask("username", host)
+
     def unlock_vault(self):
         return bool(self.ask("unlock"))
 
@@ -99,7 +103,11 @@ class PromptAnswers:
         if kind == "secret":
             title, prompt, can_save = arguments
             saved_session = self.store is not None and self.store.get(self.session.id) is not None
-            dialog = SecretDialog(self, title, prompt, can_save and saved_session)
+            credential = self.store.credentials.get(self.session.credential_id) if self.store is not None else None
+            if saved_session or credential is None:
+                dialog = SecretDialog(self, title, prompt, can_save and saved_session)
+            else:  # A connection logging in with a credential, not saved: the credential can keep it
+                dialog = SecretDialog(self, title, prompt, can_save, f"Save it in the credential {credential.name}")
             if dialog.exec_() != QDialog.Accepted:
                 return None
             return dialog.field.text(), dialog.save_check.isChecked()
@@ -107,6 +115,8 @@ class PromptAnswers:
             title, prompt = arguments
             value, ok = QInputDialog.getText(self, title, prompt)
             return value if ok else None
+        if kind == "username":
+            return self.ask_username(*arguments)
         if kind == "unlock":
             if self.store is None:
                 return False
@@ -117,6 +127,17 @@ class PromptAnswers:
             self.save_secret(secret_kind, value)
             return None
         return None
+
+    def ask_username(self, host):
+        """No user name yet: for a connection with no saved session, a saved credential can be picked instead."""
+        store = self.store
+        if store is not None and store.get(self.session.id) is None and store.credentials.sorted(self.session.protocol):
+            if not login_with(self, store, self.session):
+                return None
+            store.remember(self.session)  # Recent opens it the same way next time
+            return self.session.username
+        value, ok = QInputDialog.getText(self, "User Name", f"User name for {host}:")
+        return value if ok else None
 
     def ask_host_key(self, host, port, key_type, fingerprint, changed, old_fingerprint):
         where = host if int(port) == 22 else f"{host} port {port}"
@@ -147,7 +168,11 @@ class PromptAnswers:
         return "trust" if clicked is trust else "once" if clicked is once else "cancel"
 
     def save_secret(self, kind, value):
-        if self.store is None or self.store.get(self.session.id) is None:
+        if self.store is None:
+            return
+        stored = self.store.get(self.session.id)
+        credential = self.store.credentials.get((stored or self.session).credential_id)
+        if stored is None and credential is None:
             return
         try:
             encrypted = protect_secret(self, self.store, value)
@@ -157,16 +182,15 @@ class PromptAnswers:
         if encrypted is None:
             self.report(f"The {kind} wasn't saved (the master password wasn't entered).", True)
             return
-        stored = self.store.get(self.session.id)
-        credential = self.store.credentials.get(stored.credential_id)
         if credential is not None:  # Shared: save it there, so every session using it gets the new one
             if kind == "password":
                 credential.saved_password = encrypted
             else:
                 credential.saved_passphrase = encrypted
             self.store.credentials.put(credential)
-            self.session.saved_password, self.session.saved_passphrase = (stored.saved_password,
-                                                                          stored.saved_passphrase)
+            source = stored if stored is not None else self.store.credentials.apply(self.session)
+            self.session.saved_password, self.session.saved_passphrase = (source.saved_password,
+                                                                          source.saved_passphrase)
             self.report(f"Saved the {kind} in the credential {credential.name}, for every session using it.", False)
             return
         if kind == "password":

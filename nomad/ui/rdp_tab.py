@@ -10,6 +10,7 @@ from ..terminal.credentials import CredentialError
 from ..terminal.sessions import RDP, Session, SessionFolderStore, target_key, validate_session
 from ..terminal.vault import VaultError, VaultLocked
 from .common import set_hint
+from .credential_dialogs import login_with
 from .rdp_dialog import RdpDialog
 from .session_manager import RECENT_ROLE, SESSION_ROLE, SessionManager
 from .session_page import SessionPage
@@ -211,6 +212,8 @@ class RdpTab(QWidget):
         problem = validate_session(session)
         if problem:
             QMessageBox.warning(self, "Remote Desktop", problem)
+            return None
+        if not login_with(self, self.store, session):  # Not saved and no user name: perhaps a saved credential
             return None
         password = ""
         if session.saved_password:

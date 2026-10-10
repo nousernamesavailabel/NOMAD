@@ -15,7 +15,7 @@ from ..system import APP_FULL_NAME, APP_NAME, is_admin, relaunch_as_admin
 from ..terminal.sessions import SessionFolderStore, SessionStore, TERMINAL_PROTOCOLS
 from .adapter_tab import AdapterTab
 from .capture_tab import CaptureTab
-from .common import run_in_background
+from .common import add_action, run_in_background
 from .connections_tab import ConnectionsTab
 from .dhcp_tab import DhcpTab
 from .dialogs import AboutDialog, LogDialog
@@ -159,6 +159,7 @@ class MainWindow(QMainWindow):
         self.sweep_tab = SweepTab(self)
         self.netmap_tab = NetworkMapTab(self)
         self.switch_tab = SwitchTab(self)
+        self.session_store = SessionStore()  # Shared by Terminal, SCP and RDP (and MAC Finder's SSH logins)
         self.mac_finder_tab = MacFinderTab(self)  # Searches the Network Map's crawls
         self.dhcp_tab = DhcpTab(self)
         self.snmp_tab = SnmpTab(self)
@@ -172,7 +173,6 @@ class MainWindow(QMainWindow):
         self.snmp_config_tab = SnmpConfigTab(self)
         self.inventory_tab = InventoryTab(self)  # The Network Map's devices and the saved sessions
         self.wake_tab = WakeTab(self)
-        self.session_store = SessionStore()  # Shared by Terminal, SCP and RDP
         terminal_store = SessionFolderStore(self.session_store, TERMINAL_PROTOCOLS)
         self.terminal_tab = TerminalTab(self, terminal_store)
         self.scp_tab = ScpTab(self, terminal_store)
@@ -279,10 +279,10 @@ class MainWindow(QMainWindow):
             layout_group.addAction(action)
         layout_menu.aboutToShow.connect(lambda: [action.setChecked(action.data() == self.terminal_tab.tabs.layout_key)
                                                  for action in layout_group.actions()])
-        self.buttons_action = view_menu.addAction("Terminal Command &Buttons", self.toggle_command_buttons)
+        self.buttons_action = add_action(view_menu, "Terminal Command &Buttons", self.toggle_command_buttons)
         self.buttons_action.setCheckable(True)
-        self.highlight_action = view_menu.addAction(
-            "&Highlight Terminal Keywords", lambda checked: self.terminal_tab.highlights.set_enabled(checked))
+        self.highlight_action = add_action(
+            view_menu, "&Highlight Terminal Keywords", lambda checked: self.terminal_tab.highlights.set_enabled(checked))
         self.highlight_action.setCheckable(True)
         view_menu.addAction("Terminal &Keyword Highlighting...",
                             lambda: HighlightDialog(self, self.terminal_tab.highlights).exec_())

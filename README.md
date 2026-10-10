@@ -65,7 +65,8 @@ computer name or IP address, port and username (`DOMAIN\user` or `user@domain`),
 The full-width session list shows addresses, usernames, password status, display mode and last launch. Search and
 Quick connect are above the list, with launch/edit actions in the toolbar and a compact summary below it.
 Double-click a session or click **Launch** to open Windows Remote Desktop Connection. Quick connect accepts
-`host`, `host:3390` or `[IPv6]:3389`; recent launches can be saved as sessions. Display options include full screen,
+`host`, `host:3390` or `[IPv6]:3389`; with saved credentials, it asks which one to log in with (the default
+credential first). Recent launches can be saved as sessions. Display options include full screen,
 window size and all monitors, plus clipboard, audio and administrative sessions. Windows policies may still require
 interactive sign-in. NOMAD hands passwords to the client in an encrypted temporary `.rdp` file, normally deleted
 after one minute; files left by an interrupted launch expire after 24 hours and are cleaned up next time the RDP
@@ -78,7 +79,7 @@ backups include RDP sessions, credentials and page preferences.
 | --- | --- |
 | **Sweep** | Finds every host on a subnet (ping, plus ARP on local subnets), with names, MACs and vendors. **Compare with IPAM** shows which hosts IPAM has, is missing or records with a different MAC. |
 | **Switch Port** | Which switch, port and VLAN you're plugged into, from LLDP and CDP. |
-| **MAC Finder** | Which switch and port a device is plugged into: type its MAC address in any format (or part of one), its IP address or its name. **Find** searches the Network Map's last crawl at once; **Locate Now** asks the map's switches over SNMP where it is now, following uplinks to the edge port. Paste or load a list to find many at once, and see where each MAC has been. |
+| **MAC Finder** | Which switch and port a device is plugged into: type its MAC address in any format (or part of one), its IP address or its name. **Find** searches the Network Map's last crawl at once; **Locate Now** asks the map's switches over SNMP where it is now, following uplinks to the edge port. Tick **Also over SSH** to ask the switches that don't answer SNMP at their command line too (Cisco IOS, IOS XE and NX-OS show commands), following the MAC through CDP and LLDP onto switches the map doesn't have, or with no map at all from a switch you name. Paste or load a list to find many at once, and see where each MAC has been. |
 | **DHCP Servers** | Every DHCP server that answers, with each option it offers decoded, and warns about rogue servers. Nothing is leased. |
 | **SNMP Walk** | Walk or get over SNMP v1, v2c or v3 (a user with authentication and privacy), with presets and a per-port interface summary. |
 
@@ -175,7 +176,7 @@ The **SNMP Config** page (under SNMP) builds the Cisco IOS / IOS-XE configuratio
 - Save sessions in folders, and import them from PuTTY or a SecureCRT export.
 - **File > Export SSH Sessions to SecureCRT...** writes an XML file for SecureCRT's **Tools > Import Settings from XML File**. Includes folders, hosts, ports, usernames, notes, private key paths and saved SSH passwords. When passwords are present, unlock NOMAD if needed and enter/confirm the destination SecureCRT configuration passphrase. Passwords are encrypted in SecureCRT's salted `03:` format; the destination must use the same configuration passphrase before importing (set one in SecureCRT first if needed). The export does not change SecureCRT's global security settings. Private key contents and saved key passphrases are excluded.
 - **File > Export / Import NOMAD Terminal Settings and Sessions...** saves or restores a password-protected `.nomad` backup: all saved sessions and credentials, empty folders, recent connections, command buttons, highlighting, Terminal/SCP preferences and text scale. Import replaces these settings after confirmation and protects credentials with the destination installation's Windows account and current NOMAD master password. Keep the backup password to restore on another computer. Private keys and logs remain external files; live connections are not part of the backup.
-- **Quick connect** takes `admin@10.0.0.1`, `telnet 10.0.0.5`, `raw 10.0.0.9:9100` or `COM3:115200`.
+- **Quick connect** takes `admin@10.0.0.1`, `telnet 10.0.0.5`, `raw 10.0.0.9:9100` or `COM3:115200`. An SSH connection with no user name (quick connect, or Connect > SSH on a host with no saved session) asks which saved credential to log in with, starting on the default one, or takes a user name typed instead; Recent reopens it the same way.
 - **Recent** at the top of the list keeps your last 10 connections.
 - **Layout** tiles sessions side by side, stacked, or in a 2 × 2 or 3 × 2 grid. Drag tabs between panes and windows.
 - Pop any tab out into its own window (right-click the tab).

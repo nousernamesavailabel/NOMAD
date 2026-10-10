@@ -26,7 +26,7 @@ from ..ipam.vlan_team import TeamVlanStore
 from ..ipam.vlans import STATUSES, VlanStore, name_problem, range_for
 from ..netmap import store as map_store
 from ..netmap import vlans as map_vlans
-from .common import SortableTableItem, set_hint
+from .common import SortableTableItem, add_action, set_hint
 from .integration import PLACEMENT, hub, link
 from .ipam_tab import ago
 from .table_filter import TableFilter
@@ -77,14 +77,15 @@ class VlanTab(QWidget):
         self.domain_button.setText("Domain")
         self.domain_button.setPopupMode(QToolButton.InstantPopup)
         self.domain_menu = QMenu(self.domain_button)
-        self.edit_domain_action = self.domain_menu.addAction("Edit Domain...", self.edit_domain)
-        self.delete_domain_action = self.domain_menu.addAction("Delete Domain...", self.delete_domain)
-        self.domain_history_action = self.domain_menu.addAction("Domain History...", self.show_domain_history)
+        self.edit_domain_action = add_action(self.domain_menu, "Edit Domain...", self.edit_domain)
+        self.delete_domain_action = add_action(self.domain_menu, "Delete Domain...", self.delete_domain)
+        self.domain_history_action = add_action(self.domain_menu, "Domain History...", self.show_domain_history)
         self.domain_menu.addSeparator()
-        self.link_action = self.domain_menu.addAction("Link Subnets Named for VLANs...", self.link_from_names)
-        self.import_action = self.domain_menu.addAction("Bring in VLANs from a Network Map...", self.bring_in_from_map)
+        self.link_action = add_action(self.domain_menu, "Link Subnets Named for VLANs...", self.link_from_names)
+        self.import_action = add_action(self.domain_menu, "Bring in VLANs from a Network Map...",
+                                        self.bring_in_from_map)
         self.domain_menu.addSeparator()
-        self.export_action = self.domain_menu.addAction("Export to CSV...", self.export_csv)
+        self.export_action = add_action(self.domain_menu, "Export to CSV...", self.export_csv)
         self.domain_button.setMenu(self.domain_menu)
         top.addWidget(self.domain_button)
         self.network_domain_button = QPushButton()
