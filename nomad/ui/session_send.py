@@ -99,7 +99,6 @@ class SessionSender(QObject):
                          "refused. Type enable (and its password) in the session first.")
             icon = QMessageBox.Warning
         box = QMessageBox(icon, "Send to Session", question, QMessageBox.Yes | QMessageBox.No, self.page)
-        box.setDefaultButton(QMessageBox.Yes if prompt.endswith("#") else QMessageBox.No)
         if box.exec_() != QMessageBox.Yes:
             return False
         if not view.send_block(text, min_delay=SEND_DELAY):

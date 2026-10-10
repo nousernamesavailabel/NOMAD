@@ -562,8 +562,7 @@ class AdapterTab(QWidget):
         if self.carries_default_route(adapter):
             message += ("\n\nThis adapter has the default gateway, so this computer will probably lose internet "
                         "access (and any remote session through it) until it reconnects.")
-        return QMessageBox.question(self, title, message, QMessageBox.Yes | QMessageBox.No,
-                                    QMessageBox.No) == QMessageBox.Yes
+        return QMessageBox.question(self, title, message, QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
 
     def toggle_adapter_enabled(self):
         adapter = self.window.current_adapter()
@@ -685,7 +684,7 @@ class AdapterTab(QWidget):
         if profile is None:
             return
         if QMessageBox.question(self, "Delete Profile", f"Delete the profile '{profile.name}'?",
-                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         self.window.profile_store.delete(profile.name)
         self.refresh_profiles_combo()

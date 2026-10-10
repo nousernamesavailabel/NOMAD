@@ -242,8 +242,7 @@ class RemoteEditor(QMainWindow):
         if status == "changed":
             reply = QMessageBox.warning(self, "Changed on the Server",
                                         f"{self.entry.name} has changed on the server since you opened it. Replace "
-                                        "it with your version anyway?", QMessageBox.Yes | QMessageBox.No,
-                                        QMessageBox.No)
+                                        "it with your version anyway?", QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
                 self.save(force=True)
             else:
@@ -265,7 +264,7 @@ class RemoteEditor(QMainWindow):
     def reload(self):
         if self.editor.document().isModified():
             reply = QMessageBox.question(self, "Reload", "Throw away your changes and load the server's copy again?",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                         QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
 

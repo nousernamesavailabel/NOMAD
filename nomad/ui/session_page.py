@@ -231,7 +231,7 @@ class SessionPage(QWidget):
         reply = QMessageBox.question(self.window, "Sessions Open",
                                      f"{count} {self.kind}{'' if count == 1 else 's'} "
                                      f"{'is' if count == 1 else 'are'} still connected. Close NOMAD and "
-                                     "disconnect?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                     "disconnect?", QMessageBox.Yes | QMessageBox.No)
         return reply == QMessageBox.Yes
 
     # ----------------------------------------------------------------- Opening sessions

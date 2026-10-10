@@ -76,7 +76,7 @@ def forget_everything(parent, store):
         parent, "Forget Saved Passwords",
         "A forgotten master password can't be recovered, so the passwords saved with it can't be read.\n\n"
         "Forget every saved password and key passphrase, and turn the master password off? Your sessions are kept; "
-        "NOMAD will ask for passwords when you connect.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        "NOMAD will ask for passwords when you connect.", QMessageBox.Yes | QMessageBox.No)
     if reply != QMessageBox.Yes:
         return False
     count = store.vault.forget_everything(vault_sessions(store))

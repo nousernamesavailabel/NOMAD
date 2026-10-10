@@ -246,7 +246,7 @@ class NetworkResetTab(QWidget):
     def run_action(self, action):
         if action.warning:
             reply = QMessageBox.question(self, action.title, f"{action.warning}\n\nContinue?",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                         QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
         function = clear_neighbor_cache if action.key == CLEAR_ARP.key else (lambda: run_reset(action))
@@ -280,7 +280,7 @@ class NetworkResetTab(QWidget):
     def restart(self):
         reply = QMessageBox.question(self, "Restart Now",
                                      f"Restart the computer in {RESTART_DELAY_SECONDS} seconds? Save your work in "
-                                     "other programs first.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                     "other programs first.", QMessageBox.Yes | QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
         try:

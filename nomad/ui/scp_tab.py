@@ -37,5 +37,5 @@ class ScpTab(SessionPage):
             return True
         lines = [f"{view.session.name}: {' and '.join(view.problems())}" for view in problems]
         reply = QMessageBox.question(self.window, "SCP", "\n".join(lines) + "\n\nClose NOMAD anyway?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                     QMessageBox.Yes | QMessageBox.No)
         return reply == QMessageBox.Yes

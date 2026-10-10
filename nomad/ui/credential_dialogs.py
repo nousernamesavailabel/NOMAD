@@ -249,8 +249,7 @@ class CredentialsDialog(QDialog):
         if users:
             text += (f"\n\nThe {sessions_text(len(users))} using it keep its user name and saved password as their "
                      "own, so they still connect.")
-        if QMessageBox.question(self, "Delete Credential", text, QMessageBox.Yes | QMessageBox.No,
-                                QMessageBox.No) == QMessageBox.Yes:
+        if QMessageBox.question(self, "Delete Credential", text, QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
             self.store.credentials.delete(credential.id)
             self.fill()
 

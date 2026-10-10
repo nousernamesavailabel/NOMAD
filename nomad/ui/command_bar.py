@@ -353,6 +353,6 @@ class CommandBar(QFrame):
 
     def delete(self, button):
         reply = QMessageBox.question(self, "Delete Button", f"Delete the {button.name} button?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                     QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.store.delete(button.id)

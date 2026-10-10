@@ -512,7 +512,7 @@ class RoutingTab(QWidget):
             reply = QMessageBox.warning(
                 self, "Update Default Route",
                 "Updating the default route removes it briefly, which interrupts network traffic. Continue?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
 
@@ -565,7 +565,7 @@ class RoutingTab(QWidget):
                 message += "\n\nThis route is persistent; it will also be removed from the saved routes."
 
         ask = QMessageBox.warning if route.is_default or route.is_system else QMessageBox.question
-        if ask(self, "Confirm Delete", message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if ask(self, "Confirm Delete", message, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
 
         def deleted(_):

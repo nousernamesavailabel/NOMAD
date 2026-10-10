@@ -16,6 +16,7 @@ from nomad.system import APP_NAME, LEGACY_APP_NAME
 from nomad.ui.main_window import MainWindow
 from nomad.ui.icon import app_icon
 from nomad.ui.theme import apply_theme
+from nomad.ui.yes_default import install_yes_by_default
 
 log = logging.getLogger("nomad")
 
@@ -72,6 +73,7 @@ def main():
     app.setApplicationVersion(__version__)
     migrate_settings()
     apply_theme(app)
+    install_yes_by_default(app)
     app.setWindowIcon(app_icon())
     window = MainWindow(memory_log_handler)
     window.show()

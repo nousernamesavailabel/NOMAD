@@ -270,7 +270,7 @@ class SweepTab(QWidget):
         if len(hosts) > LARGE_SWEEP_HOSTS:
             reply = QMessageBox.question(self, "Large Sweep",
                                          f"{network} has {len(hosts):,} addresses, which will take a while.\n\n"
-                                         "Sweep it anyway?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                         "Sweep it anyway?", QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
 

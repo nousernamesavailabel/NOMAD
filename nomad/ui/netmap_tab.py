@@ -32,7 +32,7 @@ from ..netmap.layout import BOTTOM, CENTER, GROUP_PAD, GROUP_TITLE, HORIZONTAL, 
 from ..netmap.placement import places as subnet_places
 from ..netmap.tribe import SECRETS
 from ..netmap.model import BUILDING, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIND_NAMES, NO_SNMP, PARENT_KIND, \
-    ROUTER, SNMP, SWITCH, UNCHECKED, UNREACHABLE, Group, NetworkMap, display_name, port_key, short_port
+    ROUTER, SNMP, SWITCH, UNCHECKED, UNREACHABLE, Group, Link, NetworkMap, display_name, port_key, short_port
 from ..snmp import V2C
 from ..snmpv3 import is_v3
 from ..terminal.credentials import CredentialError, protect, unprotect
@@ -2666,8 +2666,7 @@ class NetworkMapTab(QWidget):
         if found:
             text += ("\n\nHosts the crawl found come back the next time you map, if they're still plugged in."
                      if len(hosts) > 1 else "\n\nIt comes back the next time you map, if it's still plugged in.")
-        if QMessageBox.question(self, "Delete Hosts", text, QMessageBox.Yes | QMessageBox.No,
-                                QMessageBox.No) != QMessageBox.Yes:
+        if QMessageBox.question(self, "Delete Hosts", text, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         doomed = {id(host) for host in hosts}
         self.network_map.hosts = [host for host in self.network_map.hosts if id(host) not in doomed]
@@ -2712,8 +2711,13 @@ class NetworkMapTab(QWidget):
         if self.current_view() is self.view and self.view.items_by_key.get(key) is not None \
                 and self.view.items_by_key[key].isVisible():
             actions[menu.addAction("Draw Link from Here")] = lambda: self.draw_link_from(key)
-        if len(network_map.devices) > 1:
-            actions[menu.addAction("Add Link...")] = lambda: self.add_link(key)
+        # Add Link links it to the other device selected, or to each of the others when there are more
+        others = [item for item in keys if item != key and item in network_map.devices]
+        if len(others) > 1:
+            actions[menu.addAction(f"Link to the {len(others)} Others Selected...")] = \
+                lambda: self.link_to_each(key, others)
+        elif len(network_map.devices) > 1:
+            actions[menu.addAction("Add Link...")] = lambda: self.add_link(key, others[0] if others else "")
         actions[menu.addAction("Add Device Linked to This...")] = lambda: self.add_device(linked_to=key)
         edit = menu.addAction("Edit Device..." if device.manual else "Correct Device...")
         actions[edit] = lambda: self.edit_device(key)
@@ -2754,7 +2758,9 @@ class NetworkMapTab(QWidget):
         place = (scene_position.x(), scene_position.y())
         actions[menu.addAction("Add Device Here...")] = lambda: self.add_device(place=place)
         if self.network_map is not None and len(self.network_map.devices) > 1:
-            actions[menu.addAction("Add Link...")] = lambda: self.add_link()
+            ends = [key for key in self.view.selected_keys() if key in self.network_map.devices]
+            ends = ends if len(ends) == 2 else ["", ""]  # Two devices selected: the link between them
+            actions[menu.addAction("Add Link...")] = lambda: self.add_link(*ends)
         if self.network_map is not None and self.network_map.deleted:
             actions[menu.addAction(f"Deleted Devices ({len(self.network_map.deleted)})...")] = \
                 self.show_deleted_devices
@@ -3009,8 +3015,7 @@ class NetworkMapTab(QWidget):
             which = ("it" if len(keys) == 1 else "them") if found == len(keys) else "the ones the crawl found"
             text += (f"\n\nMapping again leaves {which} off the map, and doesn't crawl through {which} to what's "
                      "beyond. To put them back, right-click the map's background > Deleted Devices.")
-        if QMessageBox.question(self, "Delete Devices", text, QMessageBox.Yes | QMessageBox.No,
-                                QMessageBox.No) != QMessageBox.Yes:
+        if QMessageBox.question(self, "Delete Devices", text, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         network_map.remove_devices(keys, remember=True)
         self.map_changed()
@@ -3049,6 +3054,31 @@ class NetworkMapTab(QWidget):
                  f"{network_map.devices[link.b].label}. It's drawn dotted, and kept when you map again until the "
                  "crawl finds a link between them.", "success")
 
+    def link_to_each(self, key, others):
+        """Draw a link by hand (no ports) from a device to each of the others, but not where they're linked already."""
+        network_map = self.network_map
+        if network_map is None or key not in network_map.devices or self.worker is not None:
+            return
+        linked = {link.other(key) for link in network_map.links if key in (link.a, link.b)}
+        new = [other for other in others if other in network_map.devices and other not in linked]
+        name = network_map.devices[key].label
+        if not new:
+            set_hint(self.status_label, f"{name} is already linked to all of them.", "info")
+            return
+        text = f"Link {name} to {count_text(len(new), 'device')}?\n\n" + \
+            "\n".join(network_map.devices[other].label for other in new)
+        if len(new) < len(others):
+            text += f"\n\n({count_text(len(others) - len(new), 'other').capitalize()} already linked to it.)"
+        text += "\n\nThe ports are left blank: Edit Link on each to fill them in."
+        if QMessageBox.question(self, "Add Links", text, QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.Yes) != QMessageBox.Yes:
+            return
+        for other in new:
+            network_map.add_link(Link(key, "", other, "", manual=True))
+        self.map_changed()
+        set_hint(self.status_label, f"Linked {name} to {count_text(len(new), 'device')}. They're drawn dotted, and "
+                 "kept when you map again until the crawl finds links between them.", "success")
+
     def edit_link(self, link):
         if self.network_map is None or link not in self.network_map.links or self.worker is not None:
             return
@@ -3063,7 +3093,7 @@ class NetworkMapTab(QWidget):
             return
         what = "this link" if len(links) == 1 else f"these {len(links)} links"
         if QMessageBox.question(self, "Delete Links", f"Delete {what} drawn by hand?",
-                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         doomed = {id(link) for link in links}
         self.network_map.links = [link for link in self.network_map.links if id(link) not in doomed]

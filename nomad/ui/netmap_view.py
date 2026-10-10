@@ -1363,8 +1363,10 @@ class MapView(QGraphicsView):
         self.viewport().unsetCursor()
 
     def device_at(self, pos):
-        """The device drawn at a point in the view (or whose hosts' box is there), or None."""
-        item = self.itemAt(pos)
+        """The device drawn at a point in the view (or whose hosts' box is there), or None. The line being drawn
+        by hand ends under the mouse, on top of everything: look beneath it."""
+        rubber = self.drawing[1] if self.drawing is not None else None
+        item = next((item for item in self.items(pos) if item is not rubber), None)
         while item is not None and not isinstance(item, DeviceItem):
             item = item.parentItem()
         return item

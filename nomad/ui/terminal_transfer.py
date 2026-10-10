@@ -125,7 +125,7 @@ def import_terminal(window):
                                   "highlighting and Terminal/SCP/RDP preferences. Existing live connections stay open. "
                                   "Credentials will use this installation's master password protection.\n\n"
                                   "Export a backup first if you want to keep the current configuration.",
-                                  QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                  QMessageBox.Yes | QMessageBox.No)
     if answer != QMessageBox.Yes:
         return
     if not ensure_unlocked(window, tab.store, "Unlock NOMAD to restore the saved credentials."):

@@ -7,8 +7,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
 from netmap_fakes import build_network  # noqa: E402
-from PyQt5.QtCore import QPoint, QSettings, Qt, pyqtSignal  # noqa: E402
-from PyQt5.QtGui import QKeySequence  # noqa: E402
+from PyQt5.QtCore import QEvent, QPoint, QPointF, QSettings, Qt, pyqtSignal  # noqa: E402
+from PyQt5.QtGui import QKeySequence, QMouseEvent  # noqa: E402
 from PyQt5.QtTest import QTest  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QDialog, QMenu, QMessageBox, QShortcut, QWidget  # noqa: E402
 
@@ -334,8 +334,12 @@ def test_drawing_a_link_on_the_map(tab, monkeypatch):
     accept_with(monkeypatch, LinkDialog, fill)
     tab.draw_link_from("acc1")
     assert tab.view.drawing is not None
-    QTest.mouseClick(tab.view.viewport(), Qt.LeftButton, Qt.NoModifier,
-                     tab.view.mapFromScene(tab.view.items_by_key["acc2"].pos()))
+    target = tab.view.mapFromScene(tab.view.items_by_key["acc2"].pos())
+    QApplication.sendEvent(tab.view.viewport(), QMouseEvent(QEvent.MouseMove, QPointF(target), Qt.NoButton,
+                                                            Qt.NoButton, Qt.NoModifier))
+    # The line now ends under the mouse, on top of acc2: the click still finds acc2 beneath it
+    assert tab.view.drawing[1].line().p2() == tab.view.mapToScene(target)
+    QTest.mouseClick(tab.view.viewport(), Qt.LeftButton, Qt.NoModifier, target)
     assert tab.view.drawing is None and ports["ends"] == ("acc1", "acc2")
     drawn = next(link for link in tab.network_map.links if link.manual)
     assert (drawn.a, drawn.a_port, drawn.b) == ("acc1", "Gi1/0/48", "acc2")
@@ -353,6 +357,55 @@ def test_drawing_a_link_on_the_map(tab, monkeypatch):
     tab.delete_links([drawn])
     assert drawn not in tab.network_map.links
     tab.hide()
+
+
+def by_hand_menu(tab, key, keys):
+    menu, actions = QMenu(), {}
+    tab.add_by_hand_actions(menu, actions, key, keys)
+    return {action.text(): handler for action, handler in actions.items()}
+
+
+def test_add_link_links_the_devices_selected(tab, monkeypatch):
+    tab.on_crawled(crawl())
+    ends = []
+
+    class Asked(LinkDialog):  # Note the ends it's opened with, and cancel
+        def exec_(self):
+            ends.append((self.a_combo.currentData(), self.b_combo.currentData()))
+            return QDialog.Rejected
+    monkeypatch.setattr(netmap_tab, "LinkDialog", Asked)
+    by_hand_menu(tab, "acc1", ["acc1", "acc2"])["Add Link..."]()  # Two selected: the link between them
+    assert ends == [("acc1", "acc2")]
+    by_hand_menu(tab, "acc1", ["acc1"])["Add Link..."]()  # Only this one: choose the other end
+    assert ends[-1][0] == "acc1" and len(ends) == 2
+
+    tab.view.items_by_key["core"].setSelected(True)
+    tab.view.items_by_key["rtr1"].setSelected(True)
+    monkeypatch.setattr(QMenu, "exec_", lambda menu, *args: next(action for action in menu.actions()
+                                                                  if action.text() == "Add Link..."))
+    tab.show_background_menu(tab.view.mapToScene(QPoint(2, 2)), QPoint(2, 2))
+    assert set(ends[-1]) == {"core", "rtr1"}  # The background's Add Link: between the two selected
+
+
+def test_link_to_each_of_the_others_selected(tab, monkeypatch):
+    tab.on_crawled(crawl())
+    network_map = tab.network_map
+    others = [key for key in network_map.devices if key != "acc1"]
+    linked = {link.other("acc1") for link in network_map.links if "acc1" in (link.a, link.b)}
+    assert linked and set(others) - linked
+    menu = by_hand_menu(tab, "acc1", ["acc1"] + others)
+    assert "Add Link..." not in menu
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: asked.append(args[2]) or QMessageBox.Yes)
+    before = len(network_map.links)
+    menu[f"Link to the {len(others)} Others Selected..."]()
+    new = [link for link in tab.network_map.links if link.manual]
+    assert len(tab.network_map.links) == before + len(set(others) - linked)
+    assert {link.b for link in new} == set(others) - linked and all(link.a == "acc1" for link in new)
+    assert "already linked" in asked[0]
+    asked.clear()
+    tab.link_to_each("acc1", others)  # All linked now: nothing to ask
+    assert not asked and "already linked to all" in tab.status_label.text()
 
 
 # ----------------------------------------------------------------- Devices the crawl found, corrected by hand

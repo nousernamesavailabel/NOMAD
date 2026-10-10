@@ -6,6 +6,20 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.25.1] - 2026-10-10
+
+### Added
+
+- **Network Map:** with two devices selected, **Add Link...** (on either one's menu, or the map's background) opens with the link between them filled in. With more selected, a device's menu has **Link to the N Others Selected...**, which draws a link by hand from it to each of the others it isn't linked to already (ports left blank, to fill in with Edit Link).
+
+### Changed
+
+- **Yes is the default** in every yes/no question NOMAD asks, deleting included: Enter answers Yes (or OK) unless you Tab to No (or Cancel). Questions with more than two answers (such as Save / Discard / Cancel, or a changed host key) keep their own default.
+
+### Fixed
+
+- **Network Map:** clicking a device to finish a link being drawn by hand (Draw Link from Here) could miss it, because the line being drawn ends under the mouse and was in the way.
+
 ## [1.25.0] - 2026-10-09
 
 ### Added

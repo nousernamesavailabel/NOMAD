@@ -589,7 +589,7 @@ class SessionManager(QWidget):
 
     def delete_session(self, session):
         reply = QMessageBox.question(self, "Delete Session", f"Delete the saved session {session.name}?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                     QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.store.delete(session.id)
             self.fill_tree()
@@ -618,8 +618,7 @@ class SessionManager(QWidget):
         if folders:
             parts.append(f"{len(folders)} folder{'' if len(folders) == 1 else 's'}" +
                          (f" (with the {inside} session{'' if inside == 1 else 's'} in them)" if inside else ""))
-        reply = QMessageBox.question(self, "Delete", f"Delete {' and '.join(parts)}?", QMessageBox.Yes | QMessageBox.No,
-                                     QMessageBox.No)
+        reply = QMessageBox.question(self, "Delete", f"Delete {' and '.join(parts)}?", QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.store.delete_many({session.id for session in sessions})
             for folder in folders:
@@ -647,8 +646,7 @@ class SessionManager(QWidget):
                     if session.folder == folder or session.folder.startswith(folder + "/"))
         message = f"Delete the folder {folder}" + (f" and the {count} session{'' if count == 1 else 's'} in it"
                                                    if count else "") + "?"
-        reply = QMessageBox.question(self, "Delete Folder", message, QMessageBox.Yes | QMessageBox.No,
-                                     QMessageBox.No)
+        reply = QMessageBox.question(self, "Delete Folder", message, QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.store.delete_folder(folder)
             self.fill_tree()
@@ -750,8 +748,7 @@ class SessionManager(QWidget):
         if not entries:
             return
         reply = QMessageBox.question(self, "Clear Recent Connections", "Clear the list of recent connections? "
-                                     "Saved sessions aren't affected.", QMessageBox.Yes | QMessageBox.No,
-                                     QMessageBox.No)
+                                     "Saved sessions aren't affected.", QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             for entry, session in entries:
                 self.store.forget_recent(entry.id)

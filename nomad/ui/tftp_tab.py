@@ -361,7 +361,7 @@ class TftpTab(QWidget):
             return
         if direction == "download" and os.path.exists(local):
             reply = QMessageBox.question(self, "Replace File", f"{local} already exists. Replace it?",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                         QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
         self.client_progress.setRange(0, 0)

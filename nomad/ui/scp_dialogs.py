@@ -538,7 +538,7 @@ class SyncDialog(QDialog):
             reply = QMessageBox.question(self, "Synchronize",
                                          f"{len(overwriting)} of the ticked files will replace a newer copy "
                                          f"(such as {overwriting[0].relative}). Continue?",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                         QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
         self.view.queue_sync(self.local_root, self.remote_root, chosen)

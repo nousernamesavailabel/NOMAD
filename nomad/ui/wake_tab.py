@@ -121,7 +121,7 @@ class WakeTab(QWidget):
         if target is None:
             return
         reply = QMessageBox.question(self, "Delete Device", f"Delete the saved device {target.name}?",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                     QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.wake_targets.remove(target)
             self.fill_wake_table()

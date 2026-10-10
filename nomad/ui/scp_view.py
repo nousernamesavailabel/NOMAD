@@ -136,7 +136,7 @@ class FileSessionView(PromptAnswers, QWidget):
         if problems:
             reply = QMessageBox.question(self, "Work as Root", f"Switching reconnects {self.session.name}, which has "
                                          + " and ".join(problems) + ". Switch anyway?",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                                         QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
         self.sudo = not self.sudo
@@ -428,7 +428,7 @@ class FileSessionView(PromptAnswers, QWidget):
         else:
             message = f"Permanently delete {what} from {self.session.name}?" + (
                 "\n\nFolders are deleted with everything in them." if folders else "")
-        reply = QMessageBox.question(self, "Delete", message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        reply = QMessageBox.question(self, "Delete", message, QMessageBox.Yes | QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
         if pane is self.local:
@@ -706,8 +706,7 @@ class FileSessionView(PromptAnswers, QWidget):
             data, mtime = result
             if looks_binary(data):
                 reply = QMessageBox.question(self, "Edit", f"{entry.name} doesn't look like a text file. Open it in "
-                                             "the text editor anyway?", QMessageBox.Yes | QMessageBox.No,
-                                             QMessageBox.No)
+                                             "the text editor anyway?", QMessageBox.Yes | QMessageBox.No)
                 if reply != QMessageBox.Yes:
                     self.set_status("", "info")
                     return
