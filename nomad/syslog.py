@@ -46,7 +46,7 @@ class SyslogMessage:
 
 
 def parse_message(raw, source, received=None, protocol="UDP"):
-    """Parse one syslog message (text). Never fails: anything unrecognised is kept as the message."""
+    """Parse one syslog message (text). Never fails: anything unrecognized is kept as the message."""
     received = received or datetime.datetime.now()
     text = raw.rstrip("\r\n\0")
     message = SyslogMessage(received, source, raw=text, protocol=protocol)

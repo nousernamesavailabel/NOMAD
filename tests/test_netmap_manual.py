@@ -492,6 +492,17 @@ def test_the_credentials_dialog_takes_v3_users_and_subnet_users(app):
     assert dialog.values()[0] == [] and dialog.values()[4] == [user]  # Users alone are enough
 
 
+def test_the_credentials_dialog_can_go_on_to_the_switch_config(app, monkeypatch):
+    from nomad.ui.netmap_dialogs import CommunitiesDialog
+    dialog = CommunitiesDialog(["corp-ro"], [], V1, 2000)
+    dialog.accept_and_build()
+    assert dialog.build_config and dialog.result() == QDialog.Accepted
+    dialog = CommunitiesDialog([], [], V1, 2000)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: None)
+    dialog.accept_and_build()  # Nothing to try: it stays open, and OK later doesn't build
+    assert not dialog.build_config and dialog.result() != QDialog.Accepted
+
+
 def test_deleting_a_device_the_crawl_found_keeps_it_off_the_map(tab, monkeypatch):
     tab.on_crawled(crawl())
     monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)

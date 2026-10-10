@@ -658,7 +658,7 @@ def nearest_pairs(points, sizes=None):
 
 def spacing_of(points, sizes=None):
     """How far apart {key: (x, y)} are now, as a spacing (1.0: as Normal leaves them, whichever way they were
-    arranged): how far each typically is from its nearest neighbour. None when no two are apart."""
+    arranged): how far each typically is from its nearest neighbor. None when no two are apart."""
     pairs = nearest_pairs(points, sizes)
     if not pairs:
         return None
@@ -679,7 +679,7 @@ def respace(points, spacing, sizes=None, min_gap=lambda a, b: RESPACE_MIN_GAP):
     than min_gap(a, b) (two closer than that already, before they'd overlap). sizes: {key: (width, height)} where
     they aren't all device-sized."""
     scale, scaled = 1.0, dict(points)
-    for _ in range(RESPACE_ROUNDS):  # Stretched, a box's nearest neighbour can be another: measured again
+    for _ in range(RESPACE_ROUNDS):  # Stretched, a box's nearest neighbor can be another: measured again
         pairs = nearest_pairs(scaled, sizes)
         if not pairs:
             return dict(points)

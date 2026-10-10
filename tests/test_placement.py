@@ -14,7 +14,7 @@ from nomad.ipam.vlans import VlanStore
 from nomad.netmap import collect
 from nomad.netmap.crawl import CrawlSettings, Crawler
 from nomad.netmap.model import Device, Link, NetworkMap
-from nomad.netmap.placement import analyse, places
+from nomad.netmap.placement import analyze, places
 
 
 # --------------------------------------------------------------------- VRFs, read over SNMP
@@ -66,7 +66,7 @@ def lab():
 
 
 def test_places_segments_and_advertised():
-    found = {(item.vrf, item.cidr): item for item in analyse(lab())}
+    found = {(item.vrf, item.cidr): item for item in analyze(lab())}
     assert len(found[("", "10.0.12.0/30")].segments) == 1  # Both ends of the link: one segment
     assert len(found[("", "10.50.0.0/24")].segments) == 1  # Two SVIs on a VLAN trunked between them
     assert found[("", "10.50.0.0/24")].advertised is False
@@ -268,10 +268,10 @@ def test_linked_devices_sharing_a_subnet_are_one_place():
                                        vlans=[[5, "LAB"], [57, "OTHER"]],
                                        port_vlans={"Gi0/1": {"mode": "trunk", "native": 57, "allowed": "1,5,57"}})
     network_map.links.append(Link("sw", "Gi0/1", "rtr", "Ethernet0/0"))  # As CDP names the router's port
-    [subnet] = analyse(network_map)
+    [subnet] = analyze(network_map)
     assert len(subnet.segments) == 1
     network_map.devices["sw"].port_vlans["Gi0/1"]["allowed"] = "1,57"
-    [subnet] = analyse(network_map)
+    [subnet] = analyze(network_map)
     assert len(subnet.segments) == 2
 
 
@@ -293,7 +293,7 @@ def test_routers_linked_by_a_routed_port_stay_two_places():
         network_map.devices[key] = Device(key, key, source="snmp", interfaces_l3=[
             [address, 24, "Vlan30"], ["10.0.12.1" if key == "r1" else "10.0.12.2", 30, "Gi0/0"]])
     network_map.links.append(Link("r1", "Gi0/0", "r2", "Gi0/0"))
-    found = {item.cidr: item for item in analyse(network_map)}
+    found = {item.cidr: item for item in analyze(network_map)}
     assert len(found["10.30.0.0/24"].segments) == 2 and len(found["10.0.12.0/30"].segments) == 1
 
 
@@ -313,7 +313,7 @@ def test_who_advertises_and_who_only_has_an_address():
     network_map.devices["home"] = Device("home", "home", source="unreachable", mgmt_ip="10.0.0.4")
     network_map.links += [Link("sw", "Gi0/1", "rtr", "Ethernet0/0"), Link("sw", "Gi0/10", "home", "Gi5"),
                           Link("rtr", "Et0/1", "far", "Et0/0")]
-    subnet = next(item for item in analyse(network_map) if item.cidr == "192.168.5.0/24")
+    subnet = next(item for item in analyze(network_map) if item.cidr == "192.168.5.0/24")
     assert len(subnet.segments) == 1 and subnet.advertisers == ["rtr"]
     assert subnet.role(network_map, "rtr") == "advertises it"
     assert subnet.role(network_map, "sw") == "address only (it doesn't route)"

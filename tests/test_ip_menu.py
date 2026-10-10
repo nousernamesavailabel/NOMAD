@@ -251,3 +251,30 @@ def test_map_finds_host_and_missing_address_reports_status():
     page.view.show_host.assert_called_once_with(host)
     actions.show_map("10.0.0.3")
     window.show_status.assert_called_once_with("10.0.0.3 isn't on the open network map.", "info")
+
+
+def test_host_actions_are_grouped_into_connect_and_tools(app, window):
+    menu = QMenu()
+    HostActions(window, window).add_to(menu, "10.0.0.1")
+    top = [action.text() for action in menu.actions()]
+    assert top == ["Connect", "Tools", "Show in IPAM", "Show on Map", "Add Device to Map...", "Copy IP Address"]
+    connect, tools = (action.menu() for action in menu.actions()[:2])
+    assert {"Open SSH Session", "Open SCP Session", "Open Telnet Session", "Create Terminal Session...",
+            "SSH with PuTTY", "Open https://10.0.0.1"} <= {action.text() for action in connect.actions()}
+    assert [action.text() for action in tools.actions()] == [
+        "Ping", "Traceroute", "Monitor Latency", "Scan Ports", "SNMP Details", "Capture Traffic..."]
+
+    flat = QMenu()  # Already a submenu of just these (IP: 10.0.0.1): no further submenus
+    HostActions(window, window).add_to(flat, "10.0.0.1", grouped=False, leave_out=("Show on Map",))
+    labels = [action.text() for action in flat.actions()]
+    assert "Open SSH Session" in labels and "Ping" in labels
+    assert "Connect" not in labels and "Show on Map" not in labels
+
+
+def test_page_entries_are_not_repeated_in_the_submenus(app, window):
+    menu = QMenu()
+    menu.addAction("Ping")
+    HostActions(window, window).add_to(menu, "10.0.0.1", leave_out=("Capture Traffic...",))
+    tools = next(action.menu() for action in menu.actions() if action.text() == "Tools")
+    assert [action.text() for action in tools.actions()] == [
+        "Traceroute", "Monitor Latency", "Scan Ports", "SNMP Details"]

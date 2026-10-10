@@ -48,6 +48,20 @@ RSTP_ROLES = {1: "disabled", 2: "root", 3: "designated", 4: "alternate", 5: "bac
 STP_PORT_STATE = "1.3.6.1.2.1.17.2.15.1.3"  # BRIDGE-MIB dot1dStpPortState (index bridge port); per VLAN on PVST+
 STP_STATES = {1: "disabled", 2: "blocking", 3: "listening", 4: "learning", 5: "forwarding", 6: "broken"}
 FORWARDING, BLOCKING, DISABLED = "forwarding", "blocking", "disabled"  # A port's STP state, simplified
+STP_ROOT_PORT = "1.3.6.1.2.1.17.2.7"  # BRIDGE-MIB dot1dStpRootPort (a scalar): 0 on the root bridge
+# Interfaces: shut down or not, up or down, speed and duplex (the Link Speed overlay), and the counters monitoring
+# polls on linked ports (the Utilization overlay)
+IF_ADMIN_STATUS = "1.3.6.1.2.1.2.2.1.7"
+IF_OPER_STATUS = "1.3.6.1.2.1.2.2.1.8"
+IF_SPEED = "1.3.6.1.2.1.2.2.1.5"  # Bits per second (tops out at 4.29 Gb/s)
+IF_HIGH_SPEED = "1.3.6.1.2.1.31.1.1.1.15"  # Megabits per second
+DOT3_DUPLEX = "1.3.6.1.2.1.10.7.2.1.19"  # EtherLike-MIB dot3StatsDuplexStatus: 1 unknown, 2 half, 3 full
+IF_IN_DISCARDS, IF_IN_ERRORS = "1.3.6.1.2.1.2.2.1.13", "1.3.6.1.2.1.2.2.1.14"
+IF_OUT_DISCARDS, IF_OUT_ERRORS = "1.3.6.1.2.1.2.2.1.19", "1.3.6.1.2.1.2.2.1.20"
+IF_HC_IN_OCTETS, IF_HC_OUT_OCTETS = "1.3.6.1.2.1.31.1.1.1.6", "1.3.6.1.2.1.31.1.1.1.10"
+OPER_STATES = {1: "up", 2: "down", 3: "testing", 4: "unknown", 5: "dormant", 6: "not present",
+               7: "lower layer down"}
+DUPLEXES = {2: "half", 3: "full"}
 # VRFs: which interfaces are in which, and each VRF's routing table (ipCidrRouteTable has only the global one)
 CV_VRF_NAME = "1.3.6.1.4.1.9.9.711.1.1.1.1.2"  # CISCO-VRF-MIB cvVrfName (index cvVrfIndex)
 CV_VRF_INTERFACE_ENTRY = "1.3.6.1.4.1.9.9.711.1.2.1.1"  # cvVrfInterfaceTable (index cvVrfIndex, ifIndex)
@@ -132,6 +146,9 @@ class DeviceTables:
     stp_instance: int = -1  # With an STP read for one VLAN: its spanning tree instance (the VLAN, or an MST instance)
     stp_ports: dict = field(default_factory=dict)  # ifIndex -> (FORWARDING, BLOCKING or DISABLED, role or state)
     stp_read: bool = False  # An STP read for one VLAN was made (stp_ports may still be empty)
+    stp_root: object = None  # With that read: whether it's the root bridge of the VLAN's tree (None: unknown)
+    port_status: dict = field(default_factory=dict)  # ifIndex -> {"oper", "speed" (Mb/s), "duplex"}: not shut down
+    status_read: bool = False  # Its interfaces' status was read
 
 
 @dataclass
@@ -621,6 +638,39 @@ def stp_port_states(rows, base_ports):
         state = STP_STATES.get(value.value, "")
         simple = FORWARDING if state == "forwarding" else DISABLED if state == "disabled" else BLOCKING
         found[base_ports[index[0]]] = (simple, state)
+    return found
+
+
+def stp_root(rows):
+    """From a walk of dot1dStpRootPort: True on the root bridge (no root port), False if not, None if not said."""
+    for value in column(rows, STP_ROOT_PORT).values():
+        return value.value == 0 if isinstance(value.value, int) else None
+    return None
+
+
+def port_status(admin_rows, oper_rows, high_speed_rows=(), speed_rows=(), duplex_rows=()):
+    """{ifIndex: {"oper": "up", "down"..., "speed": Mb/s, "duplex": "full" or "half"}} for the interfaces that aren't
+    shut down (speed and duplex left out when not known). From IF-MIB, and EtherLike-MIB for duplex."""
+    admin = {index[0]: value.value for index, value in column(admin_rows, IF_ADMIN_STATUS).items() if len(index) == 1}
+    high = {index[0]: value.value for index, value in column(high_speed_rows, IF_HIGH_SPEED).items()
+            if len(index) == 1 and isinstance(value.value, int)}
+    low = {index[0]: value.value for index, value in column(speed_rows, IF_SPEED).items()
+           if len(index) == 1 and isinstance(value.value, int)}
+    duplex = {index[0]: DUPLEXES.get(value.value, "") for index, value in column(duplex_rows, DOT3_DUPLEX).items()
+              if len(index) == 1}
+    found = {}
+    for index, value in column(oper_rows, IF_OPER_STATUS).items():
+        if len(index) != 1 or admin.get(index[0]) == 2:
+            continue  # Shut down: not worth keeping
+        if_index = index[0]
+        entry = {"oper": OPER_STATES.get(value.value, "unknown")}
+        speed = high.get(if_index) or (low.get(if_index, 0) // 1_000_000 if low.get(if_index, 0) < 4_294_967_295
+                                       else 0)
+        if speed:
+            entry["speed"] = speed
+        if duplex.get(if_index):
+            entry["duplex"] = duplex[if_index]
+        found[if_index] = entry
     return found
 
 

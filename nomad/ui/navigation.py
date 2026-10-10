@@ -371,10 +371,11 @@ class Navigator(SidebarNavigator):
         self.hide_button.setAccessibleName("Close tool drawer")
         self.content.installEventFilter(self)
         QApplication.instance().installEventFilter(self)
-        for key, callback in (("Ctrl+K", self.open_search), ("Escape", self.close_drawer)):
-            shortcut = QShortcut(QKeySequence(key), self)
-            shortcut.setContext(Qt.WindowShortcut)
-            shortcut.activated.connect(callback)
+        shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        shortcut.setContext(Qt.WindowShortcut)
+        shortcut.activated.connect(self.open_search)
+        # Escape closes the drawer in eventFilter, not by a window-wide shortcut: one would make the pages' own Esc
+        # shortcuts (the map's Show All, find bars) ambiguous, and then neither fires
         self.apply_navigation()
 
     def add_section(self, title):
@@ -408,6 +409,11 @@ class Navigator(SidebarNavigator):
                     and self.panel.isVisible() and isinstance(watched, QWidget)
                     and (watched is self.panel or self.panel.isAncestorOf(watched))):
                 self.activate_first()
+                return True
+            if (event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape and self.drawer_open
+                    and not self.sidebar_visible() and isinstance(watched, QWidget)
+                    and watched.window() is self.window()):
+                self.close_drawer()  # Only reached when no page shortcut took the Escape
                 return True
             if watched is self.content and event.type() == QEvent.Resize:
                 self.position_drawer()

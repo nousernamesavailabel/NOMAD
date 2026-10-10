@@ -14,11 +14,13 @@ Nothing here writes to IPAM's networks, subnets or addresses.
 import html
 import ipaddress
 import logging
+from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtWidgets import QComboBox, QLabel
 
+from ..ipam.map_compare import DEVICE, HOST, short_name, usable
 from ..ipam.placement import SEVERITY_LABELS, PlacementStore, evaluate
 from ..ipam.placement_team import TeamPlacementStore
 from ..ipam.store import IpamError
@@ -33,6 +35,7 @@ log = logging.getLogger(__name__)
 TEAM, LOCAL = "team", "local"  # Where networks come from, as the IP Addresses page names them
 SCHEME = "nomad"
 IPAM, VLAN, PLACEMENT, MAP_SUBNET, MAP_DEVICE = "ipam", "vlan", "placement", "map-subnet", "map-device"
+MAP_PLACES = "map-places"  # Integration.cache key, with the network's
 
 
 def network_key(source, network_id):
@@ -76,6 +79,43 @@ def held_by(network_map, subnets):
         if any(network.version == block.version and network.subnet_of(block) for block in blocks):
             count += 1
     return count
+
+
+@dataclass
+class MapPlace:
+    """Where an address is on a map: the devices with it (each "R1 Gi0/3"), or the switch ports a host with it is
+    seen on."""
+    device: str  # The map's device key to show: the first device with it, or the switch the host is on
+    kind: str  # DEVICE or HOST
+    where: list = field(default_factory=list)
+
+    def text(self):
+        places = ", ".join(self.where)
+        return places if self.kind == DEVICE else f"Host on {places}" if places else "Host"
+
+
+def map_places(network_map):
+    """{address text: MapPlace} of every address a device on the map has (its interfaces', the one it's managed by)
+    and of the hosts the switches see. A device's address is its own even when a host entry has it too."""
+    found = {}
+    for key, device in sorted(network_map.devices.items(), key=lambda item: item[1].label.lower()):
+        name = short_name(device.label)
+        ports = {}
+        for address, _, port in device.interfaces_l3:
+            ports.setdefault(address, port)
+        for address in dict.fromkeys([device.mgmt_ip] + list(device.addresses) + list(ports)):  # Each once
+            if address and usable(address):
+                found.setdefault(address, MapPlace(key, DEVICE)).where.append(
+                    f"{name} {ports[address]}" if address in ports else name)
+    for host in network_map.hosts:
+        if not host.ip or not usable(host.ip) or found.get(host.ip, MapPlace("", HOST)).kind == DEVICE:
+            continue
+        place = found.setdefault(host.ip, MapPlace(host.device, HOST))
+        switch = network_map.devices.get(host.device)
+        where = " ".join(part for part in (short_name(switch.label) if switch else host.device, host.port) if part)
+        if where and where not in place.where:
+            place.where.append(where)
+    return found
 
 
 class Facts:
@@ -336,6 +376,19 @@ class Integration(QObject):
             return owner
         host = next((host for host in network_map.hosts if host.ip == address), None)
         return host.device if host is not None else None
+
+    def map_places(self, key):
+        """{address text: MapPlace} of every device and host address on the open map (of this network), or None
+        when there's no such map. Worked out once per map (until it's redrawn)."""
+        network_map = self.map_for(key)
+        if network_map is None:
+            return None
+        cached = self.cache.get((MAP_PLACES, key))
+        if cached is not None and cached[0] is network_map:
+            return cached[1]
+        found = map_places(network_map)
+        self.cache[(MAP_PLACES, key)] = (network_map, found)
+        return found
 
     def subnet_links(self, key, cidr, row=None, skip=()):
         """HTML links to a subnet on the other pages: IP Addresses, its VLANs, Subnet Placement, the map."""

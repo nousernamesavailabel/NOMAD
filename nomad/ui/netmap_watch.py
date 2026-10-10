@@ -222,7 +222,7 @@ class MapWatcher(QObject):
         self.config_label = QLabel()
         self.config_label.setWordWrap(True)
         self.config_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.config_button = QPushButton("Switch SNMP Config...")
+        self.config_button = QPushButton("Generate SNMP Config")
         self.config_button.setToolTip("Build the configuration that lets the switches be read and has them send traps "
                                       "and syslog here, and send it to a switch.")
         self.config_button.clicked.connect(self.open_config_builder)
@@ -303,11 +303,9 @@ class MapWatcher(QObject):
         self.status_changed.emit()
 
     def open_config_builder(self):
-        """The SNMP Config page, set up for this computer and the map's first credential."""
+        """The SNMP Config page, set up for this computer and the map's credentials."""
         address = self.local_address()
-        credentials = self.page.credentials()
-        self.page.window.show_snmp_config(destination=address if not address.startswith("<") else "",
-                                          credential=credentials[0] if credentials else None)
+        self.page.window.show_snmp_config(destination=address if not address.startswith("<") else "", from_map=True)
 
     def local_address(self):
         adapter = self.page.window.current_adapter() if hasattr(self.page.window, "current_adapter") else None

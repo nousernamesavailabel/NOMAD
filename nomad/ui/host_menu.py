@@ -9,20 +9,27 @@ from PyQt5.QtWidgets import QApplication, QMenu, QMessageBox
 
 from ..sweep import find_putty
 from ..terminal.sessions import RDP, SSH, TELNET
+from .common import add_submenu, drop_empty_submenus, menu_labels
 
 ADD_TO_MAP = "Add Device to Map..."
+CONNECT, TOOLS = "Connect", "Tools"
 
 
 class HostActions:
     def __init__(self, window, parent):
         self.window, self.parent = window, parent
 
-    def add_to(self, menu, host, aliases=(), name="", folder="", snmp=None, sessions=("SSH", "SCP", "Telnet", "RDP")):
+    def add_to(self, menu, host, aliases=(), name="", folder="", snmp=None, sessions=("SSH", "SCP", "Telnet", "RDP"),
+               grouped=True, leave_out=()):
         """Add the actions for host to menu. Returns {QAction: callable} for running the chosen one. aliases: the
         host's other addresses and names, for finding its saved sessions; name and folder: what to call a new
         session to it, and the folder to suggest when it's saved; snmp: (community, version) for SNMP Details, when
-        the page knows what the host answers to."""
+        the page knows what the host answers to. grouped: sessions and browsing in a Connect submenu and the tools in
+        a Tools one, keeping the menu short (not when menu is already a submenu of just these); leave_out: labels of
+        entries the page has no use for (Show on Map, on the map)."""
         actions = {}
+        connect = add_submenu(menu, CONNECT) if grouped else menu
+        tools = add_submenu(menu, TOOLS) if grouped else menu
         pages = [("SSH", self.window.terminal_tab, SSH), ("SCP", self.window.scp_tab, SSH),
                  ("Telnet", self.window.terminal_tab, TELNET)]
         rdp_page = getattr(self.window, "rdp_tab", None)
@@ -38,43 +45,52 @@ class HostActions:
                 text = f"Open {label} Session ({len(matches)} Saved)..."
             else:
                 text = f"Open {label} Session"
-            actions[menu.addAction(text)] = lambda page=page, protocol=protocol: page.open_address(
+            actions[connect.addAction(text)] = lambda page=page, protocol=protocol: page.open_address(
                 host, protocol, aliases, name, folder)
             if matches:
-                actions[menu.addAction(f"Open New {label} Session")] = lambda page=page, protocol=protocol: \
+                actions[connect.addAction(f"Open New {label} Session")] = lambda page=page, protocol=protocol: \
                     page.open_address(host, protocol, aliases, name, folder, use_saved=False)
+        if grouped:
+            connect.addSeparator()
         # Saving a session, for a host that has none: SSH and Telnet share the Terminal page's (SCP uses its SSH
         # ones), so one entry covers all three
         terminal = self.window.terminal_tab
         if {"SSH", "SCP", "Telnet"} & set(sessions) and not any(
                 terminal.saved_matches(host, aliases, protocol) for protocol in (SSH, TELNET)):
-            actions[menu.addAction("Create Terminal Session...")] = lambda: self.create_session(
+            actions[connect.addAction("Create Terminal Session...")] = lambda: self.create_session(
                 terminal, SSH, host, name, folder)
         if "RDP" in sessions and callable(getattr(rdp_page, "create_session", None)) and not \
                 rdp_page.saved_matches(host, aliases, RDP):
-            actions[menu.addAction("Create RDP Session...")] = lambda: self.create_session(
+            actions[connect.addAction("Create RDP Session...")] = lambda: self.create_session(
                 rdp_page, RDP, host, name, folder)
-        actions.update(self.add_missing(menu, {
+        if grouped:
+            connect.addSeparator()
+        actions.update(self.add_missing(connect, {
             "SSH with PuTTY": lambda: self.open_ssh(host, aliases),
             f"Open https://{host}": lambda: self.open_web(host),
             f"Open http://{host}": lambda: self.open_web(host, "http"),
+        }, menu, leave_out))
+        actions.update(self.add_missing(tools, {
             "Ping": lambda: self.ping(host),
             "Traceroute": lambda: self.trace(host),
             "Monitor Latency": lambda: self.monitor_latency(host),
             "Scan Ports": lambda: self.scan_ports(host),
             "SNMP Details": lambda: self.snmp(host, *(snmp or ())),
             "Capture Traffic...": lambda: self.capture(host),
-        }))
-        actions.update(self.navigation_actions(menu, host, name))
+        }, menu, leave_out))
+        if grouped:
+            drop_empty_submenus(menu, connect, tools)
+        actions.update(self.navigation_actions(menu, host, name, leave_out))
         menu.setProperty("nomadIpActions", list(dict.fromkeys((menu.property("nomadIpActions") or []) + [host])))
         return actions
 
     @staticmethod
-    def add_missing(menu, callbacks):
-        existing = {action.text() for action in menu.actions()}
+    def add_missing(menu, callbacks, whole=None, leave_out=()):
+        """Add the entries whole (menu, or the menu it's a submenu of) doesn't have yet, apart from leave_out."""
+        existing = menu_labels(whole if whole is not None else menu) | set(leave_out)
         return {menu.addAction(label): callback for label, callback in callbacks.items() if label not in existing}
 
-    def navigation_actions(self, menu, host, name=""):
+    def navigation_actions(self, menu, host, name="", leave_out=()):
         try:
             ipaddress.ip_address(host)
         except ValueError:
@@ -84,7 +100,7 @@ class HostActions:
             "Show on Map": lambda: self.show_map(host),
             ADD_TO_MAP: lambda: self.add_to_map(host, name),
             "Copy IP Address": lambda: QApplication.clipboard().setText(host),
-        })
+        }, leave_out=leave_out)
 
     def add_to_map(self, host, name=""):
         """Add the host to a network map (the user chooses which) as a device added by hand."""

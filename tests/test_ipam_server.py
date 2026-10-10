@@ -305,7 +305,7 @@ def test_waiting_laptops_hear_about_changes_at_once(server, tmp_path):
     assert laptop.server_name and laptop.server_address.endswith(f":{server.port}")
 
 
-def test_older_server_is_recognised_not_offline(server, monkeypatch):
+def test_older_server_is_recognized_not_offline(server, monkeypatch):
     from nomad.ipam.client import OldServerError
     monkeypatch.setattr(IpamServer, "wait", lambda self, *arguments: (_ for _ in ()).throw(
         RequestError(404, "No such request.")))  # A server from before instant sync

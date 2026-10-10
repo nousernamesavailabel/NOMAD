@@ -525,7 +525,7 @@ class ImportDialog(QDialog):
         table.resizeRowsToContents()
 
     def mark_gateway(self, row, fix):
-        """Colour the chosen gateway, and show why it was chosen, or what's wrong with what was typed."""
+        """Color the chosen gateway, and show why it was chosen, or what's wrong with what was typed."""
         item = self.gateway_table.item(row, GATEWAY_EDIT_COLUMN)
         why = self.gateway_table.item(row, GATEWAY_WHY_COLUMN)
         error = self.gateway_errors.get(id(fix))

@@ -132,3 +132,34 @@ def test_poe_logging_can_be_left_out():
     assert " logging event power-inline-status" in build(options(), NOW)
     lines = build(options(poe=False), NOW)
     assert " logging event power-inline-status" not in lines and " logging event link-status" in lines
+
+
+def test_more_communities_and_users_can_read():
+    """Such as the rest of a map's credentials: each user's security level gets its group, traps go with the first."""
+    auth_only = V3User("branch", "sha256", "authpass2", "none")
+    lines = build(options(v3_user=USER, more_communities=["branch-ro", "n0mad-RO"], more_users=[auth_only]), NOW)
+    assert [line for line in lines if line.startswith("snmp-server community")] == [
+        "snmp-server community n0mad-RO RO NOMAD-SNMP", "snmp-server community branch-ro RO NOMAD-SNMP"]
+    assert lines.count("snmp-server view NOMAD-VIEW iso included") == 1
+    for level in ("priv", "auth"):
+        assert f"snmp-server group NOMAD v3 {level} read NOMAD-VIEW access NOMAD-SNMP" in lines
+        assert f"snmp-server group NOMAD v3 {level} context vlan- match prefix read NOMAD-VIEW access NOMAD-SNMP" \
+            in lines
+    assert "snmp-server user branch NOMAD v3 auth sha-2 256 authpass2 access NOMAD-SNMP" in lines
+    assert [line for line in lines if line.startswith("snmp-server host")] == [
+        "snmp-server host 10.0.0.50 version 2c n0mad-RO"]
+    taken_out = undo(options(v3_user=USER, more_communities=["branch-ro"], more_users=[auth_only]))
+    for expected in ("no snmp-server community branch-ro", "no snmp-server user branch NOMAD v3",
+                     "no snmp-server group NOMAD v3 auth", "no snmp-server group NOMAD v3 priv"):
+        assert expected in taken_out
+    assert taken_out.count("no snmp-server view NOMAD-VIEW iso") == 1
+
+
+def test_more_credentials_are_checked_too():
+    assert problems(options(community="", more_communities=["branch-ro"], traps=False)) == []
+    assert any("community string x@y" in problem for problem in problems(options(more_communities=["x@y"])))
+    twin = V3User("nomad", "md5", "authpass2", "none")
+    assert any("two SNMPv3 users named nomad" in problem
+               for problem in problems(options(v3_user=USER, more_users=[twin])))
+    assert any("SHA-224" in problem
+               for problem in problems(options(more_users=[V3User("u", "sha224", "authpass1", "none")])))

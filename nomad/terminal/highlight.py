@@ -1,5 +1,5 @@
 """Keyword highlighting for terminal output (as in SecureCRT): words like "down", "err-disabled" or "% Invalid" in
-colour, so problems stand out in long show output. Rules are saved as JSON in the roaming app data folder."""
+color, so problems stand out in long show output. Rules are saved as JSON in the roaming app data folder."""
 import dataclasses
 import json
 import logging
@@ -12,7 +12,7 @@ from ..system import app_data_dir
 log = logging.getLogger(__name__)
 
 FILE_NAME = "highlights.json"
-# Colour names a rule can use, and how they're drawn (bright enough to read on the terminal's dark background)
+# Color names a rule can use, and how they're drawn (bright enough to read on the terminal's dark background)
 COLORS = {"Red": "#ff7a85", "Amber": "#ffd68a", "Green": "#b5e890", "Blue": "#7cc4ff", "Purple": "#de9df0",
           "Cyan": "#6fd3df"}
 IPV4 = r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:/\d{1,2})?\b"
@@ -86,7 +86,7 @@ class Highlighter:
         self.cache = {}
 
     def spans(self, text):
-        """[(start, end, colour name)], not overlapping, in order. Earlier rules win where matches overlap."""
+        """[(start, end, color name)], not overlapping, in order. Earlier rules win where matches overlap."""
         cached = self.cache.get(text)
         if cached is not None:
             return cached

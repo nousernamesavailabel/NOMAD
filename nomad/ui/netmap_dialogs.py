@@ -173,11 +173,16 @@ class CommunitiesDialog(QDialog):
         layout.addLayout(form)
         where = ("Kept encrypted on the tribe server, and on each computer for when the server can't be reached."
                  if tribe_map is not None else "Saved encrypted for your Windows account.")
-        note = QLabel(f"{where} The SNMP Config page builds switch configuration for these.")
+        note = QLabel(f"{where} Generate SNMP Config builds the switch configuration that sets them up.")
         note.setWordWrap(True)
         note.setEnabled(False)
         layout.addWidget(note)
+        self.build_config = False  # Whether Generate SNMP Config closed it
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        config_button = buttons.addButton("Generate SNMP Config", QDialogButtonBox.ActionRole)
+        config_button.setToolTip("Keep these, and build the Cisco configuration that sets the switches up with them "
+                                 "on the SNMP Config page.")
+        config_button.clicked.connect(self.accept_and_build)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -231,9 +236,14 @@ class CommunitiesDialog(QDialog):
         try:
             self.values()
         except ValueError as error:
+            self.build_config = False
             QMessageBox.warning(self, "SNMP Credentials", str(error))
             return
         super().accept()
+
+    def accept_and_build(self):
+        self.build_config = True
+        self.accept()
 
 
 class ScopeDialog(QDialog):

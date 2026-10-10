@@ -79,7 +79,7 @@ def write_csv(path, columns, rows):
 
 
 def drawio(network_map, positions, boxes=()):
-    """An uncompressed draw.io (mxGraph) file with each device where it is on the map, a labelled edge per link, and
+    """An uncompressed draw.io (mxGraph) file with each device where it is on the map, a labeled edge per link, and
     boxes [(Group, (left, top, width, height))] for sites, buildings and rooms, outermost first."""
     nodes = []
     for device in sorted(network_map.devices.values(), key=lambda device: device.key):
@@ -89,7 +89,7 @@ def drawio(network_map, positions, boxes=()):
 
 
 def drawio_graph(nodes, links, positions, name="Network map", boxes=()):
-    """draw.io XML for [(key, label, kind, dashed)] and Links, with nodes centred on positions, and any group
+    """draw.io XML for [(key, label, kind, dashed)] and Links, with nodes centered on positions, and any group
     boxes behind them."""
     cells = ['<mxCell id="0"/>', '<mxCell id="1" parent="0"/>']
     for number, (group, (left, top, width, height)) in enumerate(boxes):

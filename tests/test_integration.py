@@ -287,3 +287,53 @@ def test_placement_follows_away_from_the_maps_network_with_a_mapped_subnet_selec
     assert all(row.found is None for row in placement.rows)
     placement.go_to_subnet("local", lab_network.id, "10.50.0.0/24")  # And back
     assert placement.rows_map is window.netmap_tab.network_map and "On the map" in placement.details.toHtml()
+
+
+# --------------------------------------------------------------------- Addresses on the map, on IP Addresses
+
+def test_ip_addresses_say_whether_each_address_is_on_the_map(pages, tmp_path, monkeypatch):
+    from PyQt5.QtCore import Qt
+    from nomad.netmap.model import Host
+    from nomad.ui.ipam_tab import COL_MAP
+    window, store, lab_network, other, _ = pages
+    ipam, page = window.ipam_tab, window.netmap_tab
+    store.set_address(lab_network.id, "10.50.0.2", name="sw1")  # A switch's SVI
+    store.set_address(lab_network.id, "10.50.0.9", name="printer")  # Not on the map
+    users = next(subnet for subnet in store.subnets(lab_network.id) if subnet.cidr == "10.50.0.0/24")
+    ipam.fill_networks(key(lab_network))
+    ipam.fill_tree(select=users)
+    assert ipam.table.isColumnHidden(COL_MAP)  # No map open: nothing to say
+
+    network_map = lab()
+    network_map.hosts.append(Host("aa:bb:cc:00:00:20", "sw1", "Gi1/0/5", ip="10.50.0.20"))
+    page.show_map(network_map, tmp_path / "lab.nomadmap")
+    page.set_ipam_network(key(lab_network))
+    ipam.fill_tree(select=users)
+
+    def cell(ip, role=Qt.DisplayRole):
+        model = ipam.model
+        row = next(row for row in range(model.rowCount()) if str(model.address_at(row)) == ip)
+        return model.data(model.index(row, COL_MAP), role)
+
+    assert not ipam.table.isColumnHidden(COL_MAP)
+    assert cell("10.50.0.2") == "sw1 Vlan50"
+    assert cell("10.50.0.3") == "sw2 Vlan50"  # On the map, not recorded in IPAM...
+    assert "no record" in cell("10.50.0.3", Qt.ToolTipRole)  # ...which the tooltip says
+    assert cell("10.50.0.20") == "Host on sw1 Gi1/0/5"
+    assert cell("10.50.0.9") == "Not on the map"
+    assert cell("10.50.0.100") is None  # Free, and nothing on the map has it
+
+    ipam.hide_free_check.setChecked(True)  # Only addresses in use: the map's unrecorded ones are listed too
+    assert [str(ipam.model.address_at(row)) for row in range(ipam.model.rowCount())] == \
+        ["10.50.0.0", "10.50.0.2", "10.50.0.3", "10.50.0.9", "10.50.0.20", "10.50.0.255"]
+
+    monkeypatch.setattr(ipam, "isVisible", lambda: True)
+    network_map.hosts.append(Host("aa:bb:cc:00:00:09", "sw2", "Gi1/0/9", ip="10.50.0.9"))
+    page.map_changed()  # Watching found the printer: the column says so without choosing the subnet again
+    assert cell("10.50.0.9") == "Host on sw2 Gi1/0/9"
+    network_map.hosts.append(Host("aa:bb:cc:00:00:30", "sw2", "Gi1/0/3", ip="10.50.0.30"))
+    page.map_changed()  # A new address: listed (only addresses in use are)
+    assert cell("10.50.0.30") == "Host on sw2 Gi1/0/3"
+
+    ipam.fill_networks(key(other))  # A network the map isn't of
+    assert ipam.table.isColumnHidden(COL_MAP)

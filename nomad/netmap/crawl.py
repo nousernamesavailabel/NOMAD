@@ -19,7 +19,8 @@ from ..snmp import V2C, SnmpClient, SnmpError, parse_oid
 from ..snmpv3 import credential_from_json, credential_to_json, is_v3, users_from_json
 from . import collect, l3, vlans
 from .model import AP, HOST, KIND_NAMES, NEIGHBOR, NETWORK_KINDS, NO_SNMP, PHONE, ROUTER, SERVER, SNMP, UNKNOWN, \
-    UNREACHABLE, Device, Host, Link, NetworkMap, Trace, display_name, normalize_name, port_key, short_port
+    UNREACHABLE, Device, Host, Link, NetworkMap, Trace, display_name, normalize_name, port_key, \
+    port_sort_key, short_port
 
 log = logging.getLogger(__name__)
 
@@ -384,6 +385,7 @@ class Crawler:
                 self.walk(client, collect.LLDP_REM_MAN_ADDR_IF_SUBTYPE, tables, "LLDP", timing="Neighbors"))
             tables.neighbors += collect.lldp_neighbors(lldp_rows, local_ports, tables.interfaces, addresses)
         tables.arp = collect.arp(self.walk(client, collect.ARP_PHYS_ADDRESS, tables, "ARP", timing="ARP table"))
+        self.read_port_status(client, tables)
         self.read_routes(client, tables)
         self.read_vlans(client, tables)
         tables.lag_parents = collect.lag_parents(
@@ -400,6 +402,18 @@ class Crawler:
             tables.notes.append("No per-VLAN MAC tables (community@vlan or SNMPv3 vlan- contexts): read its one "
                                 "MAC table instead")
         self.read_mac_table(client, tables)
+
+    def read_port_status(self, client, tables):
+        """Whether each interface is up, its speed and duplex (only those not shut down are kept)."""
+        admin = self.walk(client, collect.IF_ADMIN_STATUS, tables, "Port status")
+        if not admin:
+            return
+        oper = self.walk(client, collect.IF_OPER_STATUS, tables, "Port status")
+        high = self.walk(client, collect.IF_HIGH_SPEED, tables, "Port speed", timing="Port status")
+        low = [] if high else self.walk(client, collect.IF_SPEED, tables, "Port speed", timing="Port status")
+        duplex = self.walk(client, collect.DOT3_DUPLEX, tables, "Duplex", timing="Port status")
+        tables.port_status = collect.port_status(admin, oper, high, low, duplex)
+        tables.status_read = True
 
     def read_routes(self, client, tables):
         """The global routing table, then which interfaces are in VRFs and each VRF's routing table."""
@@ -561,6 +575,8 @@ class Crawler:
             tables.stp_instance = instance
             tables.stp_ports = collect.rstp_port_roles(
                 self.walk(client, collect.RSTP_PORT_ROLE, tables, "STP port roles", timing="STP"), instance, base_ports)
+            if tables.stp_ports:  # No root port: it's the root bridge
+                tables.stp_root = not any(role == "root" for _, role in tables.stp_ports.values())
             if tables.stp_ports or mode == "mst":
                 return
         if vlan_client is not None:  # PVST+ (or Rapid-PVST without the role table): the VLAN's own BRIDGE-MIB
@@ -572,6 +588,11 @@ class Crawler:
                 return
             tables.stp_instance = vlan
             tables.stp_ports = collect.stp_port_states(rows, base_ports)
+            try:
+                tables.stp_root = collect.stp_root(list(vlan_client.walk(
+                    parse_oid(collect.STP_ROOT_PORT), max_repetitions=BULK_ROWS, should_stop=self.should_stop)))
+            except (SnmpError, OSError):
+                pass  # Which ports block is what matters
 
     # ----------------------------------------------------------------- Putting results on the map
 
@@ -795,6 +816,7 @@ class Crawler:
         device.port_vlans = vlans.device_port_vlans(tables, short_port)
         device.port_channels = vlans.device_port_channels(tables, short_port)
         device.stp_mode = tables.stp_mode
+        device.port_status = port_status_of(tables)
         apply_vrfs(device, tables)
         for ip in device.addresses:
             self.aliases.setdefault(ip, key)
@@ -998,6 +1020,7 @@ def read_vlans_of(settings, address, client_factory=SnmpClient, routes=False, st
         crawler.walk(client, collect.IF_STACK_STATUS, tables, "Port-channels", timing="Interfaces"),
         crawler.walk(client, collect.LAG_ATTACHED, tables, "Port-channels", timing="Interfaces"))
     crawler.read_vlans(client, tables)
+    crawler.read_port_status(client, tables)
     if stp_vlan:
         crawler.read_stp(client, tables, community, stp_vlan)
     if routes:
@@ -1013,6 +1036,8 @@ def apply_vlans(device, tables):
     device.port_vlans = vlans.device_port_vlans(tables, short_port)
     device.port_channels = vlans.device_port_channels(tables, short_port)
     device.stp_mode = tables.stp_mode
+    if tables.status_read:
+        device.port_status = port_status_of(tables)
     if device.kind in (ROUTER, UNKNOWN) and tables.port_vlans and "kind" not in device.corrected:
         # A switch a crawl took for a router (its neighbors' CDP says "Router Switch"): its switchports say otherwise
         kind = collect.classify(device.sys_object_id, device.sys_descr, platform=device.platform, switchports=True)
@@ -1026,6 +1051,13 @@ def apply_vlans(device, tables):
         device.routes = routes[:MAX_ROUTES]
         device.routes_truncated = len(routes) > MAX_ROUTES or tables.routes_truncated
         apply_vrfs(device, tables)
+
+
+def port_status_of(tables):
+    """Device.port_status from what was read: by port's short name, in port order."""
+    found = {short_port(tables.interfaces.get(if_index, str(if_index))): entry
+             for if_index, entry in tables.port_status.items()}
+    return dict(sorted(found.items(), key=lambda item: port_sort_key(item[0])))
 
 
 def apply_vrfs(device, tables):

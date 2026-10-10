@@ -10,6 +10,7 @@ from PyQt5.QtGui import QColor, QFont, QFontMetrics, QImage, QKeySequence, QPain
 from PyQt5.QtWidgets import QGraphicsItem, QGraphicsLineItem, QGraphicsScene, QGraphicsView, QStyleOptionGraphicsItem
 
 from ..netmap.l3 import HOP, STAR, SUBNET
+from ..netmap.overlays import DASH, DOT
 from ..netmap.layout import GROUP_PAD, GROUP_TITLE, NODE_HEIGHT, NODE_WIDTH
 from ..netmap.monitor import DOWN, UNKNOWN, UP, duration_text
 from ..netmap.vlans import ACCESS, NATIVE, ONE_END, TAGGED
@@ -42,7 +43,7 @@ NODE_RECT = QRectF(-NODE_WIDTH / 2, -NODE_HEIGHT / 2, NODE_WIDTH, NODE_HEIGHT)
 # A VLAN highlighted: how each link carries it, and how faint what doesn't carry it is
 VLAN_LINK_COLORS = {TAGGED: COLORS["link"], NATIVE: COLORS["link"], ACCESS: COLORS["accent"], ONE_END: COLORS["warning"]}
 VLAN_LINK_NAMES = {TAGGED: "tagged", NATIVE: "native (untagged)", ACCESS: "access ports", ONE_END: "one end only"}
-# Carry VLAN's planned path, drawn over the links while its window is open: (colour, width, line style)
+# Carry VLAN's planned path, drawn over the links while its window is open: (color, width, line style)
 PATH_PLANNED, PATH_CARRIES, PATH_CHOSEN, PATH_OFFERED, PATH_BLOCKED = "planned", "carries", "chosen", "offered", \
     "blocked"
 PATH_STYLES = {PATH_PLANNED: (COLORS["accent"], 5, Qt.DashLine), PATH_CARRIES: (COLORS["accent"], 5, Qt.SolidLine),
@@ -50,6 +51,13 @@ PATH_STYLES = {PATH_PLANNED: (COLORS["accent"], 5, Qt.DashLine), PATH_CARRIES: (
                PATH_BLOCKED: (COLORS["error"], 5, Qt.DashLine)}
 PATH_ORDER = [PATH_BLOCKED, PATH_PLANNED, PATH_CHOSEN, PATH_CARRIES, PATH_OFFERED]  # Which shows, for several links
 FADED = 0.22
+OVERLAY_LINE_STYLES = {DASH: Qt.DashLine, DOT: Qt.DotLine}
+OVERLAY_ORDER = ["error", "warning"]  # A line standing for several links shows the worst of their overlay marks
+
+
+def mark_color(name):
+    """An overlay mark's color: a theme color's name ("error") or "#rrggbb"."""
+    return QColor(COLORS.get(name, name))
 
 
 def small_font(scale=0.85, bold=False):
@@ -116,7 +124,9 @@ class NodeItem(QGraphicsItem):
         self.port_items = []
         self.host_count = 0
         self.expanded = False
-        self.highlight = None  # Colour of a ring drawn round it (Compare's added and changed devices)
+        self.highlight = None  # Color of a ring drawn round it (Compare's added and changed devices)
+        self.mark = None  # The overlay showing's netmap.overlays.Mark for it (see MapView.set_overlay)
+        self.base_tip = None  # Its tooltip without what the overlay showing adds (once one has)
         self.group_item = None  # The GroupItem it's directly in
         self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable
                       | QGraphicsItem.ItemSendsGeometryChanges)
@@ -124,6 +134,13 @@ class NodeItem(QGraphicsItem):
 
     def set_highlight(self, color):
         self.highlight = color
+        self.update()
+
+    def set_mark(self, mark):
+        if self.base_tip is None:
+            self.base_tip = self.toolTip()
+        self.mark = mark
+        self.setToolTip(self.base_tip + (f"\n{mark.note}" if mark is not None and mark.note else ""))
         self.update()
 
     def draw_highlight(self, painter, rect, radius):
@@ -150,7 +167,7 @@ class NodeItem(QGraphicsItem):
         return self.pos()
 
     def footprint(self):
-        """The rectangles (round its centre) a link's port label has to clear."""
+        """The rectangles (round its center) a link's port label has to clear."""
         return [NODE_RECT]
 
     def itemChange(self, change, value):
@@ -224,7 +241,10 @@ class DeviceItem(NodeItem):
         outline = QColor(COLORS["error"]) if device.source == UNREACHABLE else color
         if state is not None:  # Monitored: up/down outranks the device type, which the tag still names
             outline = QColor(STATUS_COLORS[state.status])
-        pen = QPen(outline, 2.6 if state is not None else 1.6)
+        marked = self.mark is not None
+        if marked:  # An overlay's color outranks both (the status dot still says up or down)
+            outline = mark_color(self.mark.color)
+        pen = QPen(outline, 3 if marked else 2.6 if state is not None else 1.6)
         if device.source != SNMP:
             pen.setStyle(Qt.DashLine)
         path = QPainterPath()
@@ -235,14 +255,14 @@ class DeviceItem(NodeItem):
         painter.save()
         painter.setClipRect(QRectF(self.rect.left(), self.rect.top(), STRIP_WIDTH, self.rect.height()))
         faded = QColor(outline)
-        faded.setAlpha(60 if state is None else 140)
+        faded.setAlpha(60 if state is None and not marked else 140)
         painter.fillPath(strip, faded)
         painter.restore()
         painter.setPen(pen)
         painter.drawPath(path)
         self.draw_selection(painter, path, self.rect, 7)
 
-        painter.setPen(QColor(outline if state is None else COLORS["text"]))
+        painter.setPen(QColor(outline if state is None and not marked else COLORS["text"]))
         painter.setFont(small_font(0.75, bold=True))
         painter.drawText(QRectF(self.rect.left(), self.rect.top(), STRIP_WIDTH, self.rect.height()), Qt.AlignCenter,
                          KIND_TAGS.get(device.kind, "?"))
@@ -719,9 +739,11 @@ class LinkItem(QGraphicsItem):
         self.manual = all(link.manual for link in links)  # Drawn by hand
         self.vlan_kind = None  # How it carries the VLAN highlighted (see MapView.set_vlan_focus)
         self.path_kind = None  # How Carry VLAN's planned path uses it (PATH_STYLES; see MapView.set_path_overlay)
-        self.setToolTip("\n".join(
+        self.mark = None  # The overlay showing's Mark for it (the worst of its links'), or None
+        self.base_tip = "\n".join(
             f"{label_of(a)} {link.port_on(a)}  —  {label_of(b)} {link.port_on(b)}  ({link_source(link)})"
-            for link, (a, b) in zip(links, ends)))
+            for link, (a, b) in zip(links, ends))
+        self.setToolTip(self.base_tip)
         a_item.links.append(self)
         b_item.links.append(self)
         self.update_position()
@@ -772,6 +794,9 @@ class LinkItem(QGraphicsItem):
             pen.setStyle(Qt.DashLine)
         elif self.manual:
             pen.setStyle(Qt.DotLine)
+        if self.mark is not None:
+            pen = QPen(mark_color(self.mark.color), self.mark.width or (4 if count > 1 else 3))
+            pen.setStyle(OVERLAY_LINE_STYLES.get(self.mark.style, Qt.SolidLine))
         if self.path_kind is not None:
             color, width, style = PATH_STYLES[self.path_kind]
             pen = QPen(QColor(color), width)
@@ -839,6 +864,7 @@ class MapView(QGraphicsView):
         self.picking = False  # Picking devices one after another: each click on one is device_picked
         self.last_found = None  # (text, match) Find showed last, so Enter again goes on to the next
         self.vlan_focus = None  # netmap.vlans.Focus of the VLAN highlighted, or None
+        self.overlay = None  # The netmap.overlays.Overlay showing (one at a time, instead of a VLAN), or None
         self.path_overlay = None  # Carry VLAN's planned path (see set_path_overlay), or None
         self.scene().selectionChanged.connect(self.on_selection_changed)
 
@@ -847,6 +873,7 @@ class MapView(QGraphicsView):
         self.scene().clear()
         self.items_by_key, self.link_items, self.group_items, self.drag = {}, [], {}, None
         self.vlan_focus = None  # Its links are new: the page highlights the VLAN again
+        self.overlay = None  # Or shows its overlay again
         self.path_overlay = None  # And Carry VLAN draws its path again
         self.network_map, self.links = network_map, network_map.links
         self.groups_suspended = True
@@ -865,6 +892,7 @@ class MapView(QGraphicsView):
         self.scene().clear()
         self.items_by_key, self.link_items, self.group_items, self.drag = {}, [], {}, None
         self.vlan_focus = None  # Its links are new: the page highlights the VLAN again
+        self.overlay = None  # Or shows its overlay again
         self.path_overlay = None  # And Carry VLAN draws its path again
         self.network_map, self.links, self.last_found = None, [], None
         self.update_scene_rect()
@@ -875,6 +903,7 @@ class MapView(QGraphicsView):
         self.scene().clear()
         self.items_by_key, self.link_items, self.group_items, self.drag = {}, [], {}, None
         self.vlan_focus = None  # Its links are new: the page highlights the VLAN again
+        self.overlay = None  # Or shows its overlay again
         self.path_overlay = None  # And Carry VLAN draws its path again
         self.network_map, self.links = None, links
         for key, node in nodes.items():
@@ -909,8 +938,8 @@ class MapView(QGraphicsView):
             item = LinkItem(a_item, b_item, links, ends, lambda key: self.items_by_key[key].label)
             self.scene().addItem(item)
             self.link_items.append(item)
-        if self.vlan_focus is not None:  # The new lines show it too
-            self.set_vlan_focus(self.vlan_focus)
+        if self.vlan_focus is not None or self.overlay is not None:  # The new lines show it too
+            self.refresh_overlays()
 
     # ----------------------------------------------------------------- Groups
 
@@ -1183,23 +1212,45 @@ class MapView(QGraphicsView):
 
     def set_vlan_focus(self, focus):
         """Highlight a VLAN (a netmap.vlans.Focus): the devices in it and the links carrying it stay bright (the links
-        coloured by how they carry it), the rest fade. None shows everything again."""
+        colored by how they carry it), the rest fade. None shows everything again."""
         self.vlan_focus = focus
+        self.refresh_overlays()
+
+    def set_overlay(self, overlay):
+        """Show a netmap.overlays.Overlay: its devices and links in their colors, with what it says of them in their
+        tooltips, and (if it fades) the rest faded. None takes it off."""
+        self.overlay = overlay
+        self.refresh_overlays()
+
+    def refresh_overlays(self):
+        """Draw the VLAN highlighted, the overlay showing, and Carry VLAN's path (over both), as they are now."""
+        focus, overlay = self.vlan_focus, self.overlay
         for key, item in self.items_by_key.items():
-            item.setOpacity(1.0 if focus is None or key in focus.devices else FADED)
+            bright = (focus is None or key in focus.devices) and \
+                (overlay is None or not overlay.fade or key in overlay.devices)
+            item.setOpacity(1.0 if bright else FADED)
+            if item.mark is not None or overlay is not None:
+                item.set_mark(overlay.devices.get(key) if overlay is not None else None)
         for item in self.link_items:
             kinds = [focus.links.get(id(link)) for link in item.links] if focus is not None else []
             kinds = [kind for kind in kinds if kind]
             item.vlan_kind = (ONE_END if ONE_END in kinds else kinds[0]) if kinds else None
-            item.setOpacity(1.0 if focus is None or kinds else FADED)
-            tip = item.toolTip().split("\nVLAN ")[0]
+            marks = [overlay.links[id(link)] for link in item.links if id(link) in overlay.links] \
+                if overlay is not None else []
+            marks.sort(key=lambda mark: OVERLAY_ORDER.index(mark.color) if mark.color in OVERLAY_ORDER
+                       else len(OVERLAY_ORDER))
+            item.mark = marks[0] if marks else None
+            bright = (focus is None or kinds) and (overlay is None or not overlay.fade or marks)
+            item.setOpacity(1.0 if bright else FADED)
+            tip = item.base_tip
             if item.vlan_kind is not None:
                 tip += f"\nVLAN {focus.vlan}: {VLAN_LINK_NAMES[item.vlan_kind]}"
+            tip += "".join(f"\n{note}" for note in dict.fromkeys(mark.note for mark in marks if mark.note))
             item.setToolTip(tip)
             item.update()
         for item in self.group_items.values():
-            item.setOpacity(1.0 if focus is None or any(member.key in focus.devices for member in item.all_members())
-                            else FADED)
+            members = item.all_members()
+            item.setOpacity(1.0 if not members or any(member.opacity() == 1.0 for member in members) else FADED)
         self.apply_path_overlay()
 
     def set_path_overlay(self, overlay):
@@ -1230,7 +1281,7 @@ class MapView(QGraphicsView):
                         item.group_item.setOpacity(1.0)
 
     def set_highlights(self, colors):
-        """Ring the items in {key: colour}; clear the rest."""
+        """Ring the items in {key: color}; clear the rest."""
         for key, item in self.items_by_key.items():
             item.set_highlight(colors.get(key))
 

@@ -109,32 +109,6 @@ class SessionPage:
         self.opened.append((host, list(aliases), name, folder, use_saved))
 
 
-def test_ssh_and_scp_use_the_saved_session(app, tmp_path):
-    store = IpamStore(str(tmp_path / "ipam.db"), user="tester")
-    network = store.add_network("Lab")
-    store.add_subnet(network.id, "10.0.0.0/24", "Core / Mgmt")
-    store.set_address(network.id, "10.0.0.5", USED, "core-sw1")
-    window = Window()
-    window.terminal_tab = SessionPage([Session("Core-SW1", host="core-sw1", username="admin")])
-    window.scp_tab = SessionPage([])
-    tab = IpamTab(window)
-    tab.local_store, tab.source, tab.network_id = store, LOCAL, network.id
-    tab.fill_tree()
-    tab.tree.setCurrentItem(tab.tree.topLevelItem(0))
-    tab.show_subnet()
-    menu = QMenu()
-    tab.add_session_actions(menu, "10.0.0.5")
-    actions = {action.text(): action for action in menu.actions()}
-    assert list(actions) == ["SSH (Core-SW1)", "SSH as a New Session", "SCP"]
-    assert window.terminal_tab.asked == ("10.0.0.5", ["core-sw1"])
-    actions["SSH (Core-SW1)"].trigger()
-    actions["SCP"].trigger()
-    assert window.terminal_tab.opened == [("10.0.0.5", ["core-sw1"], "core-sw1", "Lab/Core - Mgmt", True)]
-    assert window.scp_tab.opened == [("10.0.0.5", ["core-sw1"], "core-sw1", "Lab/Core - Mgmt", True)]
-
-    store.close()
-
-
 @pytest.fixture
 def address_page(app, tmp_path):
     store = IpamStore(str(tmp_path / "menus.db"), user="tester")
@@ -160,14 +134,28 @@ def address_page(app, tmp_path):
     store.close()
 
 
+def entries(menu):
+    """{label: action} for menu and its submenus (Connect, Tools)."""
+    found = {}
+    for action in menu.actions():
+        found[action.text()] = action
+        if action.menu() is not None:
+            found.update(entries(action.menu()))
+    return found
+
+
 def assert_address_actions(menu):
-    labels = [action.text() for action in menu.actions()]
-    assert {"Edit...", "Mark Used", "Copy", "SSH", "SCP", "History...", "SSH with PuTTY",
-            "Open http://10.0.0.5", "Open https://10.0.0.5", "Show in IPAM", "Show on Map",
-            "Open Telnet Session", "Create Terminal Session...", "SNMP Details", "Monitor Latency", "Capture Traffic..."}.issubset(labels)
-    for label in ("Ping", "Traceroute", "Scan Ports"):
-        assert labels.count(label) == 1
-    assert not any(label.startswith("IP:") for label in labels)
+    top = [action.text() for action in menu.actions()]
+    assert {"Edit...", "Mark Used", "Copy", "Connect", "Tools", "History...", "Show on Map",
+            "Copy IP Address"}.issubset(top)
+    labels = set(entries(menu))
+    assert {"Open SSH Session", "Open SCP Session", "Open Telnet Session", "Create Terminal Session...",
+            "SSH with PuTTY", "Open http://10.0.0.5", "Open https://10.0.0.5", "Ping", "Traceroute", "Scan Ports",
+            "SNMP Details", "Monitor Latency", "Capture Traffic..."}.issubset(labels)
+    assert "Show in IPAM" not in labels  # On the IPAM page already
+    tools = next(action.menu() for action in menu.actions() if action.text() == "Tools")
+    assert [action.text() for action in tools.actions()].count("Ping") == 1
+    assert not any(label.startswith("IP:") for label in top)
 
 
 @pytest.mark.parametrize("column", [0, 3])
@@ -186,7 +174,7 @@ def test_native_address_menu_has_all_actions_and_targets_clicked_row(address_pag
     point = tab.table.visualRect(tab.model.index(5, column)).center()
     def choose(menu, position):
         assert_address_actions(menu)
-        action = next(action for action in menu.actions() if action.text() == choice)
+        action = entries(menu)[choice]
         if method == "edit_address":
             action.trigger()  # exec_() normally emits triggered for the existing directly wired actions.
         return action
@@ -208,10 +196,28 @@ def test_create_terminal_session_files_it_under_the_network_and_subnet(address_p
     created = []
     window.terminal_tab.create_session = lambda *args: created.append(args)
     point = tab.table.visualRect(tab.model.index(5, 0)).center()
-    monkeypatch.setattr(QMenu, "exec_", lambda menu, position: next(
-        action for action in menu.actions() if action.text() == "Create Terminal Session..."))
+    monkeypatch.setattr(QMenu, "exec_", lambda menu, position: entries(menu)["Create Terminal Session..."])
     tab.address_menu(point)
     assert created == [("10.0.0.5", "SSH", "core-sw1", "Lab/LAN")]
+
+
+def test_ssh_and_scp_use_the_saved_session(address_page, monkeypatch):
+    window, tab = address_page
+    window.terminal_tab = SessionPage([Session("Core-SW1", host="core-sw1", username="admin")])
+    point = tab.table.visualRect(tab.model.index(5, 0)).center()
+    shown = []
+    monkeypatch.setattr(QMenu, "exec_", lambda menu, position: shown.append(entries(menu)))
+    tab.address_menu(point)
+    labels = shown[0]
+    assert {"Open SSH Session (Core-SW1)", "Open New SSH Session", "Open SCP Session"}.issubset(labels)
+    assert window.terminal_tab.asked == ("10.0.0.5", ["core-sw1"])  # Found by the address or the recorded name
+    assert "Create Terminal Session..." not in labels  # It has one
+    monkeypatch.setattr(QMenu, "exec_", lambda menu, position: entries(menu)["Open SSH Session (Core-SW1)"])
+    tab.address_menu(point)
+    monkeypatch.setattr(QMenu, "exec_", lambda menu, position: entries(menu)["Open SCP Session"])
+    tab.address_menu(point)
+    assert window.terminal_tab.opened == [("10.0.0.5", ["core-sw1"], "core-sw1", "Lab/LAN", True)]
+    assert window.scp_tab.opened == [("10.0.0.5", ["core-sw1"], "core-sw1", "Lab/LAN", True)]
 
 
 def test_real_ipam_context_event_preserves_menu_and_runs_added_action(app, address_page, monkeypatch):

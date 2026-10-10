@@ -736,7 +736,7 @@ class MacFinderTab(QWidget):
         if location is not None and location.switch_ip:
             switch_menu = menu.addMenu(f"Switch: {location.switch}")
             actions.update(HostActions(self.window, menu).add_to(switch_menu, location.switch_ip,
-                                                                 name=location.switch))
+                                                                 name=location.switch, grouped=False))
         menu.addSeparator()
         if normalize_mac(mac):
             actions[menu.addAction("Copy MAC Address")] = lambda: QApplication.clipboard().setText(mac)

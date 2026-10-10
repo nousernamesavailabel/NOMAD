@@ -1,4 +1,4 @@
-"""Editing the terminal's keyword highlighting: the words (or patterns) and their colours."""
+"""Editing the terminal's keyword highlighting: the words (or patterns) and their colors."""
 import dataclasses
 import re
 
@@ -11,7 +11,7 @@ from ..terminal.highlight import COLORS, DEFAULT_RULES, HighlightRule
 from .common import ColumnFitter, set_hint
 from .theme import COLORS as THEME
 
-COLUMNS = ["Word or Pattern", "Colour", "Pattern (regex)", "Match Case", "Whole Word"]
+COLUMNS = ["Word or Pattern", "Color", "Pattern (regex)", "Match Case", "Whole Word"]
 
 
 class HighlightDialog(QDialog):
@@ -24,7 +24,7 @@ class HighlightDialog(QDialog):
         self.enabled_check = QCheckBox("Highlight keywords in terminal sessions")
         self.enabled_check.setChecked(store.enabled)
         layout.addWidget(self.enabled_check)
-        intro = QLabel("Words are coloured where the device shows them in the plain colour (colours the device uses "
+        intro = QLabel("Words are colored where the device shows them in the plain color (colors the device uses "
                        "itself are left alone). Where two rules match the same text, the one higher in the list wins, "
                        "so put \"administratively down\" above \"down\".")
         intro.setWordWrap(True)

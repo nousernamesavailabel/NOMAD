@@ -1,5 +1,6 @@
 """The Network Map page: showing a crawled map, finding things on it, the tables, exports and settings."""
 import os
+from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -7,7 +8,7 @@ import pytest  # noqa: E402
 from netmap_fakes import LAB_MACS, PC1_MAC, build_network  # noqa: E402
 from PyQt5.QtCore import QRectF, QSettings, Qt, pyqtSignal  # noqa: E402
 from PyQt5.QtTest import QTest  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QMenu, QWidget  # noqa: E402
 
 from nomad.netmap import export, store  # noqa: E402
 from nomad.netmap.crawl import CrawlSettings, Crawler  # noqa: E402
@@ -434,27 +435,47 @@ def test_show_in_other_tabs(tab, crawled):
     tab.on_crawled(crawled)
     tab.tabs.setCurrentWidget(tab.view)
     choices = show_in_labels(tab, "core")
-    assert list(choices) == ["Show in Logical (L3)", "Show in Devices", "Show in Links"]  # Not the tab showing
+    assert list(choices) == ["Logical (L3)", "Devices", "Links"]  # Show In: not the tab showing
 
-    choices["Show in Links"]()
+    choices["Links"]()
     assert tab.tabs.currentWidget() is tab.links_table
     rows = sorted({index.row() for index in tab.links_table.selectionModel().selectedRows()})
     assert len(rows) == 4  # Every link of the core
-    assert "Show in Links" not in show_in_labels(tab, "core")
+    assert "Links" not in show_in_labels(tab, "core")
 
-    show_in_labels(tab, "acc2")["Show in Devices"]()
+    show_in_labels(tab, "acc2")["Devices"]()
     assert tab.tabs.currentWidget() is tab.devices_table
     selected = tab.devices_table.selectionModel().selectedRows()
     assert len(selected) == 1 and tab.devices_table.item(selected[0].row(), 0).text() == "acc2"
 
-    show_in_labels(tab, "core")["Show in Logical (L3)"]()
+    show_in_labels(tab, "core")["Logical (L3)"]()
     assert tab.tabs.currentWidget() is tab.l3_view
     assert [item.key for item in tab.l3_view.scene().selectedItems()] == ["core"]
-    assert "Show in Logical (L3)" not in show_in_labels(tab, "acc2")  # No IP interfaces: not on the L3 view
+    assert "Logical (L3)" not in show_in_labels(tab, "acc2")  # No IP interfaces: not on the L3 view
 
-    show_in_labels(tab, "rtr1")["Show in Physical (L2)"]()
+    show_in_labels(tab, "rtr1")["Physical (L2)"]()
     assert tab.tabs.currentWidget() is tab.view
     assert [item.key for item in tab.view.scene().selectedItems()] == ["rtr1"]
+
+
+def test_device_menu_groups_like_items(tab, crawled, monkeypatch):
+    for name in ("terminal_tab", "scp_tab"):
+        page = Mock()
+        page.saved_matches.return_value = []
+        setattr(tab.window, name, page)
+    tab.on_crawled(crawled)
+    keys = sorted(crawled.devices)
+    for key in keys[:2]:
+        tab.view.items_by_key[key].setSelected(True)
+    shown = []
+    monkeypatch.setattr(QMenu, "exec_", lambda menu, *args: shown.append(
+        {action.text(): action.menu() for action in menu.actions() if not action.isSeparator()}))
+    tab.show_device_menu(keys[0], None)
+    entries = shown[-1]
+    assert len(entries) <= 16  # Fits on the screen (it was over 40 entries)
+    assert {"Connect", "Tools", "Show In", "Group", "Layout", "Edit", "Copy Name", "Copy Address"} <= set(entries)
+    assert "Copy IP Address" not in entries and "Show on Map" not in entries  # Copy Address, Show In
+    assert "Delete 2 Devices..." in [action.text() for action in entries["Edit"].actions()]
 
 
 def test_links_table_shows_both_ends(tab, crawled):

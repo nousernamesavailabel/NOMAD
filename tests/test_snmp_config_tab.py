@@ -6,9 +6,9 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PyQt5.QtCore import QSettings  # noqa: E402
+from PyQt5.QtCore import QSettings, Qt  # noqa: E402
 from PyQt5.QtTest import QTest  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QMessageBox, QWidget  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox, QWidget  # noqa: E402
 
 from nomad.snmpv3 import V3User  # noqa: E402
 from nomad.terminal.sessions import SSH, TELNET, Session  # noqa: E402
@@ -199,6 +199,75 @@ def test_prefill_from_the_watch_tab(page):
     page.prefill("10.0.0.70", USER)
     assert page.destinations_input.text() == "10.0.0.50 10.0.0.70"
     assert page.v3_user() == USER and page.trap_version_combo.currentData() == "v3"
+
+
+def test_the_maps_credentials_all_at_once(page, monkeypatch):
+    """Use the Map's Credentials: public is left out while there's anything else, those for subnets unless ticked."""
+    other = V3User("branch", "sha256", "authpass2", "none")
+    page.window.netmap_tab.tried = [USER, other, "public", "corp-ro", "lab-ro"]
+    page.window.netmap_tab.overrides = [("10.8.0.0/16", "branch-ro"), ("10.9.0.0/16", USER)]
+    entries = page.map_credential_entries()
+    assert entries[-1] == ("branch-ro", "10.8.0.0/16") and len(entries) == 6  # USER isn't listed twice
+    assert snmp_config_tab.default_choice(entries) == [USER, other, "corp-ro", "lab-ro"]
+    assert snmp_config_tab.default_choice([("public", "")]) == ["public"]  # When it's all there is
+    shown = []
+
+    def exec_(dialog):
+        shown.append([dialog.list.item(row).text() for row in range(dialog.list.count())])
+        dialog.list.item(5).setCheckState(Qt.Checked)  # branch-ro, for its subnet
+        return QDialog.Accepted
+    monkeypatch.setattr(snmp_config_tab.MapCredentialsDialog, "exec_", exec_)
+    page.choose_map_credentials()
+    assert shown[0][2] == "Community public" and shown[0][5] == "Community branch-ro  (for 10.8.0.0/16)"
+    assert page.community_input.text() == "corp-ro" and page.v3_user() == USER
+    assert page.more_credentials == ["lab-ro", "branch-ro", other]
+    assert not page.more_widget.isHidden() and "community lab-ro" in page.more_label.text()
+    for line in ("snmp-server community corp-ro RO NOMAD-SNMP", "snmp-server community lab-ro RO NOMAD-SNMP",
+                 "snmp-server community branch-ro RO NOMAD-SNMP",
+                 "snmp-server user branch NOMAD v3 auth sha-2 256 authpass2 access NOMAD-SNMP",
+                 "snmp-server user nomad NOMAD v3 auth sha authpass1 priv aes 128 privpass1 access NOMAD-SNMP"):
+        assert line in page.lines
+    assert "snmp-server community public RO NOMAD-SNMP" not in page.lines
+    page.community_check.setChecked(False)  # The map's other community strings go with the box
+    assert not any(line.startswith("snmp-server community") for line in page.lines)
+    assert "community" not in page.more_label.text()
+    page.community_check.setChecked(True)
+    page.clear_more()
+    assert page.more_widget.isHidden() and "snmp-server community lab-ro RO NOMAD-SNMP" not in page.lines
+
+
+def test_only_users_from_the_map_send_v3_traps(page):
+    page.use_map_credentials([USER])
+    assert not page.community_check.isChecked() and page.trap_version_combo.currentData() == "v3"
+    assert "snmp-server host 10.0.0.50 version 3 priv nomad" in page.lines
+    page.use_map_credentials(["corp-ro"])
+    assert not page.v3_check.isChecked() and page.trap_version_combo.currentData() == "v2c"
+
+
+def test_the_map_without_credentials_says_so(page, monkeypatch):
+    page.window.netmap_tab.tried = []
+    said = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: said.append(args[2]))
+    page.choose_map_credentials()
+    assert "no SNMP credentials" in said[0]
+
+
+def test_prefill_with_the_maps_credentials(page):
+    page.window.netmap_tab.tried = [USER, "public", "corp-ro"]
+    page.prefill("10.0.0.70", from_map=True)
+    assert page.v3_user() == USER and page.community_input.text() == "corp-ro" and page.more_credentials == []
+    assert "snmp-server community public RO NOMAD-SNMP" not in page.lines
+
+
+def test_the_maps_other_credentials_are_kept_with_the_settings(page, tmp_path):
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+    page.use_map_credentials(["corp-ro", "lab-ro", USER, V3User("branch", "sha", "authpass2", "none")])
+    page.save_settings(settings)
+    settings.sync()
+    assert "lab-ro" not in (tmp_path / "settings.ini").read_text(encoding="utf-8", errors="replace")
+    other = SnmpConfigTab(Window())
+    other.restore_settings(settings)
+    assert other.more_credentials == page.more_credentials and other.lines == page.lines
 
 
 def test_settings_round_trip_keeps_secrets_encrypted(page, tmp_path):

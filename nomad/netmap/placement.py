@@ -240,7 +240,7 @@ def _routing_tables(network_map):
     return tables
 
 
-def analyse(network_map):
+def analyze(network_map):
     """Every subnet a device on the map has an address in, per VRF: [MapSubnet] by VRF then address."""
     found = places(network_map)
     segments = _Segments(network_map)

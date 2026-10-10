@@ -105,7 +105,7 @@ class IpContextMenus(QObject):
             menu.addSeparator()
         for address in addresses:
             submenu = menu.addMenu(f"IP: {address}")
-            actions = HostActions(self.window, menu).add_to(submenu, address)
+            actions = HostActions(self.window, menu).add_to(submenu, address, grouped=False)  # Already its own
             # Existing menus often dispatch exec_() through their own action dictionary.
             # Connect these new actions directly, leaving that dictionary untouched.
             for action, callback in actions.items():

@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBo
 
 from ..ipam.history import network_as_of
 from ..ipam.client import OldServerError, ServerUnreachable, TeamKeyError, TeamStore, admin_key, \
-    load_saved_key, read_key_file, save_key
+    load_saved_key
 from ..ipam.server import ConflictError, server_dir
 from ..ipam.spreadsheet import SpreadsheetError, parse_page, read_pages
 from ..ipam.store import ANYWHERE, DESCRIPTION, MAC, NAME, RESERVED, STATUSES, USED, VALUE, IpamError, IpamStore, \
@@ -38,11 +38,14 @@ from .ipam_dialogs import AddressDialog, ImportDialog, NetworkDialog, SubnetDial
 from .ipam_tools import BulkAddressDialog, BulkSubnetDialog, CheckDataDialog, CompareDialog, FreeBlocksDialog, \
     apply_to_addresses, apply_to_subnets
 from .theme import COLORS, accent_button
+from .tribe_join_dialog import connect_to_tribe
 
 log = logging.getLogger(__name__)
 
-ADDRESS_COLUMNS = ["Address", "Status", "Last Seen", "Name", "MAC Address", "Description", "Last Changed"]
+ADDRESS_COLUMNS = ["Address", "Status", "Last Seen", "Name", "MAC Address", "Description", "Last Changed",
+                   "On Map"]
 COL_SWEEP = 2
+COL_MAP = 7  # Only shown while a map of the network is open (on screen only: exports don't use this table)
 RESULT_COLUMNS = ["Network", "Subnet", "Subnet Name", "Address", "Status", "Name", "Details", "Description"]
 SEARCH_MATCHES = [("Any field", ANYWHERE), ("Address or subnet", VALUE), ("Name", NAME),
                   ("Description", DESCRIPTION), ("MAC address", MAC)]  # Then each detail, such as Telephony Rng
@@ -163,20 +166,43 @@ class AddressModel(QAbstractTableModel):
         self.first = 0
         self.pending = set()  # Addresses (as text) with a change waiting to be sent to the IPAM server
         self.sweep = None  # SweepResults for this network (what sweeps found, kept)
+        self.places_from = None  # Integration.map_places: the open map's addresses, or None without a map
+        self.places = {}  # {address: integration.MapPlace} of this subnet's addresses on the map
 
-    def load(self, network, recorded, special, nested, every_address, pending=(), sweep=None):
+    def load(self, network, recorded, special, nested, every_address, pending=(), sweep=None, places=None):
         self.beginResetModel()
         self.network, self.recorded, self.special, self.nested = network, recorded, special, nested
         self.pending = set(pending)
         self.sweep = sweep
+        self.places_from, self.places = places, self.places_here(places)
         self.first = int(network.network_address) if network is not None else 0
         if network is not None and every_address:
             self.rows = None
         else:
             # Free addresses where the sweep found something stay listed: they're what needs recording
             answered = {address for address in sweep.hosts if network is not None and address in network}                 if sweep is not None else set()
-            self.rows = sorted(set(recorded) | set(special) | answered)
+            self.rows = sorted(set(recorded) | set(special) | answered | set(self.places))  # And what the map has
         self.endResetModel()
+
+    def places_here(self, places):
+        """{address: MapPlace} of the map's addresses in this subnet (or, outside every subnet, those recorded)."""
+        found = {}
+        for ip, place in (places or {}).items():
+            address = ipaddress.ip_address(ip)
+            if (address in self.network) if self.network is not None else (address in self.recorded):
+                found[address] = place
+        return found
+
+    def set_places(self, places):
+        """The map changed: show where it has each address. False when that would change the rows listed (only
+        the addresses in use are, and the map has others now): the caller loads the subnet again."""
+        here = self.places_here(places)
+        if self.rows is not None and not set(here) <= set(self.rows):
+            return False
+        self.places_from, self.places = places, here
+        if self.rowCount():
+            self.dataChanged.emit(self.index(0, COL_MAP), self.index(self.rowCount() - 1, COL_MAP))
+        return True
 
     def rowCount(self, parent=QModelIndex()):
         if parent.isValid() or (self.network is None and self.rows is None):
@@ -220,7 +246,7 @@ class AddressModel(QAbstractTableModel):
         return FREE
 
     def sweep_result(self, address):
-        """(what sweeps saw, colour name, explanation) for the Last Seen column, or None."""
+        """(what sweeps saw, color name, explanation) for the Last Seen column, or None."""
         if self.sweep is None:
             return None
         result = self.sweep.result(address)
@@ -253,6 +279,21 @@ class AddressModel(QAbstractTableModel):
                                     " No sweep has ever heard from it."))
         return text, "muted", f"Nothing answered here in the sweep {when_text(swept)}."
 
+    def map_result(self, address):
+        """(where the open map has it, color name or "", explanation) for the On Map column, or None."""
+        if self.places_from is None:
+            return None
+        place = self.places.get(address)
+        record = self.recorded.get(address)
+        if place is not None:
+            text = place.text()
+            if record is None and address not in self.special:
+                return text, "warning", f"On the map ({text}), but IPAM has no record of this address: the map's "                                         "Record in IPAM... records it."
+            return text, "", f"On the map: {text}. Right-click > Show on the Network Map goes to it."
+        if record is None:
+            return None
+        return "Not on the map", "muted", "No device on the map has this address, and the switches haven't seen a "                                           "host with it (it may be off, or outside what was mapped)."
+
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
@@ -265,6 +306,13 @@ class AddressModel(QAbstractTableModel):
                 return None
             text, color, explanation = result
             return {Qt.DisplayRole: text, Qt.ForegroundRole: QColor(COLORS[color]),
+                    Qt.ToolTipRole: explanation}[role]
+        if column == COL_MAP and role in (Qt.DisplayRole, Qt.ForegroundRole, Qt.ToolTipRole):
+            result = self.map_result(address)
+            if result is None:
+                return None
+            text, color, explanation = result
+            return {Qt.DisplayRole: text, Qt.ForegroundRole: QColor(COLORS[color]) if color else None,
                     Qt.ToolTipRole: explanation}[role]
         if role == Qt.DisplayRole:
             if column == 0:
@@ -281,6 +329,8 @@ class AddressModel(QAbstractTableModel):
                 return ""
             if column == 6:
                 return f"{record.modified[:10]} {record.modified_by}" if record.modified else ""
+            if column >= len(ADDRESS_COLUMNS) - 1:
+                return ""
             return (record.name, record.mac, record.description)[column - 3]
         if role == Qt.ForegroundRole:
             if str(address) in self.pending and column == 1:
@@ -444,6 +494,7 @@ def when_text(moment):
 class IpamTab(QWidget):
     # A sync with the tribe's server finished (the VLANs and Subnet Placement pages show what it brought)
     tribe_synced = pyqtSignal()
+    tribe_sync_failed = pyqtSignal(str)  # Why (offline, or the key was refused): Connect to the Tribe shows it
 
     def __init__(self, window):
         super().__init__(window)
@@ -454,6 +505,7 @@ class IpamTab(QWidget):
         self.subnets = []
         self.network_id = None
         self.current = None  # The selected Subnet, UNSUBNETTED, or None
+        self.map_stale = False  # The map changed while the page was hidden: the On Map column is shown again
         self.following = False  # Showing the network another page chose
         self.syncing = False
         self.sync_again = False  # A change arrived during a sync: sync once more when it ends
@@ -780,6 +832,9 @@ class IpamTab(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self.open_store()
+        if self.map_stale:  # The map (or the facts) changed while another page was shown
+            self.map_stale = False
+            self.on_facts_changed()
         QTimer.singleShot(0, self.fit_subnet_panel)  # Once the page has its real width
 
     def focus_find(self):
@@ -882,18 +937,8 @@ class IpamTab(QWidget):
     def connect_with_key_file(self):
         if not self.open_store():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Connect to the Tribe's IPAM Server", "",
-                                              "NOMAD tribe key (*.nomadkey);;All files (*)")
-        if not path:
+        if not connect_to_tribe(self, self.window, "Connect to the Tribe's IPAM Server"):  # Tells the pages
             return
-        try:
-            key = read_key_file(path)
-            save_key(key)
-        except (IpamError, OSError) as error:
-            set_hint(self.status_label, str(error), "error")
-            return
-        self.connect_team()
-        self.window.tribe_key_changed(self)
         set_hint(self.status_label, "Tribe key saved (encrypted for your Windows account). You can delete the key "
                                     "file now, or keep it somewhere safe: anyone with it can change the tribe's "
                                     "IPAM.", "success")
@@ -943,11 +988,15 @@ class IpamTab(QWidget):
             except IpamError as error:  # Offline or refused: expected, so not logged as a failure
                 return sent, error
 
-        run_in_background(fetch, lambda result: self.sync_done(result, announce), self.sync_failed)
+        run_in_background(fetch, lambda result: self.sync_done(result, announce, team),
+                          lambda error: self.sync_failed(error, team))
 
-    def sync_done(self, result, announce):
+    def sync_done(self, result, announce, team=None):
         self.syncing = False
         if self.team is None:
+            return
+        if self.replaced(team):
+            QTimer.singleShot(0, self.sync_now)  # Fetched for another tribe since: sync the new one instead
             return
         if self.sync_again:
             self.sync_again = False
@@ -995,18 +1044,28 @@ class IpamTab(QWidget):
                                         "server.", "success")
         self.tribe_synced.emit()
 
-    def sync_failed(self, error):
+    def sync_failed(self, error, team=None):
         self.syncing = False
         if isinstance(error, tuple):  # (sent, error) from a sync that sent some changes first
             error = error[1]
         self.sync_again = False
         if self.team is None:
             return
+        if self.replaced(team):
+            QTimer.singleShot(0, self.sync_now)
+            return
         self.team.online, self.team.last_error = False, str(error)
         self.team.key_rejected = isinstance(error, TeamKeyError)
         log.info("IPAM sync failed: %s", error)
         self.show_team_status()
         self.update_permissions()
+        self.tribe_sync_failed.emit(str(error))
+
+    def replaced(self, team):
+        """Whether a sync started for `team` is for another tribe than the one used now (a different tribe key was
+        connected while it ran): its results belong to neither. The same server's copy is the same file, so a sync
+        from before connecting the same tribe again still counts."""
+        return team is not None and team is not self.team and (team.key.server_id, team.key.role) !=             (self.team.key.server_id, self.team.key.role)
 
     def refresh_everything(self):
         """Show new data from a sync, keeping the selected network, subnet and address where they still exist."""
@@ -1339,9 +1398,36 @@ class IpamTab(QWidget):
             self.following = False
 
     def on_facts_changed(self):
-        """Something the subnet's role, VLANs or placement come from changed: say them again."""
-        if isinstance(self.current, Subnet) and self.isVisible():
-            self.show_subnet_line(self.current)
+        """Something the subnet's role, VLANs or placement come from changed (or the map): say them again, and
+        where the map has each address. Hidden, it's done when the page is next shown."""
+        if self.current is None:
+            return
+        if not self.isVisible():
+            self.map_stale = True
+        else:
+            places = self.map_places()
+            if places is not self.model.places_from:
+                if not self.model.set_places(places):
+                    self.reload_addresses()
+                self.table.setColumnHidden(COL_MAP, places is None)
+            if isinstance(self.current, Subnet):
+                self.show_subnet_line(self.current)
+
+    def map_places(self):
+        """The open map's addresses (Integration.map_places), when it's of the network shown, else None."""
+        integration = hub(self.window)
+        if integration is None or self.as_of is not None or not self.network_id:
+            return None
+        return integration.map_places(f"{self.source}:{self.network_id}")
+
+    def reload_addresses(self):
+        """Show the current subnet's addresses again, keeping the scroll position and the address selected."""
+        scroll = self.table.verticalScrollBar().value()
+        selected = self.selected_addresses()
+        self.show_subnet()
+        if len(selected) == 1:
+            self.select_address(selected[0])
+        self.table.verticalScrollBar().setValue(scroll)
 
     def show_subnet_line(self, subnet):
         parts = []
@@ -1862,7 +1948,7 @@ class IpamTab(QWidget):
             self.subnet_label.setText("")
         elif self.current == UNSUBNETTED:
             recorded = {address.address: address for address in self.unsubnetted_addresses()}
-            self.model.load(None, recorded, {}, [], False)
+            self.model.load(None, recorded, {}, [], False, places=self.map_places())
             self.subnet_label.setText("Recorded addresses outside every subnet in this network. Add a subnet for "
                                       "them, or mark them free.")
         else:
@@ -1875,7 +1961,8 @@ class IpamTab(QWidget):
             now = self.as_of is None  # Pending changes and sweeps belong to the present, not a view of the past
             pending = self.team.pending_ips(self.network_id) if now and self.source == TEAM and self.team else ()
             sweep = self.sweep_results(self.source, self.network_id) if now else None
-            self.model.load(network, recorded, subnet.special_addresses(), nested, every, pending, sweep)
+            self.model.load(network, recorded, subnet.special_addresses(), nested, every, pending, sweep,
+                            self.map_places())
             parts = [f"<b>{subnet.cidr}</b>"]
             if subnet.name:
                 parts.append(subnet.name)
@@ -1901,6 +1988,8 @@ class IpamTab(QWidget):
                 parts.append("<i>(too large to list every address, so only those recorded are shown)</i>")
             self.subnet_line = "   ·   ".join(parts)
             self.show_subnet_line(subnet)
+        self.table.setColumnHidden(COL_MAP, self.model.places_from is None)
+        self.map_stale = False
         self.table.resizeColumnToContents(0)
         metrics = self.table.fontMetrics()
         for column, sample in ((1, "Gateway · Reserved"), (COL_SWEEP, "No answer · yesterday 00:00 · last seen Sep 00"), (3, "M" * 16),
@@ -2044,15 +2133,13 @@ class IpamTab(QWidget):
                       self.table.selectionModel().selectedRows())))
         if len(selected) == 1:
             menu.addSeparator()
-            menu.addAction("Ping", lambda: self.go_to(self.window.ping_tab, "ping_host", host))
-            menu.addAction("Traceroute", lambda: self.go_to(self.window.traceroute_tab, "trace_host", host))
-            menu.addAction("Scan Ports", lambda: self.go_to(self.window.ports_tab, "scan_host", host))
-            self.add_session_actions(menu, host)
+            # Its saved sessions are found by the address or its recorded name; a new one is named after the address
+            # and suggests the network and subnet as its folder
             record = self.model.recorded.get(selected[0])
             name = record.name.strip() if record is not None else ""
             host_actions = HostActions(self.window, self).add_to(
                 menu, host, aliases=[name] if name else (), name=name, folder=self.session_folder(),
-                sessions=("Telnet", "RDP"))
+                leave_out=("Show in IPAM",))
             menu.addSeparator()
             menu.addAction("History...", lambda: self.show_history("address", host)).setEnabled(self.as_of is None)
         links = self.other_page_actions(menu, address=host) if len(selected) == 1 else {}
@@ -2062,35 +2149,11 @@ class IpamTab(QWidget):
         elif chosen in host_actions:
             host_actions[chosen]()
 
-    def add_session_actions(self, menu, host):
-        """SSH and SCP to an address: with its saved session if there is one (found by the address or its recorded
-        name). A new session is named after the address and suggests the network and subnet as its folder."""
-        record = self.model.recorded.get(ipaddress.ip_address(host))
-        name = record.name.strip() if record is not None else ""
-        folder = self.session_folder()
-        aliases = [name] if name else []
-        for label, page in (("SSH", self.window.terminal_tab), ("SCP", self.window.scp_tab)):
-            matches = page.saved_matches(host, aliases)
-            if len(matches) == 1:
-                text = f"{label} ({matches[0].name})"
-            elif matches:
-                text = f"{label} ({len(matches)} Saved)..."
-            else:
-                text = label
-            menu.addAction(text, lambda page=page: page.open_address(host, aliases=aliases, name=name, folder=folder))
-            if matches:
-                menu.addAction(f"{label} as a New Session", lambda page=page: page.open_address(
-                    host, aliases=aliases, name=name, folder=folder, use_saved=False))
-
     def session_folder(self):
         """The folder to suggest for a new session to an address: the network and subnet, as Network/Subnet."""
         network, subnet = self.network(), self.selected_subnet()
         parts = [network.name if network is not None else "", subnet.name if subnet is not None else ""]
         return "/".join(part.strip().replace("/", "-") for part in parts if part and part.strip())
-
-    def go_to(self, page, method, host):
-        self.window.navigator.setCurrentWidget(page)
-        getattr(page, method)(host)
 
     def usable_selection(self):
         """The selected addresses a device can have (not a subnet's network or broadcast address)."""

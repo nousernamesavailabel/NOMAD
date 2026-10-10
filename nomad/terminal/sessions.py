@@ -1,4 +1,4 @@
-"""Saved terminal sessions (SSH, Telnet, serial, raw TCP), organised in folders, plus importing PuTTY's sessions."""
+"""Saved terminal sessions (SSH, Telnet, serial, raw TCP), organized in folders, plus importing PuTTY's sessions."""
 import dataclasses
 import ipaddress
 import json

@@ -253,8 +253,8 @@ class TerminalView(QWidget):
                 painter.drawRect(rect.adjusted(0.5, 0.5, -1, -1))
 
     def keyword_colors(self, line, columns):
-        """The keyword colour of each column of a line (None for most), or None if nothing matches. Only text
-        in the default colour is coloured: the device's own colours are left alone."""
+        """The keyword color of each column of a line (None for most), or None if nothing matches. Only text
+        in the default color is colored: the device's own colors are left alone."""
         if self.highlighter is None:
             return None
         text = "".join(line[column].data or " " for column in range(columns))  # One character per column
@@ -272,7 +272,7 @@ class TerminalView(QWidget):
     def draw_run(self, painter, text, column, y, char, selected, keyword=None):
         foreground_name = char.fg
         if char.bold and foreground_name in BASE_COLORS:
-            foreground_name = "bright" + foreground_name  # Bold shows as the bright colour, as most terminals do
+            foreground_name = "bright" + foreground_name  # Bold shows as the bright color, as most terminals do
         foreground = self.color(foreground_name, FOREGROUND)
         if keyword is not None:
             foreground = self.color(KEYWORD_COLORS[keyword][1:], foreground)

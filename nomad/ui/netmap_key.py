@@ -1,4 +1,4 @@
-"""The Network Map's key: what its colours, outlines and line styles mean, each drawn as the map draws it."""
+"""The Network Map's key: what its colors, outlines and line styles mean, each drawn as the map draws it."""
 from PyQt5.QtCore import QPointF, QRectF, Qt
 from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
@@ -11,7 +11,7 @@ from .netmap_view import KIND_COLORS, KIND_TAGS, PATH_BLOCKED, PATH_CARRIES, PAT
 from .theme import COLORS
 
 SWATCH_WIDTH, SWATCH_HEIGHT = 96, 40
-STRIP = 24  # The coloured strip down a device's left side, scaled down from the map's
+STRIP = 24  # The colored strip down a device's left side, scaled down from the map's
 
 
 def font(scale=0.8, bold=False, italic=False):
@@ -29,14 +29,17 @@ def rounded(rect, radius):
 
 
 def device(kind=SWITCH, dashed=False, unreachable=False, italic=False, status=None, ring=None, selected=False,
-           news=False):
-    """A device's box, as the map draws it: its kind's colour (or up/down while monitored) round it and on its tag."""
+           news=False, mark=None):
+    """A device's box, as the map draws it: its kind's color (or up/down while monitored, or an overlay's color)
+    round it and on its tag."""
     def paint(painter, rect):
         box = rect.adjusted(6, 8 if news else 5, -6, -5)
         color = QColor(KIND_COLORS.get(kind, COLORS["muted"]))
         outline = QColor(COLORS["error"]) if unreachable else color
         if status is not None:
             outline = QColor(STATUS_COLORS[status])
+        if mark is not None:
+            outline = QColor(COLORS.get(mark, mark))
         if ring:
             ring_color = QColor(ring)
             ring_color.setAlpha(170)
@@ -46,12 +49,12 @@ def device(kind=SWITCH, dashed=False, unreachable=False, italic=False, status=No
         painter.fillPath(path, QColor(COLORS["panel"]))
         strip = QRectF(box.left(), box.top(), STRIP, box.height())
         faded = QColor(outline)
-        faded.setAlpha(60 if status is None else 140)
+        faded.setAlpha(60 if status is None and mark is None else 140)
         painter.save()
         painter.setClipRect(strip)
         painter.fillPath(path, faded)
         painter.restore()
-        pen = QPen(outline, 2.4 if status is not None else 1.6)
+        pen = QPen(outline, 2.6 if mark is not None else 2.4 if status is not None else 1.6)
         if dashed:
             pen.setStyle(Qt.DashLine)
         painter.setPen(pen)
@@ -67,7 +70,7 @@ def device(kind=SWITCH, dashed=False, unreachable=False, italic=False, status=No
             painter.setPen(QPen(QColor(COLORS["selection"]), 2))
             painter.drawPath(rounded(box.adjusted(-3, -3, 3, 3), 7))
         painter.setFont(font(0.62, bold=True))
-        painter.setPen(QColor(outline if status is None else COLORS["text"]))
+        painter.setPen(QColor(outline if status is None and mark is None else COLORS["text"]))
         painter.drawText(strip, Qt.AlignCenter, KIND_TAGS.get(kind, "?"))
         painter.setFont(font(0.72, bold=True, italic=italic))
         painter.setPen(QColor(COLORS["error"] if unreachable else COLORS["text"]))
@@ -206,7 +209,7 @@ def node(shape, color, dashed=False, text=""):
 
 
 SECTIONS = [
-    ("Devices: the colour and tag on the left say what kind", [
+    ("Devices: the color and tag on the left say what kind", [
         (device(SWITCH), "Switch (SW)"),
         (device(ROUTER), "Router (RTR)"),
         (device(FIREWALL), "Firewall (FW)"),
@@ -224,7 +227,7 @@ SECTIONS = [
     ("Monitoring (Monitor ticked): the outline shows up or down instead of the kind", [
         (device(status=UP), "Green outline and dot: answers ping (its time is beside its address)"),
         (device(status=DOWN), "Red outline, red tint and dot: down (with how long for)"),
-        (device(status=NOT_CHECKED), "Grey outline and an empty dot: not pinged yet"),
+        (device(status=NOT_CHECKED), "Gray outline and an empty dot: not pinged yet"),
     ]),
     ("Marks on devices", [
         (device(news=True), "NEW: found by Watch and not looked at yet (or \"2 new hosts\": new hosts on it)"),
@@ -241,7 +244,7 @@ SECTIONS = [
         (line(style=Qt.DashLine), "Dashed line: found only by traceroute"),
         (line(style=Qt.DotLine), "Dotted line: drawn by hand"),
     ]),
-    ("A VLAN highlighted (a device's right-click menu > Highlight VLAN, or the VLANs tab)", [
+    ("A VLAN highlighted (Overlay > Highlight VLAN, a device's right-click menu > VLANs, or the VLANs tab)", [
         (line(VLAN_LINK_COLORS[TAGGED], 3), "Blue: carries it tagged (a trunk)"),
         (line(VLAN_LINK_COLORS[NATIVE], 3, Qt.DashLine), "Blue dashed: carries it as the trunk's native "
                                                          "(untagged) VLAN"),
@@ -249,6 +252,30 @@ SECTIONS = [
         (line(VLAN_LINK_COLORS[ONE_END], 3, Qt.DashLine), "Amber dashed: only one end carries it (a mismatch "
                                                           "worth checking)"),
         (line(faded=True), "Faint: doesn't carry it (devices without it fade too)"),
+    ]),
+    ("Overlays (the Overlay button, or right-click a device or link > What If It Fails?): one at a time, what "
+     "they don't mark fades (except Color By). The bar over the map says what each color means", [
+        (device(mark=COLORS["error"]), "Red outline: fails, or would be cut off (What If It Fails?); the only way "
+                                       "to switches, routers or firewalls (Single Points of Failure); a problem on "
+                                       "one of its ports (Trunk and Port Problems)"),
+        (device(mark=COLORS["warning"]), "Amber outline: the only way to other devices (APs, phones...), or a "
+                                         "warning on one of its ports"),
+        (device(mark=COLORS["success"]), "Green outline: still connected, where \"cut off\" is measured from (the "
+                                         "device put at the top, else the one the map started from); in the VRF, "
+                                         "or with an address in the subnet; or the root bridge (Spanning Tree)"),
+        (line(COLORS["error"], 3, Qt.DashLine), "Red dashed: a link that fails, is down at an end (Link Speed), "
+                                                "is blocked by spanning tree, or is seeing errors (Utilization)"),
+        (line(COLORS["error"], 3), "Red: a link cut off with what's beyond it, or a trunk/access or native VLAN "
+                                   "mismatch"),
+        (line(COLORS["warning"], 3, Qt.DashLine), "Amber dashed: VLANs allowed at one end only, in the VRF at one "
+                                                  "end only"),
+        (line(COLORS["warning"], 3), "Amber: the only link to part of the network"),
+        (line("#58a6ff", 3), "Link Speed: color and thickness by speed (orange 100 Mb/s or less, blue 1 Gb/s, "
+                             "teal 2.5 to 10 Gb/s, purple 25 to 40, white 100 and up)"),
+        (line(COLORS["success"], 3), "Utilization (while monitoring): green under 30% busy, amber to 70% (or "
+                                     "discarding), red over 70%"),
+        (device(mark="#c792ea"), "Color By: one color per model, software version, site... (gray: not known or "
+                                 "one of the rarer ones)"),
     ]),
     ("Carry VLAN (while its window is open): the route planned", [
         (line(*PATH_STYLES[PATH_PLANNED]), "Thick green dashed: a link of the route the VLAN will be added to"),
@@ -272,7 +299,7 @@ SECTIONS = [
         (port(), "A port's box: the hosts on it (name and address, or MAC) and their VLAN"),
         (port(COLORS["warning"]), f"Amber box: more than {SHARED_PORT_HOSTS} hosts on one port, probably an "
                                   "unmanaged switch or a hypervisor"),
-        (port(dashed=True, italic=True), "Dashed box, grey italics: hosts added by hand, not seen by the crawl"),
+        (port(dashed=True, italic=True), "Dashed box, gray italics: hosts added by hand, not seen by the crawl"),
         (port(new_host=True), "Green dot: a host found by Watch and not looked at yet"),
     ]),
     ("Logical (L3) view", [
@@ -281,7 +308,7 @@ SECTIONS = [
                                                              "under it)"),
         (node("subnet", COLORS["error"], text="10.1.2.0/24"), "Red subnet: Subnet Placement found a problem"),
         (node("subnet", COLORS["warning"], text="10.1.2.0/24"), "Amber subnet: Subnet Placement has a warning"),
-        (node("subnet", COLORS["muted"], text="10.1.2.0/24"), "Grey subnet: not in the map's IPAM network"),
+        (node("subnet", COLORS["muted"], text="10.1.2.0/24"), "Gray subnet: not in the map's IPAM network"),
         (node("box", COLORS["muted"], dashed=True, text="10.9.9.1"), "Dashed box: a next hop or router found by "
                                                                      "traceroute only, or this computer"),
         (node("star", COLORS["muted"], dashed=True, text="*"), "*: a traceroute hop that didn't answer"),

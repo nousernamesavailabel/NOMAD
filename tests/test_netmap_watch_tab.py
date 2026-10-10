@@ -323,24 +323,31 @@ def test_tribe_server_uses_its_own_key_for_maps(app, server, tmp_path, monkeypat
 
 def test_joining_the_tribe_from_the_map_page(app, server, tmp_path, monkeypatch):
     from nomad.ipam import client
-    from nomad.ui.netmap_tab import QFileDialog
+    from nomad.ui import tribe_join_dialog
+    from nomad.ui.tribe_join_dialog import MAPS, QFileDialog, JoinTribeDialog
     from test_ipam_server import key_for
     saved = []
     monkeypatch.setattr(client, "load_saved_key", lambda: saved[-1] if saved else None)
-    monkeypatch.setattr(netmap_tab, "save_key", saved.append)
-    monkeypatch.setattr(netmap_tab, "read_key_file", lambda path: key_for(server))
+    monkeypatch.setattr(tribe_join_dialog, "save_key", saved.append)
+    monkeypatch.setattr(tribe_join_dialog, "read_key_file", lambda path: key_for(server))
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args, **kwargs: ("tribe.nomadkey", ""))
     monkeypatch.setattr(netmap_tab, "is_tribe_server", lambda: False)  # This PC may have the IPAM service
+    shown = []
+    monkeypatch.setattr(JoinTribeDialog, "exec_", lambda dialog: shown.append(dialog) or wait_for(
+        app, lambda: dialog.saved and not dialog.working()))
     page = make_tab(build_network(), tmp_path, monkeypatch)
     page.tribe.maps_factory = lambda key: __import__("nomad.netmap.tribe", fromlist=["TribeMaps"]).TribeMaps(
         key.server_id, client.TeamClient(key, user="carol"), tmp_path / "carol-maps.db")
     notified = []
-    page.window.tribe_key_changed = notified.append
+    page.window.ipam_tab = None
+    page.window.netmap_tab = page
+    page.window.tribe_key_changed = lambda origin=None: (notified.append(origin), page.tribe_key_changed())
     try:
         page.fill_tribe_menu()
         assert [action.text() for action in page.tribe_menu.actions()] == ["Connect to the Tribe with a Key File..."]
         page.join_tribe()
-        assert saved and notified == [page] and "Connected to the tribe" in page.status_label.text()
+        assert saved and notified == [None] and "Connected to the tribe" in page.status_label.text()
+        assert shown[0].states[MAPS] == "done"  # The dialog followed the map page's first sync
         assert page.tribe.maps is not None
         page.fill_tribe_menu()
         texts = [action.text() for action in page.tribe_menu.actions()]
@@ -410,7 +417,7 @@ class IdleCrawl:
 
 
 def answer_with(monkeypatch, label):
-    """Have the next question box answered by clicking the button labelled label."""
+    """Have the next question box answered by clicking the button labeled label."""
     def click(box):
         next(button for button in box.buttons() if button.text().replace("&", "") == label).click()
         return 0

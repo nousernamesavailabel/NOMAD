@@ -1,19 +1,24 @@
 """Tools > Tribe Management: connect to the tribe with a tribe key file or disconnect this computer from it (the only
 place to leave the tribe), and turn this computer into the tribe server (the NOMAD IPAM Server Windows service),
-handing out the tribe key file others connect with. The tribe shares both IPAM networks and network maps."""
+handing out the tribe key file others connect with, or move the tribe server to another computer (see
+nomad/ipam/migrate.py). The tribe shares both IPAM networks and network maps."""
 import logging
 import os
 
-from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, \
-    QMessageBox, QPushButton, QSpinBox, QVBoxLayout
+from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, \
+    QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout
 
 from ..ipam import service
-from ..ipam.client import admin_key, load_saved_key, read_key_file, save_key
+from ..ipam.client import admin_key, load_saved_key
+from ..ipam.migrate import MOVE_FILE_SUFFIX, MoveFile, existing_server, export_server, import_server, moved, \
+    undo_move
 from ..ipam.server import DEFAULT_PORT, KEY_FILE_SUFFIX, change_team_secret, fingerprint_of_file, load_config, \
     server_dir, write_team_key
 from ..ipam.store import IpamError
 from .common import run_in_background, set_hint
 from .theme import accent_button
+from .tribe_join_dialog import connect_to_tribe
+from .tribe_move_dialog import MoveOutDialog
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +96,19 @@ class TribeDialog(QDialog):
             key_row.addWidget(button)
         key_row.addStretch()
         server_layout.addLayout(key_row)
+        move_row = QHBoxLayout()
+        self.move_out_button = QPushButton("Move to Another Computer...")
+        self.move_out_button.setToolTip("Save everything the tribe server keeps in a move file for the new computer, "
+                                        "and point laptops there. They keep their copies and pending changes.")
+        self.move_in_button = QPushButton("Set Up from Move File...")
+        self.move_in_button.setToolTip("Make this computer the tribe server, carrying on from the move file saved "
+                                       "on the old one (same data, certificate and tribe key).")
+        self.undo_move_button = QPushButton("Undo Move...")
+        self.undo_move_button.setToolTip("Put this server back in service, if the move is called off.")
+        for button in (self.move_out_button, self.move_in_button, self.undo_move_button):
+            move_row.addWidget(button)
+        move_row.addStretch()
+        server_layout.addLayout(move_row)
         self.admin_label = QLabel()
         self.admin_label.setWordWrap(True)
         server_layout.addWidget(self.admin_label)
@@ -112,6 +130,9 @@ class TribeDialog(QDialog):
         self.save_key_button.clicked.connect(self.save_key)
         self.change_key_button.clicked.connect(self.change_key)
         self.open_folder_button.clicked.connect(lambda: os.startfile(server_dir()))
+        self.move_out_button.clicked.connect(self.move_out)
+        self.move_in_button.clicked.connect(self.move_in)
+        self.undo_move_button.clicked.connect(self.undo_move)
         self.busy = False
         self.refresh()
 
@@ -120,7 +141,12 @@ class TribeDialog(QDialog):
         state = service.status()
         self.refresh_membership(admin, state)
         configured = (server_dir() / "config.json").exists()
-        self.status_label.setText(state)
+        moved_to = moved() if configured and admin else None
+        if moved_to:
+            where = ", ".join(moved_to.get("hosts") or []) or "an address not given (laptops need the new key file)"
+            self.status_label.setText(f"{state}; moved to {where}. It only points laptops there now.")
+        else:
+            self.status_label.setText(state)
         try:
             self.fingerprint_label.setText(f"Self-signed; fingerprint {fingerprint_of_file(server_dir() / 'cert.pem')}"
                                            if configured and admin else "Created when the service is installed")
@@ -137,8 +163,11 @@ class TribeDialog(QDialog):
         self.start_button.setEnabled(idle and state == service.STOPPED)
         self.stop_button.setEnabled(idle and state == service.RUNNING)
         self.uninstall_button.setEnabled(idle and state != service.NOT_INSTALLED)
-        for button in (self.save_key_button, self.change_key_button, self.open_folder_button):
+        for button in (self.save_key_button, self.change_key_button, self.open_folder_button, self.move_out_button):
             button.setEnabled(idle and configured)
+        self.move_in_button.setEnabled(idle)
+        self.undo_move_button.setVisible(bool(moved_to))
+        self.undo_move_button.setEnabled(idle)
         self.admin_label.setVisible(not admin)
         if not admin:
             set_hint(self.admin_label, "Managing the tribe server needs administrator rights: use File > Restart as "
@@ -162,19 +191,9 @@ class TribeDialog(QDialog):
         self.disconnect_button.setEnabled(saved is not None and not self.busy)
 
     def join(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Connect to the Tribe", "",
-                                              f"NOMAD tribe key (*{KEY_FILE_SUFFIX});;All files (*)")
-        if not path:
-            return
-        try:
-            save_key(read_key_file(path))
-        except (IpamError, OSError) as error:
-            set_hint(self.message_label, str(error), "error")
-            return
-        self.window.tribe_key_changed()
-        set_hint(self.message_label, "Connected to the tribe. The key is saved, encrypted for your Windows account. You can "
-                                     "delete the key file now, or keep it somewhere safe: anyone with it can change "
-                                     "the tribe's IPAM and maps.", "success")
+        if connect_to_tribe(self, self.window):
+            set_hint(self.message_label, "Connected to the tribe. The key is saved, encrypted for your Windows "
+                                         "account.", "success")
         self.refresh()
 
     def leave_tribe(self):
@@ -242,6 +261,97 @@ class TribeDialog(QDialog):
         set_hint(self.message_label, f"Saved {path}. Give it to the tribe (a USB stick or a file share only the "
                                      "tribe can read): anyone with it can change the tribe's IPAM and maps.",
                  "success")
+
+    def move_out(self):
+        dialog = MoveOutDialog(self, service.configured_port() or self.port_input.value())
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        path, password, hosts, port = dialog.path, dialog.password, dialog.hosts, dialog.port
+
+        def export():
+            running = service.status() == service.RUNNING
+            if running:
+                service.stop()  # So nothing changes after the export
+            try:
+                return export_server(path, password, hosts, port)
+            finally:
+                if running:
+                    service.start()  # Moved now: it only points laptops to the new server
+
+        where = (f"Laptops that reach this server now switch to {', '.join(hosts)} by themselves. Leave it running "
+                 "until they all have (those away during the move too), then uninstall it." if hosts else
+                 "No new address was given, so laptops need the new tribe key file (Save Tribe Key File on the new "
+                 "server); they keep their copies and pending changes.")
+        self.run("Saving the move file...", export,
+                 f"Saved {path}. Take it to the new computer (and give the password separately), run NOMAD as "
+                 f"administrator there, and use Tribe Management > Set Up from Move File. {where}",
+                 self.report_lost_secrets)
+
+    def report_lost_secrets(self, summary):
+        if summary.lost_secrets:
+            QMessageBox.warning(self, "Tribe Maps' SNMP Credentials",
+                                f"The SNMP credentials of {summary.lost_secrets} tribe map(s) couldn't be read, so "
+                                "they aren't in the move file. Set them again with SNMP Credentials... on the map "
+                                "page once the new server is running.")
+
+    def move_in(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Set Up from Move File", "",
+                                              f"NOMAD tribe server move file (*{MOVE_FILE_SUFFIX});;All files (*)")
+        if not path:
+            return
+        password, ok = QInputDialog.getText(self, "Move File Password", "The move file's password:",
+                                            QLineEdit.Password)
+        if not ok:
+            return
+        try:
+            move_file = MoveFile(path, password)
+        except IpamError as error:
+            set_hint(self.message_label, str(error), "error")
+            return
+        summary = move_file.summary
+        here = existing_server()
+        replaces = ""
+        if here:
+            replaces = ("\n\nThis computer already has " + ("this tribe server's data" if here == summary.server_id
+                                                            else "a different tribe server") +
+                        ", which this replaces. Its folder is kept beside the new one, renamed "
+                        "server-before-move-<date>.")
+        if QMessageBox.question(self, "Set Up the Tribe Server Here",
+                                f"{summary.describe()}\n\nMake this computer the tribe server with it? NOMAD installs "
+                                f"the service on port {summary.port} and opens the port in Windows Firewall."
+                                f"{replaces}") != QMessageBox.Yes:
+            return
+
+        def set_up_here():
+            if service.status() != service.NOT_INSTALLED:
+                service.stop()
+            import_server(move_file)
+            return service.install(summary.port)
+
+        self.port_input.setValue(summary.port)
+        self.run("Setting the tribe server up from the move file...", set_up_here,
+                 f"This computer is the tribe server now, on port {summary.port}. Laptops told this address switch "
+                 "over by themselves; give the others a new tribe key file (Save Tribe Key File): they keep their "
+                 "copies and pending changes. Delete the move file once you're done: it holds the tribe key.",
+                 lambda _: self.window.tribe_key_changed())
+
+    def undo_move(self):
+        if QMessageBox.question(self, "Undo the Move",
+                                "Put this server back in service? Only do this if nobody has used the new server: "
+                                "changes made there stay there, and laptops that switched to it need this server's "
+                                "tribe key file again.") != QMessageBox.Yes:
+            return
+        try:
+            undo_move()
+        except OSError as error:
+            set_hint(self.message_label, f"Couldn't change it: {error.strerror or error}", "error")
+            return
+        if service.status() == service.RUNNING:
+            self.run("Restarting the service...", lambda: (service.stop(), service.start()),
+                     "This server is back in service.", lambda _: self.window.tribe_key_changed())
+        else:
+            set_hint(self.message_label, "This server is back in service once the service is started.", "success")
+            self.refresh()
 
     def change_key(self):
         if QMessageBox.question(self, "Change the Tribe Key",

@@ -24,6 +24,9 @@ add_vlan_domain, update_vlan_domain, delete_vlan_domain, set_vlan, delete_vlan a
 Subnet placement (API 8; see placement.py): set_placement, plan_move, update_move and complete_move; set_role (API 9).
 Moving subnets between networks (API 10; see network_move.py): move_subnet, and take_subnets (from a laptop's own).
 
+A server moved to another computer (see migrate.py) answers every request with HTTP 410 and {"hosts", "port"}: the
+new server's address, which laptops switch to by themselves.
+
 Tribe maps (network maps shared by everyone; see nomad/netmap/shared.py), kept in maps.db:
     GET  /api/maps/changes?since=N    maps and map items changed after map revision N
     POST /api/maps/create             {"name", "changes": [...], "secrets": {...}}: a new shared map
@@ -180,7 +183,7 @@ def fingerprint_of_file(path):
 
 
 def team_key(config, directory=None):
-    """The contents of the tribe key file: where the server is, how to recognise it, and the tribe secret."""
+    """The contents of the tribe key file: where the server is, how to recognize it, and the tribe secret."""
     directory = Path(directory or server_dir())
     return {"format": KEY_FILE_FORMAT, "server_id": config["server_id"], "hosts": host_names(),
             "port": config["port"], "fingerprint": fingerprint_of_file(directory / "cert.pem"),
@@ -299,6 +302,14 @@ class IpamServer:
             return TEAM
         raise RequestError(401, "This tribe key isn't accepted. The tribe key may have been changed: ask for the "
                                 "new tribe key file.")
+
+    def moved_reply(self):
+        """What a moved server answers every request with: where the tribe server is now (see migrate.py)."""
+        moved = self.config["moved"]
+        where = ", ".join(moved.get("hosts") or [])
+        return {"error": f"The tribe server has moved to another computer{f' ({where})' if where else ''}."
+                         + ("" if where else " Ask for the new tribe key file."),
+                "moved": True, "hosts": moved.get("hosts") or [], "port": moved.get("port") or self.port}
 
     def status(self, role):
         with self.store.lock:
@@ -669,6 +680,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         app = self.server_app
         try:
             role = app.role_for(self.headers.get("Authorization", ""), self.client_address[0])
+            if app.config.get("moved"):
+                return self._reply(410, app.moved_reply())
             url = urlparse(self.path)
             if method == "GET" and url.path == "/api/status":
                 return self._reply(200, app.status(role))

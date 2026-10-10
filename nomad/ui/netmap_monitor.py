@@ -28,6 +28,7 @@ class PollThread(QThread):
 class NetworkMonitor(QObject):
     """Owns the polling timer, each device's status and the Monitor tab."""
     statuses_changed = pyqtSignal()  # After every poll, to redraw the dots and response times
+    polled = pyqtSignal()  # After each poll's results are in (the map then reads its links' counters)
     history_added = pyqtSignal(list)  # [history entries] for the map to keep
 
     def __init__(self, parent=None, pinger=monitor.ping):
@@ -151,6 +152,7 @@ class NetworkMonitor(QObject):
             self.history_added.emit(history)
         self.update_summary()
         self.statuses_changed.emit()
+        self.polled.emit()
 
     def shutdown(self):
         self.timer.stop()

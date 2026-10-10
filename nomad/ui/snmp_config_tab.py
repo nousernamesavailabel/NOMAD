@@ -6,11 +6,12 @@ import logging
 import secrets
 
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, \
-    QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, \
-    QToolButton, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, \
+    QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, \
+    QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QToolButton, QVBoxLayout, QWidget
 
-from ..snmpv3 import AUTH_NAMES, PRIV_NAMES, V3User, is_v3
+from ..snmpv3 import AUTH_NAMES, PRIV_NAMES, V3User, credential_from_json, credential_label, credential_to_json, \
+    is_v3
 from ..switchconfig import SYSLOG_LEVELS, TRAP_CATEGORIES, ConfigOptions, build, problems, undo
 from ..terminal.credentials import CredentialError, protect, unprotect
 from .common import set_hint
@@ -22,10 +23,57 @@ log = logging.getLogger(__name__)
 FORM_ROOM = 1.2  # The form starts this much wider than it needs at least, so nothing in it is cramped
 MIN_PREVIEW = 380  # The preview keeps at least this many pixels when the form gets its room
 SECRET_SETTINGS = "snmpconfig/secrets"
+WELL_KNOWN = {"public", "private"}  # Community strings everyone tries: not chosen for the switches unless asked
 
 
 def split_items(text):
     return [item for item in text.replace(",", " ").split() if item]
+
+
+def default_choice(entries):
+    """Which of the map's credentials ([(credential, subnet or "")]) go on the switches unless chosen otherwise: those
+    tried everywhere, leaving out public and private when there's anything else."""
+    chosen = [credential for credential, subnet in entries if not subnet]
+    others = [credential for credential in chosen if is_v3(credential) or credential not in WELL_KNOWN]
+    return others or chosen
+
+
+class MapCredentialsDialog(QDialog):
+    """Which of the Network Map's community strings and SNMPv3 users the switches are set up with."""
+
+    def __init__(self, entries, chosen, parent=None):
+        """entries: [(credential, the subnet it's for or "")]; chosen: those ticked to begin with."""
+        super().__init__(parent)
+        self.setWindowTitle("Use the Map's Credentials")
+        self.resize(460, 360)
+        layout = QVBoxLayout(self)
+        intro = QLabel("Set the switches up with these of the Network Map's credentials, so it can read them. Traps "
+                       "are sent with the first community string or SNMPv3 user.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.list = QListWidget()
+        for credential, subnet in entries:
+            text = f"Community {credential}" if not is_v3(credential) else credential_label(credential)
+            item = QListWidgetItem(text + (f"  (for {subnet})" if subnet else ""))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if credential in chosen else Qt.Unchecked)
+            item.setData(Qt.UserRole, credential)
+            self.list.addItem(item)
+        layout.addWidget(self.list, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def chosen(self):
+        items = [self.list.item(row) for row in range(self.list.count())]
+        return list(dict.fromkeys(item.data(Qt.UserRole) for item in items if item.checkState() == Qt.Checked))
+
+    def accept(self):
+        if not self.chosen():
+            QMessageBox.warning(self, self.windowTitle(), "Choose at least one community string or SNMPv3 user.")
+            return
+        super().accept()
 
 
 class SnmpConfigTab(QWidget):
@@ -33,6 +81,7 @@ class SnmpConfigTab(QWidget):
         super().__init__(window)
         self.window = window
         self.lines = []
+        self.more_credentials = []  # More of the map's community strings and SNMPv3 users allowed to read
         self.init_ui()
         self.session_sender = SessionSender(self, window, self.status_label)
         self.update_preview()
@@ -132,6 +181,14 @@ class SnmpConfigTab(QWidget):
         group.setCheckable(True)
         self.access_group = group
         form = QFormLayout(group)
+        self.use_map_button = QPushButton("Use the Map's Credentials...")
+        self.use_map_button.setToolTip("Set the switches up with the community strings and SNMPv3 users saved for the "
+                                       "open Network Map, so it can read them.")
+        self.use_map_button.clicked.connect(self.choose_map_credentials)
+        map_row = QHBoxLayout()
+        map_row.addWidget(self.use_map_button)
+        map_row.addStretch(1)
+        form.addRow(map_row)
         self.community_check = QCheckBox("Community string (v2c, read-only):")
         self.community_input = QLineEdit()
         self.community_input.setPlaceholderText("Not public: make one up, or Generate")
@@ -181,6 +238,19 @@ class SnmpConfigTab(QWidget):
         form.addRow(self.v3_check, user_row)
         form.addRow("", protocol_row)
         form.addRow("", password_row)
+
+        self.more_widget = QWidget()  # The rest of the map's credentials chosen, when there are more
+        more_row = QHBoxLayout(self.more_widget)
+        more_row.setContentsMargins(0, 0, 0, 0)
+        self.more_label = QLabel()
+        self.more_label.setWordWrap(True)
+        clear_more = QPushButton("Leave Out")
+        clear_more.setToolTip("Only the community string and SNMPv3 user above.")
+        clear_more.clicked.connect(self.clear_more)
+        more_row.addWidget(self.more_label, 1)
+        more_row.addWidget(clear_more)
+        form.addRow(self.more_widget)
+        self.more_widget.setVisible(False)
 
         self.permit_input = QLineEdit()
         self.permit_input.setPlaceholderText("Addresses and subnets, such as 10.0.0.50 10.20.0.0/24")
@@ -320,6 +390,20 @@ class SnmpConfigTab(QWidget):
         self.priv_password_input.setEnabled(v3 and auth and self.priv_combo.currentData() != "none")
         for widget in (self.group_input, self.view_input):
             widget.setEnabled(v3)
+        self.update_more()
+
+    def update_more(self):
+        """Show the rest of the map's credentials chosen, those that go on the switches with the boxes ticked."""
+        used = [item for item in self.more_credentials
+                if (self.v3_check.isChecked() if is_v3(item) else self.community_check.isChecked())]
+        names = [credential_label(item) if is_v3(item) else f"community {item}" for item in used]
+        self.more_label.setText("Also from the map: " + ", ".join(names) + ".")
+        self.more_widget.setVisible(bool(used))
+
+    def clear_more(self):
+        self.more_credentials = []
+        self.update_more()
+        self.update_preview()
 
     def update_echo(self, show):
         for widget in (self.auth_password_input, self.priv_password_input):
@@ -352,7 +436,11 @@ class SnmpConfigTab(QWidget):
         return ConfigOptions(
             access=self.access_group.isChecked(),
             community=self.community_input.text().strip() if self.community_check.isChecked() else "",
-            v3_user=self.v3_user(), group=self.group_input.text().strip(), view=self.view_input.text().strip(),
+            v3_user=self.v3_user(),
+            more_communities=[item for item in self.more_credentials if not is_v3(item)]
+            if self.community_check.isChecked() else [],
+            more_users=[item for item in self.more_credentials if is_v3(item)] if self.v3_check.isChecked() else [],
+            group=self.group_input.text().strip(), view=self.view_input.text().strip(),
             acl=self.acl_input.text().strip(),
             permit=destinations if self.permit_same.isChecked() else split_items(self.permit_input.text()),
             location=self.location_input.text().strip(), contact=self.contact_input.text().strip(),
@@ -459,11 +547,65 @@ class SnmpConfigTab(QWidget):
             self.community_check.setChecked(True)
             self.community_input.setText(credential)
 
-    def prefill(self, destination="", credential=None):
-        """From the Network Map's Watch tab: send to this computer, with the map's credential."""
+    def map_credential_entries(self):
+        """The map's credentials as [(credential, the subnet it's for or "")]: those tried everywhere, in the order
+        they're tried, then those for particular subnets."""
+        page = getattr(self.window, "netmap_tab", None)
+        if page is None or not hasattr(page, "credentials"):
+            return []
+        entries = [(credential, "") for credential in dict.fromkeys(page.credentials())]
+        for subnet, credential in getattr(page, "overrides", []):
+            if all(credential != other for other, _ in entries):
+                entries.append((credential, subnet))
+        return entries
+
+    def chosen_credentials(self):
+        """The community strings and SNMPv3 users the switches are set up with now, those traps go with first."""
+        options = self.options()
+        primary = ([options.community] if options.community else []) + \
+            ([options.v3_user] if options.v3_user is not None else [])
+        return list(dict.fromkeys(primary + options.more_communities + options.more_users))
+
+    def choose_map_credentials(self):
+        entries = self.map_credential_entries()
+        if not entries:
+            QMessageBox.information(self, "Use the Map's Credentials", "The Network Map has no SNMP credentials yet: "
+                                    "add them with SNMP Credentials... on its page.")
+            return
+        current = [credential for credential in self.chosen_credentials()
+                   if any(credential == other for other, _ in entries)]
+        dialog = MapCredentialsDialog(entries, current or default_choice(entries), self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.use_map_credentials(dialog.chosen())
+
+    def use_map_credentials(self, chosen):
+        """Set the switches up with chosen (community strings and V3Users): traps go with the first of each."""
+        communities = [item for item in chosen if not is_v3(item)]
+        users = [item for item in chosen if is_v3(item)]
+        self.community_check.setChecked(bool(communities))
+        if communities:
+            self.community_input.setText(communities[0])
+        if users:
+            self.set_v3_user(users[0])
+        else:
+            self.v3_check.setChecked(False)
+        self.more_credentials = communities[1:] + users[1:]
+        trap_version = self.trap_version_combo.currentData()
+        if trap_version == "v2c" and not communities or trap_version == "v3" and not users:
+            self.trap_version_combo.setCurrentIndex(self.trap_version_combo.findData("v3" if users else "v2c"))
+        self.update_enabled()
+        self.update_preview()
+
+    def prefill(self, destination="", credential=None, from_map=False):
+        """From the Network Map: send to this computer, with the map's credential, or (from_map) with the map's
+        credentials as default_choice picks them."""
         if destination:
             self.add_destination(destination)
-        if credential is not None:
+        if from_map:
+            chosen = default_choice(self.map_credential_entries())
+            if chosen:
+                self.use_map_credentials(chosen)
+        elif credential is not None:
             self.use_credential(credential)
             if is_v3(credential):
                 self.trap_version_combo.setCurrentIndex(self.trap_version_combo.findData("v3"))
@@ -549,7 +691,8 @@ class SnmpConfigTab(QWidget):
         try:
             settings.setValue(SECRET_SETTINGS, protect(json.dumps({
                 "community": self.community_input.text(), "auth_password": self.auth_password_input.text(),
-                "priv_password": self.priv_password_input.text()})))
+                "priv_password": self.priv_password_input.text(),
+                "more": [credential_to_json(item) for item in self.more_credentials]})))
         except CredentialError as error:
             log.warning("Couldn't save the SNMP Config page's passwords: %s", error)
 
@@ -574,6 +717,7 @@ class SnmpConfigTab(QWidget):
         self.priv_combo.setCurrentIndex(max(0, self.priv_combo.findData(form.get("priv", "aes128"))))
         self.auth_password_input.setText(saved.get("auth_password", ""))
         self.priv_password_input.setText(saved.get("priv_password", ""))
+        self.more_credentials = [credential_from_json(item) for item in saved.get("more") or []]
         self.permit_same.setChecked(form.get("permit_same", True))
         self.permit_input.setText(form.get("permit", ""))
         for key, widget, default in (("acl", self.acl_input, "NOMAD-SNMP"), ("group", self.group_input, "NOMAD"),

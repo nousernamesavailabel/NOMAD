@@ -557,7 +557,7 @@ def test_typing_puts_anti_idle_off(page):
 
 # ----------------------------------------------------------------- Keyword highlighting
 
-def test_keywords_are_coloured_in_the_terminal(page):
+def test_keywords_are_colored_in_the_terminal(page):
     one = connect(page, "one")
     one.model.feed(b"Gi2 is administratively down, Gi3 down\r\n")  # Fits the narrow test terminal
     index = one.model.history_length
@@ -568,7 +568,7 @@ def test_keywords_are_coloured_in_the_terminal(page):
     assert colors[0] is None
 
 
-def test_the_devices_own_colours_are_left_alone(page):
+def test_the_devices_own_colors_are_left_alone(page):
     one = connect(page, "one")
     one.model.feed(b"\x1b[32mdown\x1b[0m\r\n")
     assert one.view.keyword_colors(one.model.line(one.model.history_length), one.model.columns) is None

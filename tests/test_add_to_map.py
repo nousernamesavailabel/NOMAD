@@ -218,7 +218,7 @@ def test_ip_menus_offer_add_device_to_map(app):
     menu.deleteLater()
 
 
-def test_key_explains_every_colour_and_line(tab, app):
+def test_key_explains_every_color_and_line(tab, app):
     titles = [title for title, _ in SECTIONS]
     assert any(title.startswith("Devices") for title in titles)
     assert any(title.startswith("Links") for title in titles)

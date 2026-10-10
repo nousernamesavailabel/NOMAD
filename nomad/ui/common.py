@@ -5,8 +5,8 @@ import threading
 from PyQt5 import sip
 from PyQt5.QtCore import QEvent, QObject, QRunnable, Qt, QThread, QThreadPool, QTimer, pyqtSignal
 from PyQt5.QtGui import QPainter
-from PyQt5.QtWidgets import QAbstractItemView, QApplication, QHeaderView, QLabel, QSizePolicy, QTableView, \
-    QTableWidget, QTableWidgetItem
+from PyQt5.QtWidgets import QAbstractItemView, QApplication, QHeaderView, QLabel, QMenu, QSizePolicy, \
+    QTableView, QTableWidget, QTableWidgetItem
 
 from .theme import COLORS
 
@@ -25,6 +25,31 @@ def set_invalid(line_edit, invalid):
 def set_hint(label, text, kind="info"):
     label.setStyleSheet(f"color: {HINT_COLORS[kind]};")
     label.setText(text)
+
+
+def add_submenu(menu, title):
+    """A submenu at the end of menu, for grouping like items so a right-click menu stays short. Made in Python, not
+    with menu.addMenu(title), so its wrapper can't outlive it."""
+    submenu = QMenu(title, menu)
+    menu.addMenu(submenu)
+    return submenu
+
+
+def drop_empty_submenus(menu, *submenus):
+    """Take submenus nothing was put in back out of menu."""
+    for submenu in submenus:
+        if submenu is not None and not submenu.actions():
+            menu.removeAction(submenu.menuAction())
+
+
+def menu_labels(menu):
+    """The text of every entry of menu, its submenus' included."""
+    labels = set()
+    for action in menu.actions():
+        labels.add(action.text())
+        if action.menu() is not None:
+            labels |= menu_labels(action.menu())
+    return labels
 
 
 def format_size(size):
@@ -274,7 +299,7 @@ def hotkey_hint(text, parent):
 
 
 def set_hint_enabled(hint, enabled):
-    """A hotkey badge in the accent colour, or muted while its button can't be pressed."""
+    """A hotkey badge in the accent color, or muted while its button can't be pressed."""
     hint.setStyleSheet(f"color: {COLORS['accent' if enabled else 'muted']}; background: {COLORS['background']}; "
                        f"border: 1px solid {COLORS['border']}; border-radius: 3px; padding: 1px 4px; "
                        "font-weight: bold;")

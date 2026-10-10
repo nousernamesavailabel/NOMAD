@@ -350,11 +350,11 @@ class MainWindow(QMainWindow):
         self.navigator.setCurrentWidget(self.terminal_tab)
         then()
 
-    def show_snmp_config(self, destination="", credential=None):
-        """The SNMP Config page, sending traps and syslog to destination, with credential (from the map's Watch
-        tab)."""
+    def show_snmp_config(self, destination="", credential=None, from_map=False):
+        """The SNMP Config page, sending traps and syslog to destination, with credential or (from_map) the Network
+        Map's credentials."""
         self.navigator.setCurrentWidget(self.snmp_config_tab)
-        self.snmp_config_tab.prefill(destination, credential)
+        self.snmp_config_tab.prefill(destination, credential, from_map)
 
     # ----------------------------------------------------------------- Settings
 
@@ -562,33 +562,10 @@ class MainWindow(QMainWindow):
             self.ipam_tab.connect_team()
 
     def confirm_leave_tribe(self, parent):
-        """Ask, then stop using the tribe on this computer (Tools > Tribe Management is the one place to leave).
-        Returns whether it left."""
-        self.ipam_tab.open_store()  # Open both copies, so changes waiting in them are counted and then emptied
-        self.netmap_tab.tribe.ensure()
-        warning = ""
-        for unsent, what in ((self.ipam_tab.unsent_tribe_changes(), "made offline to tribe networks and VLANs"),
-                             (self.netmap_tab.unsent_tribe_changes(), "to tribe maps")):
-            if unsent:
-                warning += (f"\n\n{unsent} change{'s' if unsent != 1 else ''} {what} haven't reached the server "
-                            "and will be lost.")
-        if QMessageBox.question(parent, "Disconnect from the Tribe",
-                                "Stop using the tribe on this computer? The saved tribe key and the copies of the "
-                                "tribe's networks and maps are removed (a tribe map open is kept as a file); your "
-                                "own networks and maps are kept." + warning) != QMessageBox.Yes:
-            return False
-        self.leave_tribe()
-        return True
-
-    def leave_tribe(self):
-        """Stop using the tribe on this computer: forget the key and the copies of its maps and IPAM data."""
-        from ..ipam.client import forget_key
-        forget_key()
-        self.ipam_tab.forget_team_copy()
-        self.netmap_tab.tribe_key_changed(forget=True)
-        if self.ipam_tab.local_store is not None:
-            self.ipam_tab.connect_team()
-            self.ipam_tab.fill_networks()
+        """Ask, then stop using the tribe on this computer, showing the steps (Tools > Tribe Management is the one
+        place to leave). Returns whether it left."""
+        from .tribe_leave_dialog import disconnect_from_tribe
+        return disconnect_from_tribe(parent, self)
 
     def show_map_watcher(self):
         from .watch_service_dialog import MapWatcherDialog  # Loads pywin32 only when it's needed

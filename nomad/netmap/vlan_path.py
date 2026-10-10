@@ -66,6 +66,7 @@ class StpView:
     mode: str = ""
     instance: int = -1  # The VLAN's instance: the VLAN on PVST+, its MST instance on MST (-1: unknown)
     ports: dict = field(default_factory=dict)  # port_key -> (FORWARDING, BLOCKING or DISABLED, role or state)
+    root: object = None  # Whether it's the root bridge of that tree (None: not known)
 
     def state(self, port):
         return self.ports.get(port_key(port), ("", ""))
@@ -80,7 +81,7 @@ def stp_view(tables):
         name = tables.interfaces.get(if_index)
         if name:
             ports[port_key(name)] = state
-    return StpView(tables.stp_mode, tables.stp_instance, ports)
+    return StpView(tables.stp_mode, tables.stp_instance, ports, tables.stp_root)
 
 
 @dataclass

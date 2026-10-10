@@ -163,8 +163,8 @@ class TribeSync(QObject):
         self.error, self.too_old, self.last_sync = "", False, 0.0
         self.status_changed.emit()
 
-    def shutdown(self):
+    def shutdown(self, wait_ms=3000):
         if self.thread is not None:
             self.thread.stop()
-            release_thread(self.thread)  # A wait on the server may still be open: let it end on its own
+            release_thread(self.thread, wait_ms)  # A wait on the server may still be open: let it end on its own
             self.thread = None

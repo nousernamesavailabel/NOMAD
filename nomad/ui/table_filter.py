@@ -43,7 +43,7 @@ class FilterHeader(QHeaderView):
 
     def __init__(self, parent=None):
         super().__init__(Qt.Horizontal, parent)
-        self.active = set()  # Filtered columns, whose buttons are drawn filled in the accent colour
+        self.active = set()  # Filtered columns, whose buttons are drawn filled in the accent color
         self.hovered = -1  # Column whose button the mouse is over
         self.setSectionsClickable(True)
         self.setHighlightSections(False)

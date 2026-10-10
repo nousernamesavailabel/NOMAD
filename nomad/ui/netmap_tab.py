@@ -17,11 +17,12 @@ from PyQt5.QtWidgets import QAbstractItemView, QActionGroup, QApplication, QChec
     QAction, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, \
     QShortcut, QSplitter, QTabWidget, QTextBrowser, QToolButton, QVBoxLayout, QWidget
 
-from ..ipam.client import ADMIN, current_key, is_tribe_server, read_key_file, save_key
+from ..ipam.client import ADMIN, current_key, is_tribe_server
 from ..ipam.map_compare import DEVICE as DEVICE_ADDRESS, compare_map
 from ..ipam.reconcile import MAC_DIFFERS, NOT_RECORDED
 from ..ipam.store import IpamError
-from ..netmap import diff, export, l3, monitor, shared, store, watch
+from ..netmap import diff, export, l3, monitor, overlays, shared, store, watch
+from ..netmap import vlan_path
 from ..netmap import vlans as vlan_info
 from ..netmap.crawl import MAX_WORKERS, WORKERS, CrawlSettings, Crawler, apply_vlans, check_device, \
     communities_for, credentials_from_json, credentials_to_json, ordered_credentials, parse_overrides, read_vlans_of
@@ -35,12 +36,14 @@ from ..netmap.model import BUILDING, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIN
 from ..snmp import V2C
 from ..snmpv3 import is_v3
 from ..terminal.credentials import CredentialError, protect, unprotect
-from .common import OneLineLabel, SortableTableItem, StoppableThread, read_only_table, set_hint
+from .common import OneLineLabel, SortableTableItem, StoppableThread, add_submenu, drop_empty_submenus, \
+    read_only_table, set_hint
 from .host_menu import HostActions
 from .map_ipam_dialog import RecordDialog
 from .integration import IPAM, PLACEMENT, VLAN, MapNetworkDialog, hub, split_key
 from .integration import link as page_link
 from .netmap_key import MapKeyDialog
+from .netmap_counters import LinkCounters
 from .netmap_monitor import NetworkMonitor
 from .netmap_progress import CrawlProgress
 from .netmap_dialogs import CommunitiesDialog, CompareDialog, DeletedDevicesDialog, DeviceDialog, GroupDialog, \
@@ -52,6 +55,7 @@ from .vlan_path_dialog import VlanPathDialog
 from .netmap_watch import MapWatcher
 from .table_filter import TableFilter
 from .theme import COLORS, accent_button
+from .tribe_join_dialog import connect_to_tribe
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +69,7 @@ ALIGNMENTS = [("Align Left", LEFT), ("Align Center", CENTER), ("Align Right", RI
               ("Align Middle", MIDDLE), ("Align Bottom", BOTTOM)]
 GROUP_LINKS_SHOWN = 20
 VLANS_IN_MENU = 60  # A device's Highlight VLAN menu lists this many
+OVERLAY_ITEMS = 60  # The Overlay menu lists this many VLANs, VRFs or subnets
 VLANS_LISTED = 40  # A device's details name this many of its VLANs
 CHECK_WORKERS = 8  # Devices added by hand asked over SNMP at once
 OPEN_MAP, FILE_MAP, TRIBE_MAP, NEW_MAP = "open", "file", "tribe", "new"  # Where Add Device to Map puts one
@@ -176,6 +181,8 @@ class NetworkMapTab(QWidget):
         self.crawled_map = False
         self.crawl_progress = CrawlProgress(self)
         self.monitor = NetworkMonitor(self)
+        self.counters = LinkCounters(self)  # While monitoring: the links' traffic and errors
+        self.stp_reading = None  # While the Spanning Tree overlay's switches are read: {"map", "vlan", "views"...}
         self.tribe_map_id = None  # The tribe map open (None: a map file, or none)
         self.unopened = ""  # The map open last time, when it couldn't be reopened: still the one to try next time
         self.restoring_switches = False  # Turning Monitor and Watch back on as they were: nothing new to note
@@ -202,6 +209,7 @@ class NetworkMapTab(QWidget):
         self.layout_now = None
         self.restoring = False
         self.vlan_shown = None  # (VLAN, VTP domain) highlighted on the physical view, or None
+        self.overlay_shown = None  # (overlays kind, its argument) shown on the physical view instead, or None
         self.init_ui()
         window.adapter_changed.connect(lambda _: self.update_gateway_button())
         window.snapshot_changed.connect(lambda _: self.update_gateway_button())
@@ -303,7 +311,7 @@ class NetworkMapTab(QWidget):
         self.tribe_menu.aboutToShow.connect(self.fill_tribe_menu)
         self.tribe_button.setMenu(self.tribe_menu)
         self.key_button = QPushButton("Key")
-        self.key_button.setToolTip("What the map's colours, outlines and line styles mean.")
+        self.key_button.setToolTip("What the map's colors, outlines and line styles mean.")
         self.key_button.clicked.connect(self.show_key)
         self.monitor_check = QCheckBox("Monitor")
         self.monitor_check.setToolTip("Ping the devices on the map every so often, show which are up or down, and "
@@ -324,6 +332,16 @@ class NetworkMapTab(QWidget):
         self.watch_label.hide()
         self.status_slack = QWidget()  # What the news leave of their room on the compact bar (fit_statuses)
         self.status_slack.setFixedWidth(0)
+        self.overlay_button = QToolButton()
+        self.overlay_button.setText("Overlay")
+        self.overlay_button.setToolTip("Show something over the physical view: a VLAN, VRF or subnet, what one "
+                                       "failure would cut off, trunk problems, or devices colored by model, software "
+                                       "version, site... One at a time; Esc puts the map back.")
+        self.overlay_button.setPopupMode(QToolButton.InstantPopup)
+        self.overlay_menu = QMenu(self.overlay_button)
+        self.overlay_menu.aboutToShow.connect(self.fill_overlay_menu)
+        self.overlay_submenus = []
+        self.overlay_button.setMenu(self.overlay_menu)
         self.hosts_check = QCheckBox("Show Hosts")
         self.hosts_check.setToolTip("Show every switch's hosts, a box per port with each host's VLAN. Or double-click "
                                     "one switch to show just its hosts.")
@@ -417,7 +435,7 @@ class NetworkMapTab(QWidget):
         self.vlan_label = QLabel()
         self.vlan_label.setWordWrap(True)
         self.vlan_clear_button = QPushButton("Show All")
-        self.vlan_clear_button.setToolTip("Stop highlighting the VLAN (Esc).")
+        self.vlan_clear_button.setToolTip("Stop highlighting the VLAN, or showing the overlay (Esc).")
         vlan_row.addWidget(self.vlan_label, 1)
         vlan_row.addWidget(self.vlan_clear_button)
         self.vlan_bar.hide()
@@ -461,6 +479,8 @@ class NetworkMapTab(QWidget):
         self.interval_combo.currentIndexChanged.connect(
             lambda _: self.monitor.set_interval(self.interval_combo.currentData()))
         self.monitor.statuses_changed.connect(self.show_statuses)
+        self.monitor.polled.connect(self.counters.poll_now)
+        self.counters.updated.connect(self.on_counters_updated)
         self.monitor.history_added.connect(self.keep_history)
         for view in (self.view, self.l3_view):
             view.selection_changed.connect(self.show_details)
@@ -522,7 +542,8 @@ class NetworkMapTab(QWidget):
                         self.compare_button, self.ipam_network_button, self.ipam_record_button, self.tribe_button,
                         self.key_button]
         watching = [self.monitor_check, self.interval_combo, self.monitor_label, self.watch_check, self.watch_label]
-        view_tools = [self.hosts_check, self.undo_button, self.redo_button, self.fit_button, self.arrange_button]
+        view_tools = [self.overlay_button, self.hosts_check, self.undo_button, self.redo_button, self.fit_button,
+                      self.arrange_button]
         if self.compact_top:
             unused = file_buttons
             row(self.map_button, self.crawl_button, 12, *watching, self.status_slack, 12, self.find_input, *view_tools)
@@ -814,6 +835,7 @@ class NetworkMapTab(QWidget):
         if self.carry_dialog is not None:
             self.carry_dialog.session_sender.stop_waiting()
         self.monitor.shutdown()
+        self.counters.shutdown()
         self.watcher.shutdown()
         for thread in list(self.check_threads):
             thread.stop()
@@ -851,6 +873,8 @@ class NetworkMapTab(QWidget):
             self.communities, self.overrides, self.version, self.timeout, self.v3_users, self.v3_first = \
                 dialog.values()
             self.credentials_changed()
+            if dialog.build_config:
+                self.watcher.open_config_builder()
 
     def credentials_changed(self):
         """After the credentials change: ask the devices that don't answer SNMP with them, and share them with the
@@ -983,7 +1007,7 @@ class NetworkMapTab(QWidget):
         self.l3_nodes, self.l3_links = {}, []
         for table in (self.devices_table, self.links_table, self.hosts_table):
             table.setRowCount(0)
-        self.vlan_shown = None
+        self.vlan_shown, self.overlay_shown = None, None
         self.vlan_panel.set_map(None)
         self.apply_vlan_focus()
         self.monitor.set_map(NetworkMap())
@@ -1453,17 +1477,38 @@ class NetworkMapTab(QWidget):
         """Show one VLAN on the physical view: what carries it stays bright, the rest fades."""
         if self.network_map is None:
             return
-        self.vlan_shown = (vlan, domain)
+        self.vlan_shown, self.overlay_shown = (vlan, domain), None
+        self.tabs.setCurrentWidget(self.view)
+        self.apply_vlan_focus()
+
+    def show_overlay(self, kind, argument=None):
+        """Show an overlay (netmap.overlays) on the physical view, instead of the VLAN or overlay showing."""
+        if self.network_map is None:
+            return
+        self.vlan_shown, self.overlay_shown = None, (kind, argument)
         self.tabs.setCurrentWidget(self.view)
         self.apply_vlan_focus()
 
     def apply_vlan_focus(self):
-        """Highlight the VLAN chosen (again, after the map was drawn again), or show everything."""
+        """Highlight the VLAN chosen, or show the overlay chosen (again, after the map was drawn again), or show
+        everything."""
         network_map = self.network_map
-        if self.vlan_shown is None or network_map is None:
+        overlay = overlays.build(network_map, *self.overlay_shown, rates=self.counters.rates,
+                                 monitoring=self.monitor.running) if self.overlay_shown is not None else None
+        if overlay is None:
+            self.overlay_shown = None  # Of a VRF or device that's gone
+        if (self.vlan_shown is None and overlay is None) or network_map is None:
+            self.view.set_overlay(None)
             self.view.set_vlan_focus(None)
             self.vlan_bar.hide()
             return
+        if overlay is not None:
+            self.view.set_vlan_focus(None)
+            self.view.set_overlay(overlay)
+            self.vlan_label.setText(overlay_text(overlay))
+            self.vlan_bar.show()
+            return
+        self.view.set_overlay(None)
         vlan, domain = self.vlan_shown
         focus = vlan_info.focus(network_map, vlan, domain)
         self.view.set_vlan_focus(focus)
@@ -1566,15 +1611,205 @@ class NetworkMapTab(QWidget):
     def add_stop_highlight(self, menu):
         """At the top of the physical view's right-click menus while a VLAN is highlighted: an action to stop (the
         caller connects it to clear_vlan). Returns it, or None."""
-        if self.vlan_shown is None or self.tabs.currentWidget() is not self.view:
+        if self.tabs.currentWidget() is not self.view:
             return None
-        action = menu.addAction(f"Stop Highlighting VLAN {self.vlan_shown[0]} (Show All)")
+        if self.vlan_shown is not None:
+            action = menu.addAction(f"Stop Highlighting VLAN {self.vlan_shown[0]} (Show All)")
+        elif self.overlay_shown is not None and self.view.overlay is not None:
+            action = menu.addAction(f"Stop Showing {self.view.overlay.title} (Show All)")
+        else:
+            return None
         menu.addSeparator()
         return action
 
     def clear_vlan(self):
-        self.vlan_shown = None
+        """Stop highlighting the VLAN, or showing the overlay."""
+        self.vlan_shown, self.overlay_shown = None, None
         self.apply_vlan_focus()
+
+    def fill_overlay_menu(self):
+        """The Overlay button's menu: every overlay the map can show, the one showing ticked."""
+        menu = self.overlay_menu
+        menu.clear()
+        for submenu in self.overlay_submenus:  # clear() leaves submenus be
+            submenu.deleteLater()
+        # Made here (not by addMenu(text)), so the Python wrappers kept are of menus Python made
+        vlan_menu, vrf_menu, subnet_menu, color_menu, stp_menu = self.overlay_submenus = [
+            QMenu(text, menu) for text in ("Highlight VLAN", "Highlight VRF", "Highlight Subnet", "Color By",
+                                           "Spanning Tree")]
+        network_map = self.network_map
+        usable = network_map is not None and bool(network_map.devices) and self.worker is None
+        shown = self.overlay_shown
+        for submenu in (vlan_menu, vrf_menu, subnet_menu):
+            menu.addMenu(submenu)
+        if usable:
+            items = vlan_info.map_vlans(network_map)
+            several = len({item.domain for item in items}) > 1
+            for item in items[:OVERLAY_ITEMS]:
+                text = f"{item.vlan} {item.name}".strip() + (f"  ({domain_text(item.domain)})" if several else "")
+                action = vlan_menu.addAction(text, lambda item=item: self.highlight_vlan(
+                    item.vlan, item.domain if several else None))
+                action.setCheckable(True)
+                action.setChecked(self.vlan_shown is not None and self.vlan_shown[0] == item.vlan
+                                  and self.vlan_shown[1] in (None, item.domain))
+            if len(items) > OVERLAY_ITEMS:
+                vlan_menu.addAction(f"...and {len(items) - OVERLAY_ITEMS} more (see the VLANs tab)").setEnabled(False)
+            if not items:
+                vlan_menu.addAction("No VLANs read (VLANs tab > Read VLANs Again)").setEnabled(False)
+            vrfs = overlays.map_vrfs(network_map)
+            for name, count in list(vrfs.items())[:OVERLAY_ITEMS]:
+                action = vrf_menu.addAction(f"{name}  ({count_text(count, 'device')})",
+                                            lambda name=name: self.show_overlay(overlays.VRF, name))
+                action.setCheckable(True)
+                action.setChecked(shown == (overlays.VRF, name))
+            if not vrfs:
+                vrf_menu.addAction("No VRFs read (Subnet Placement > Read Routes Again)").setEnabled(False)
+            subnets = overlays.map_subnets(network_map)
+            for text in subnets[:OVERLAY_ITEMS]:
+                action = subnet_menu.addAction(text, lambda text=text: self.show_overlay(overlays.SUBNET, text))
+                action.setCheckable(True)
+                action.setChecked(shown == (overlays.SUBNET, text))
+            if subnets:
+                subnet_menu.addSeparator()
+            subnet_menu.addAction("Other Subnet or Address...", self.choose_subnet_overlay)
+        for submenu in (vlan_menu, vrf_menu, subnet_menu):
+            submenu.menuAction().setEnabled(usable)
+        menu.addSeparator()
+        for kind, text, tip in (
+                (overlays.SPOF, "Single Points of Failure", "The devices and links that are the only way to part of "
+                                                            "the network."),
+                (overlays.TRUNKS, "Trunk and Port Problems", "Links whose two ends are set up differently (trunk and "
+                                                             "access, native VLANs, VLANs allowed), and ports in VLANs "
+                                                             "their switch doesn't have."),
+                (overlays.SPEED, "Link Speed and Status", "Each link's speed as color and thickness, and links down "
+                                                          "at an end or whose ends' speed or duplex differ (as read "
+                                                          "when mapped, or by Read VLANs Again)."),
+                (overlays.UTIL, "Utilization and Errors", "How busy each link is and whether it's seeing errors: "
+                                                          "while Monitor is on, each poll reads the counters of the "
+                                                          "linked ports.")):
+            action = menu.addAction(text, lambda kind=kind: self.show_overlay(kind))
+            action.setToolTip(tip)
+            action.setCheckable(True)
+            action.setChecked(shown is not None and shown[0] == kind)
+            action.setEnabled(usable)
+        menu.addMenu(stp_menu)
+        if usable:
+            numbers = sorted({item.vlan for item in vlan_info.map_vlans(network_map)})
+            for vlan in numbers[:OVERLAY_ITEMS]:
+                action = stp_menu.addAction(f"VLAN {vlan}", lambda vlan=vlan: self.read_spanning_tree(vlan))
+                action.setCheckable(True)
+                action.setChecked(shown is not None and shown[0] == overlays.STP and shown[1][0] == vlan)
+            if not numbers:
+                stp_menu.addAction("No VLANs read (VLANs tab > Read VLANs Again)").setEnabled(False)
+        stp_menu.menuAction().setEnabled(usable and self.stp_reading is None)
+        menu.setToolTipsVisible(True)
+        if shown is not None and shown[0] == overlays.IMPACT and self.view.overlay is not None:
+            action = menu.addAction(self.view.overlay.title)
+            action.setCheckable(True)
+            action.setChecked(True)
+            action.setEnabled(False)
+        menu.addMenu(color_menu)
+        for attribute, text in overlays.COLOR_BY:
+            action = color_menu.addAction(text, lambda attribute=attribute: self.show_overlay(overlays.COLOR,
+                                                                                               attribute))
+            action.setCheckable(True)
+            action.setChecked(shown == (overlays.COLOR, attribute))
+        color_menu.menuAction().setEnabled(usable)
+        menu.addSeparator()
+        stop = menu.addAction("Show All (Esc)", self.clear_vlan)
+        stop.setEnabled(self.vlan_shown is not None or shown is not None)
+
+    def read_spanning_tree(self, vlan):
+        """Spanning Tree > VLAN N: read how each switch with the VLAN has its ports in the VLAN's tree, then show it.
+        Returns whether the read started."""
+        network_map = self.network_map
+        if network_map is None or self.worker is not None or self.stp_reading is not None:
+            return False
+        switches = [(key, device) for key, device in network_map.devices.items()
+                    if device.source == SNMP and device.mgmt_ip and device.kind == SWITCH]
+        having = [(key, device) for key, device in switches if vlan in vlan_info.vlan_names(device)]
+        targets = [(key, device.mgmt_ip) for key, device in (having or switches)]
+        if not targets:
+            set_hint(self.status_label, "No switch on the map answered SNMP, so there's no spanning tree to read.",
+                     "warning")
+            return False
+        self.stp_reading = {"map": network_map, "vlan": vlan, "views": {}, "failed": []}
+        reader = functools.partial(self.read_vlans, stp_vlan=vlan)
+        thread = VlanReadThread(self.crawl_settings([address for _, address in targets]), targets, reader, self)
+        thread.checked.connect(self.on_stp_read)
+        thread.finished.connect(self.on_stp_read_finished)
+        self.check_threads.append(thread)
+        set_hint(self.status_label, f"Reading the spanning tree of VLAN {vlan} on "
+                                    f"{len(targets)} switch{'' if len(targets) == 1 else 'es'}...", "info")
+        thread.start()
+        return True
+
+    def on_stp_read(self, key, address, result):
+        reading = self.stp_reading
+        if reading is None or reading["map"] is not self.network_map:
+            return
+        tables, community = result
+        if tables is None:
+            reading["failed"].append(key)
+            return
+        if community:
+            self.answered[address] = community
+        view = vlan_path.stp_view(tables)
+        if view is not None:
+            reading["views"][key] = view
+
+    def on_stp_read_finished(self):
+        thread = self.sender()
+        if thread in self.check_threads:
+            self.check_threads.remove(thread)
+        reading, self.stp_reading = self.stp_reading, None
+        if reading is None or reading["map"] is not self.network_map:
+            return
+        failed = reading["failed"]
+        read = len(reading["views"])
+        text = f"Read the spanning tree of VLAN {reading['vlan']} on {read} switch{'' if read == 1 else 'es'}"
+        if failed:
+            labels = [self.network_map.devices[key].label for key in failed if key in self.network_map.devices]
+            text += f"; {len(failed)} didn't answer ({', '.join(labels[:5])}{'...' if len(labels) > 5 else ''})"
+        set_hint(self.status_label, text + ".", "warning" if failed else "success")
+        self.show_overlay(overlays.STP, (reading["vlan"], reading["views"], failed))
+
+    def choose_subnet_overlay(self):
+        """Highlight Subnet > Other: a subnet (or an address) typed."""
+        if self.network_map is None:
+            return
+        text, ok = QInputDialog.getText(self, "Highlight Subnet", "Subnet (such as 10.1.2.0/24) or address:")
+        if not ok or not text.strip():
+            return
+        try:
+            network = overlays.parse_network(text)
+        except ValueError:
+            QMessageBox.warning(self, "Highlight Subnet", f"'{text.strip()}' isn't a subnet or an IP address.")
+            return
+        self.show_overlay(overlays.SUBNET, str(network))
+
+    def device_overlay_menu(self, menu, actions, device):
+        """Overlay > What If It Fails?, and the device's VRFs and subnets to highlight."""
+        if self.network_map is None or device.key not in self.network_map.devices or self.worker is not None:
+            return
+        actions[menu.addAction("What If It Fails?")] = lambda: self.show_overlay(overlays.IMPACT, device.key)
+        names = sorted({name for name in device.port_vrfs.values() if name} | set(device.vrf_routes),
+                       key=str.lower)
+        for name in names[:OVERLAY_ITEMS]:
+            actions[menu.addAction(f"Highlight VRF {name}")] = \
+                lambda name=name: self.show_overlay(overlays.VRF, name)
+        subnets = []
+        for address, prefix, _ in device.interfaces_l3:
+            try:
+                network = ipaddress.ip_network(f"{address}/{prefix}", strict=False)
+            except ValueError:
+                continue
+            if network.prefixlen < network.max_prefixlen and str(network) not in subnets:
+                subnets.append(str(network))
+        if subnets:
+            submenu = menu.addMenu("Highlight Subnet")
+            for text in subnets[:OVERLAY_ITEMS]:
+                actions[submenu.addAction(text)] = lambda text=text: self.show_overlay(overlays.SUBNET, text)
 
     def on_escape(self):
         view = self.current_view()
@@ -2086,7 +2321,7 @@ class NetworkMapTab(QWidget):
                         "<p>Right-click devices > Group to put them in a site, building or room, drawn as a box you "
                         "can collapse. Re-arrange's arrow has other layouts.</p>"
                         "<p>Right-click the background to add a device the crawl can't find (an unmanaged switch, "
-                        "say), and a device > Draw Link from Here to link it.</p>")
+                        "say), and a device > Edit > Draw Link from Here to link it.</p>")
             else:
                 text = "<p>Select a device to see its details.</p>"
             self.details.setHtml(text)
@@ -2138,6 +2373,8 @@ class NetworkMapTab(QWidget):
         return {"aliases": [host.name] if host.name else [], "name": host.name, "folder": folder}
 
     def show_device_menu(self, key, position):
+        """Right-click on a device: its host actions, then the map's own, grouped into submenus of like items so the
+        menu fits on the screen."""
         shown = self.displayed_map()
         device = shown.devices.get(key) if shown else None
         if device is None:
@@ -2145,12 +2382,18 @@ class NetworkMapTab(QWidget):
             return
         menu = QMenu(self)
         stop = self.add_stop_highlight(menu)
+        # Show In has Show on Map's views, and IPAM its addresses (when the map is of an IPAM network); Copy Address
+        # is at the bottom
+        leave_out = ["Show on Map", "Copy IP Address"]
+        if hub(self.window) is not None and self.ipam_key():
+            leave_out.append("Show in IPAM")
         actions = self.host_actions.add_to(menu, device.mgmt_ip, **self.session_hints(shown, device),
-                                           snmp=self.snmp_access(device.mgmt_ip)) if device.mgmt_ip else {}
+                                           snmp=self.snmp_access(device.mgmt_ip),
+                                           leave_out=leave_out) if device.mgmt_ip else {}
         if stop is not None:
             actions[stop] = self.clear_vlan
-        menu.addSeparator()
-        self.add_show_in(menu, actions, key)
+        show_in = add_submenu(menu, "Show In")
+        self.add_show_in(show_in, actions, key)
         menu.addSeparator()
         if device.mgmt_ip:
             actions[menu.addAction("Crawl from Here")] = lambda: self.crawl_from(device.mgmt_ip)
@@ -2158,27 +2401,36 @@ class NetworkMapTab(QWidget):
             actions[menu.addAction("Put at the Top")] = lambda: self.put_at_top(key)
         if self.current_view() is self.view and self.worker is None:
             actions[menu.addAction("Add Host...")] = lambda: self.add_host(key)
-        here = self.tabs.currentWidget()
-        selected = here.selected_keys() if here in (self.view, self.l3_view) else []
-        keys = selected if key in selected else [key]
-        if self.worker is None and self.network_map is not None and key in self.network_map.devices:
-            self.add_group_menu(menu, actions, [item for item in keys if item in self.network_map.devices])
-            self.add_by_hand_actions(menu, actions, key, keys)
-        if here in (self.view, self.l3_view):
-            self.add_selection_actions(menu, here, keys)
         item = self.view.items_by_key.get(key)
         if item is not None and item.host_count and self.tabs.currentWidget() is self.view:
             label = "Hide Hosts" if item.expanded else "Show Hosts"
             actions[menu.addAction(label)] = lambda: self.view.toggle_hosts(item)
+        here = self.tabs.currentWidget()
+        selected = here.selected_keys() if here in (self.view, self.l3_view) else []
+        keys = selected if key in selected else [key]
         news = self.news_of_devices(keys)
         if news and self.worker is None:
             actions[menu.addAction("Mark as Seen")] = lambda: self.mark_seen(news)
-        self.device_vlan_menu(menu, actions, device)
-        self.carry_vlan_menu(menu, actions, key, keys)
-        self.device_ipam_menu(menu, actions, device)
-        if self.worker is None and self.network_map is not None and key in self.network_map.devices and \
-                hub(self.window) is not None:
-            actions[menu.addAction("Record Its Addresses in IPAM...")] = lambda: self.record_in_ipam(device=key)
+        menu.addSeparator()
+        editing = self.worker is None and self.network_map is not None and key in self.network_map.devices
+        if editing:
+            self.add_group_menu(menu, actions, [item for item in keys if item in self.network_map.devices])
+        layout = add_submenu(menu, "Layout") if here in (self.view, self.l3_view) else None
+        if layout is not None:
+            self.add_selection_actions(layout, here, keys)
+        edit = add_submenu(menu, "Edit") if editing else None
+        if edit is not None:
+            self.add_by_hand_actions(edit, actions, key, keys)
+        overlay = add_submenu(menu, "Overlay")
+        self.device_overlay_menu(overlay, actions, device)
+        vlans = add_submenu(menu, "VLANs")
+        self.device_vlan_menu(vlans, actions, device)
+        self.carry_vlan_menu(vlans, actions, key, keys)
+        ipam = add_submenu(menu, "IPAM")
+        self.device_ipam_menu(ipam, actions, device)
+        if editing and hub(self.window) is not None:
+            actions[ipam.addAction("Record Its Addresses in IPAM...")] = lambda: self.record_in_ipam(device=key)
+        drop_empty_submenus(menu, show_in, layout, edit, overlay, vlans, ipam)
         menu.addSeparator()
         actions[menu.addAction("Copy Name")] = lambda: QApplication.clipboard().setText(device.label)
         if device.mgmt_ip:
@@ -2188,15 +2440,14 @@ class NetworkMapTab(QWidget):
             actions[chosen]()
 
     def add_show_in(self, menu, actions, key):
-        """Show in Physical (L2) / Logical (L3) / Devices / Links, leaving out the one showing and any the device
-        isn't in."""
+        """Physical (L2) / Logical (L3) / Devices / Links (for the device menu's Show In), leaving out the one showing
+        and any the device isn't in."""
         here = self.tabs.currentWidget()
         crawling = self.worker is not None  # The tables and logical view are the map from before, until it's done
-        choices = [(self.view, "Show in Physical (L2)", key in self.view.items_by_key),
-                   (self.l3_view, "Show in Logical (L3)", not crawling and key in self.l3_view.items_by_key),
-                   (self.devices_table, "Show in Devices", not crawling and bool(self.table_rows(self.devices_table,
-                                                                                               key))),
-                   (self.links_table, "Show in Links", not crawling and bool(self.table_rows(self.links_table, key)))]
+        choices = [(self.view, "Physical (L2)", key in self.view.items_by_key),
+                   (self.l3_view, "Logical (L3)", not crawling and key in self.l3_view.items_by_key),
+                   (self.devices_table, "Devices", not crawling and bool(self.table_rows(self.devices_table, key))),
+                   (self.links_table, "Links", not crawling and bool(self.table_rows(self.links_table, key)))]
         for widget, label, possible in choices:
             if widget is not here and possible:
                 actions[menu.addAction(label)] = lambda widget=widget: self.show_in(widget, [key])
@@ -2292,7 +2543,8 @@ class NetworkMapTab(QWidget):
             menu.addSeparator()
             self.add_subnet_links(menu, actions, node.label)
         elif node.kind == l3.HOP and key != l3.SELF:
-            actions = self.host_actions.add_to(menu, node.label, snmp=self.snmp_access(node.label))
+            actions = self.host_actions.add_to(menu, node.label, snmp=self.snmp_access(node.label),
+                                               leave_out=("Copy IP Address",))  # Copy Address, below
             menu.addSeparator()
             actions[menu.addAction("Crawl from Here")] = lambda: self.crawl_from(node.label)
             actions[menu.addAction("Copy Address")] = lambda: QApplication.clipboard().setText(node.label)
@@ -2323,7 +2575,8 @@ class NetworkMapTab(QWidget):
         if len(hosts) == 1:
             host = hosts[0]
             if host.ip:
-                actions = self.host_actions.add_to(menu, host.ip, **self.host_session_hints(host))
+                actions = self.host_actions.add_to(menu, host.ip, **self.host_session_hints(host),
+                                                   leave_out=("Show on Map",))  # The page's own is below
                 menu.addSeparator()
             actions[menu.addAction("Show on Map")] = lambda: self.show_on_map("host", item.row())
             self.add_address_link(menu, actions, host.ip)
@@ -2471,6 +2724,7 @@ class NetworkMapTab(QWidget):
         if device.corrected:
             actions[menu.addAction("Forget Corrections")] = lambda: self.forget_corrections(key)
         doomed = [item for item in keys if item in network_map.devices]
+        menu.addSeparator()
         label = "Delete Device..." if len(doomed) == 1 else f"Delete {len(doomed)} Devices..."
         actions[menu.addAction(label)] = lambda: self.delete_devices(doomed)
 
@@ -2521,6 +2775,10 @@ class NetworkMapTab(QWidget):
         if stop is not None:
             actions[stop] = self.clear_vlan
         actions[menu.addAction("Show in Links")] = lambda: self.show_links_in_table(links)
+        known = [link.key for link in links if link in self.network_map.links]
+        if known:
+            text = "What If It Fails?" if len(known) == 1 else f"What If All {len(known)} Links Fail?"
+            actions[menu.addAction(text)] = lambda: self.show_overlay(overlays.IMPACT, known)
         menu.addSeparator()
         self.add_link_actions(menu, actions, links)
         chosen = menu.exec_(position)
@@ -3115,8 +3373,16 @@ class NetworkMapTab(QWidget):
             self.monitor.start(self.interval_combo.currentData())
         else:
             self.monitor.stop()
+            self.counters.reset()
         self.remember_switches()
         self.show_statuses()
+        if self.overlay_shown is not None and self.overlay_shown[0] == overlays.UTIL:
+            self.apply_vlan_focus()
+
+    def on_counters_updated(self):
+        """A poll's counters are in: the Utilization overlay shows them."""
+        if self.overlay_shown is not None and self.overlay_shown[0] == overlays.UTIL:
+            self.apply_vlan_focus()
 
     def show_statuses(self):
         """After a poll: the dots on both maps, the Status column, the summary and the details showing."""
@@ -3352,17 +3618,8 @@ class NetworkMapTab(QWidget):
 
     def join_tribe(self):
         """Save a tribe key file's key for this Windows account (the IP Addresses page uses it too)."""
-        path, _ = QFileDialog.getOpenFileName(self, "Connect to the Tribe", "", "NOMAD tribe key (*.nomadkey);;All files (*)")
-        if not path:
+        if not connect_to_tribe(self, self.window):  # Tells the pages, this one included
             return
-        try:
-            key = read_key_file(path)
-            save_key(key)
-        except (IpamError, OSError) as error:
-            QMessageBox.warning(self, "Connect to the Tribe", str(error))
-            return
-        self.tribe_key_changed()
-        self.window.tribe_key_changed(self)
         set_hint(self.status_label, "Connected to the tribe. The key is saved, encrypted for your Windows account, and the IP "
                  "Addresses page uses it too. Open the tribe's maps from Tribe (they arrive once the server has "
                  "been reached), or share this one. You can delete the key file now, or keep it somewhere safe: "
@@ -3838,6 +4095,20 @@ class LinkRow(tuple):
         row = super().__new__(cls, (link.a, link.b))
         row.link = link
         return row
+
+
+def overlay_text(overlay):
+    """What the bar over the map says of an overlay: its title, what it found, and its colors."""
+    def escape(text):
+        return html.escape(text, quote=False)
+    title = escape(overlay.title)
+    if overlay.tone:
+        title = f"<span style='color:{COLORS[overlay.tone]}'>{title}</span>"
+    parts = [f"<b>{title}</b>: " + escape(" · ".join(overlay.summary))]
+    if overlay.legend:
+        parts.append(" ".join(f"<span style='color:{COLORS.get(color, color)}'>&#9632;</span>&nbsp;{escape(text)}"
+                              for color, text in overlay.legend))
+    return " &nbsp;·&nbsp; ".join(parts)
 
 
 def count_text(count, noun):

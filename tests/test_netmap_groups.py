@@ -666,11 +666,12 @@ def test_device_menu_offers_spacing_with_the_arranging(tab, crawled, monkeypatch
     keys = sorted(crawled.devices)
     shown = []
     monkeypatch.setattr(tab.host_actions, "add_to", lambda *args, **kwargs: {})  # Not what this is about
-    monkeypatch.setattr(QMenu, "exec_", lambda menu, *args: shown.append([action.text() for action in menu.actions()]))
+    monkeypatch.setattr(QMenu, "exec_", lambda menu, *args: shown.append(
+        {action.text(): action.menu() for action in menu.actions()}))
     tab.show_device_menu(keys[0], None)  # On its own: no arranging, no spacing
-    assert not any(text.startswith(("Arrange", "Spacing")) for text in shown[-1])
+    assert "Layout" not in shown[-1]
     for key in keys[:2]:
         tab.view.items_by_key[key].setSelected(True)
     tab.show_device_menu(keys[0], None)
-    texts = shown[-1]
+    texts = [action.text() for action in shown[-1]["Layout"].actions()]
     assert texts.index("Spacing of the 2 Selected") == texts.index("Arrange the 2 Selected") + 1

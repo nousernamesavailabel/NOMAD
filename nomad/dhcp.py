@@ -273,7 +273,7 @@ OPTIONS = {
 
 
 def describe_option(code, raw):
-    """(name, readable value) for an option. Anything unrecognised is shown as text or hex, never dropped."""
+    """(name, readable value) for an option. Anything unrecognized is shown as text or hex, never dropped."""
     name, formatter = OPTIONS.get(code, (f"Option {code}", _hex_or_text))
     try:
         return name, formatter(raw)

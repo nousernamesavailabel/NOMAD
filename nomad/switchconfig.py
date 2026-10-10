@@ -1,5 +1,5 @@
-"""Cisco IOS / IOS-XE (Catalyst) configuration that sets a switch up for NOMAD: SNMP read access (a community string
-or an SNMPv3 user, limited by an access list), the traps and syslog messages that tell the Map Watcher something was
+"""Cisco IOS / IOS-XE (Catalyst) configuration that sets a switch up for NOMAD: SNMP read access (community strings
+or SNMPv3 users, limited by an access list), the traps and syslog messages that tell the Map Watcher something was
 plugged in, CDP and LLDP for the map's crawls, and link-status logging and MAC notifications on the access ports.
 
 build() gives the lines to paste (or send) from the enable prompt: configure terminal ... end, and write memory if
@@ -44,6 +44,9 @@ class ConfigOptions:
     access: bool = True
     community: str = ""
     v3_user: Optional[V3User] = None
+    # More community strings and SNMPv3 users allowed to read (such as the rest of a map's); traps go with the two above
+    more_communities: list = field(default_factory=list)
+    more_users: list = field(default_factory=list)
     group: str = "NOMAD"
     view: str = "NOMAD-VIEW"
     acl: str = "NOMAD-SNMP"
@@ -67,31 +70,45 @@ class ConfigOptions:
     write_memory: bool = False
 
 
+def communities(options):
+    """Every community string allowed to read, the one traps go with first."""
+    return list(dict.fromkeys(([options.community] if options.community else []) + list(options.more_communities)))
+
+
+def users(options):
+    """Every SNMPv3 user allowed to read, the one traps go with first."""
+    return list(dict.fromkeys(([options.v3_user] if options.v3_user is not None else []) + list(options.more_users)))
+
+
 def problems(options):
     """What's wrong with options, as sentences ([] when nothing)."""
     found = []
     if options.access:
-        if not options.community and options.v3_user is None:
+        if not communities(options) and not users(options):
             found.append("Choose a community string or an SNMPv3 user for NOMAD to read the switch with.")
         found += _permit_problems(options.permit)
         if not NAME.match(options.acl):
             found.append("The access list name is one word: letters, digits, - _ and . (up to 32).")
-    if options.community:
-        found += _secret_problems(options.community, "The community string")
-        if not community_is_valid(options.community):
-            found.append("The community string can't be over 255 bytes or contain control characters.")
-        if "@" in options.community:
-            found.append("Leave @ out of the community string: community@vlan is how the per-VLAN MAC tables are "
-                         "read.")
-    user = options.v3_user
-    if user is not None:
+    for community in communities(options):
+        what = "community string" if community == options.community else f"community string {community}"
+        found += _secret_problems(community, f"The {what}")
+        if not community_is_valid(community):
+            found.append(f"The {what} can't be over 255 bytes or contain control characters.")
+        if "@" in community:
+            found.append(f"Leave @ out of the {what}: community@vlan is how the per-VLAN MAC tables are read.")
+    names = set()
+    for user in users(options):
         found += [user.problem()] if user.problem() else []
+        if user.user in names:
+            found.append(f"There are two SNMPv3 users named {user.user}: a switch keeps one of each name.")
+        names.add(user.user)
         if user.auth == "sha224":
             found.append("IOS doesn't offer SHA-224 for SNMPv3 users: choose SHA-1 or SHA-256 and up.")
         for secret, what in ((user.auth_password, "The authentication password"),
                              (user.priv_password, "The privacy password")):
             if secret:
-                found += _secret_problems(secret, what)
+                found += _secret_problems(secret, what if user == options.v3_user else f"{what} of {user.user}")
+    if users(options):
         for name, what in ((options.group, "SNMP group"), (options.view, "SNMP view")):
             if options.access and not NAME.match(name):
                 found.append(f"The {what} name is one word: letters, digits, - _ and . (up to 32).")
@@ -104,7 +121,7 @@ def problems(options):
             except ValueError:
                 found.append(f"'{destination}' isn't an IPv4 address to send traps and syslog to.")
     if options.traps:
-        if options.trap_version == "v3" and user is None:
+        if options.trap_version == "v3" and options.v3_user is None:
             found.append("Traps sent with SNMPv3 need the SNMPv3 user.")
         if options.trap_version == "v2c" and not options.community:
             found.append("Traps sent with v2c need the community string.")
@@ -149,8 +166,8 @@ def permit_line(item):
     return f" permit {network.network_address} {network.hostmask}"
 
 
-def user_line(options):
-    user = options.v3_user
+def user_line(options, user=None):
+    user = user or options.v3_user
     line = f"snmp-server user {user.user} {options.group} v3"
     if user.auth != "none":
         line += f" auth {IOS_AUTH[user.auth]} {user.auth_password}"
@@ -166,6 +183,11 @@ def trap_host(options, destination):
     return f"snmp-server host {destination} version 2c {options.community}"
 
 
+def _levels(options):
+    """The IOS security levels of the SNMPv3 users, the first user's first."""
+    return list(dict.fromkeys(IOS_LEVEL[user.level] for user in users(options)))
+
+
 def build(options, now=None):
     """The configuration lines for options. Raises ValueError with the first problem."""
     found = problems(options)
@@ -178,16 +200,16 @@ def build(options, now=None):
         lines += ["! Who may read SNMP"]
         lines += [f"ip access-list standard {options.acl}"] + [permit_line(item) for item in options.permit]
         lines.append("exit")
-        if options.community:
-            lines.append(f"snmp-server community {options.community} RO {options.acl}")
-        if options.v3_user is not None:
-            level = IOS_LEVEL[options.v3_user.level]
-            lines += [f"snmp-server view {options.view} iso included",
-                      f"snmp-server group {options.group} v3 {level} read {options.view} access {options.acl}",
-                      "! Catalyst keeps each VLAN's MAC address table in context vlan-<number>",
-                      f"snmp-server group {options.group} v3 {level} context vlan- match prefix read {options.view} "
-                      f"access {options.acl}",
-                      user_line(options)]
+        lines += [f"snmp-server community {community} RO {options.acl}" for community in communities(options)]
+        if users(options):
+            lines.append(f"snmp-server view {options.view} iso included")
+            for index, level in enumerate(_levels(options)):  # A group for each security level the users have
+                lines.append(f"snmp-server group {options.group} v3 {level} read {options.view} access {options.acl}")
+                if index == 0:
+                    lines.append("! Catalyst keeps each VLAN's MAC address table in context vlan-<number>")
+                lines.append(f"snmp-server group {options.group} v3 {level} context vlan- match prefix read "
+                             f"{options.view} access {options.acl}")
+            lines += [user_line(options, user) for user in users(options)]
         if options.ifindex_persist:
             lines.append("snmp-server ifindex persist")
     if options.location:
@@ -260,14 +282,13 @@ def undo(options):
     if options.contact:
         lines.append("no snmp-server contact")
     if options.access:
-        if options.v3_user is not None:
-            level = IOS_LEVEL[options.v3_user.level]
-            lines += [f"no snmp-server user {options.v3_user.user} {options.group} v3",
-                      f"no snmp-server group {options.group} v3 {level} context vlan- match prefix",
-                      f"no snmp-server group {options.group} v3 {level}",
-                      f"no snmp-server view {options.view} iso"]
-        if options.community:
-            lines.append(f"no snmp-server community {options.community}")
+        if users(options):
+            lines += [f"no snmp-server user {user.user} {options.group} v3" for user in users(options)]
+            for level in _levels(options):
+                lines += [f"no snmp-server group {options.group} v3 {level} context vlan- match prefix",
+                          f"no snmp-server group {options.group} v3 {level}"]
+            lines.append(f"no snmp-server view {options.view} iso")
+        lines += [f"no snmp-server community {community}" for community in communities(options)]
         lines.append(f"no ip access-list standard {options.acl}")
     lines.append("end")
     if options.write_memory:

@@ -103,6 +103,9 @@ class Device:
     port_vrfs: dict = field(default_factory=dict)  # Port (short name) -> VRF, for the ports in one (else global)
     port_channels: dict = field(default_factory=dict)  # Port-channel member (short name) -> its port-channel's
     stp_mode: str = ""  # The spanning tree it runs: pvst, rapid-pvst, mst... ("" if unknown)
+    # Port (short name) -> {"oper": "up", "down"..., "speed": Mb/s, "duplex": "full" or "half"}, for the ports not
+    # shut down, as last read
+    port_status: dict = field(default_factory=dict)
     # VRF -> [[destination, next hop, port, protocol]], like routes (which are the global table's). Only VRFs whose
     # routes could be read are here
     vrf_routes: dict = field(default_factory=dict)

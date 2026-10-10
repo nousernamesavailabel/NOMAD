@@ -315,7 +315,14 @@ def make_engine(directory=None):
     directory = Path(directory or watcher_dir())
     config = load_config(directory)
     key = key_from_config(config)
-    maps = TribeMaps(key.server_id, TeamClient(key, user=SERVICE_USER), directory / "maps.db",
+
+    def remember_moved(moved_key):  # The tribe server moved to another computer: keep its new address
+        latest = load_config(directory)
+        latest["hosts"], latest["port"] = list(moved_key.hosts), moved_key.port
+        save_config(latest, directory)
+
+    client = TeamClient(key, user=SERVICE_USER, on_moved=remember_moved)
+    maps = TribeMaps(key.server_id, client, directory / "maps.db",
                      protect=lambda text: protect(text, machine=True), unprotect=unprotect)
     return WatchEngine(maps, config.get("maps", []), f"{socket.gethostname()}-service",
                        timers=config_timers(config), listen=config.get("listen", True))

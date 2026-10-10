@@ -580,7 +580,7 @@ class VlanTab(QWidget):
 
     @staticmethod
     def map_text(on_map, vlan):
-        """(What the open map says of the VLAN, its colour or None)."""
+        """(What the open map says of the VLAN, its color or None)."""
         if on_map is None:
             return "", None
         item = on_map.get(vlan.vlan)

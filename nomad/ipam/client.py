@@ -15,6 +15,10 @@ sent in the order they were made (send_pending on a worker thread, then apply_se
 someone else changed that address first, are kept as refused for the user to resolve (use the next free address, or
 discard), and the copy goes back to the server's version. VLAN changes made offline wait the same way (see
 vlan_team.py), in a queue of their own.
+
+When the tribe server has been moved to another computer (see migrate.py), the old one answers with the new one's
+address: the client switches to it, repeats the request there, and remembers the address in the saved tribe key
+(on_moved), so the laptop needs no new key file.
 """
 import contextlib
 import datetime
@@ -64,6 +68,11 @@ MOVE_API = 10  # And moving subnets between networks
 
 class ServerUnreachable(IpamError):
     """No answer from the server (the laptop is offline, or the server is down)."""
+
+
+class ServerMoved(ServerUnreachable):
+    """The tribe server moved to another computer without saying where (a new tribe key file is needed); until
+    then the laptop works as it does offline."""
 
 
 class OldServerError(IpamError):
@@ -161,6 +170,15 @@ def load_saved_key(path=None):
         return None
 
 
+def remember_moved_key(key, path=None):
+    """The tribe server moved (see TeamClient.request): keep its new address in the saved tribe key, if that's the
+    key that moved."""
+    saved = load_saved_key(path)
+    if saved is not None and saved.server_id == key.server_id and saved.secret == key.secret:
+        saved.hosts, saved.port = list(key.hosts), key.port
+        save_key(saved, path)
+
+
 def forget_key(path=None):
     Path(path or settings_path()).unlink(missing_ok=True)
 
@@ -171,12 +189,24 @@ def copy_path():
 
 # --------------------------------------------------------------------- HTTPS, pinned to the server's certificate
 
+class _Moved(Exception):
+    def __init__(self, message, hosts, port):
+        super().__init__(message)
+        self.message, self.hosts, self.port = message, hosts, port
+
+
 class TeamClient:
-    def __init__(self, key, user=None, computer=None):
+    def __init__(self, key, user=None, computer=None, on_moved=None, on_attempt=None):
+        """on_moved(key): called (on whichever thread made the request) after the server said it moved to another
+        computer and the key was pointed there; by default the saved tribe key is updated. on_attempt(event, host):
+        told "trying" before each address is tried and "reached" once its certificate checks out (for showing
+        progress, on the same thread)."""
         self.key = key
         self.user = user or current_user()
         self.computer = computer or socket.gethostname()
         self.last_host = None
+        self.on_moved = on_moved or remember_moved_key
+        self.on_attempt = on_attempt
 
     def _connect(self, host):
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -193,15 +223,37 @@ class TeamClient:
         return connection
 
     def request(self, method, path, body=None):
+        try:
+            return self._request(method, path, body)
+        except _Moved as moved:
+            hosts, port = moved.hosts, moved.port
+            if not hosts or self.key.role == ADMIN or (hosts == self.key.hosts and port == self.key.port):
+                raise ServerMoved(moved.message) from None
+            log.info("The tribe server moved to %s (port %s)", ", ".join(hosts), port)
+            self.key.hosts, self.key.port, self.last_host = list(hosts), port, None
+            try:
+                self.on_moved(self.key)
+            except Exception as error:  # Still works this time; it's asked again after a restart
+                log.warning("Couldn't save the tribe server's new address: %s", error)
+            try:
+                return self._request(method, path, body)
+            except _Moved as again:
+                raise ServerMoved(again.message) from None
+
+    def _request(self, method, path, body=None):
         hosts = [self.last_host] + [host for host in self.key.hosts if host != self.last_host] if self.last_host \
             else list(self.key.hosts)
         errors = []
         for host in hosts:
+            if self.on_attempt:
+                self.on_attempt("trying", host)
             try:
                 connection = self._connect(host)
             except (OSError, ssl.SSLError) as error:
                 errors.append(f"{host}: {getattr(error, 'strerror', None) or error}")
                 continue
+            if self.on_attempt:
+                self.on_attempt("reached", host)
             try:
                 data = None if body is None else json.dumps(body).encode("utf-8")
                 headers = {"Authorization": f"Bearer {self.key.secret}", "X-NOMAD-User": self.user,
@@ -223,6 +275,10 @@ class TeamClient:
                 raise ConflictError(reply.get("error", "Someone else changed it first."))
             if response.status == 401:  # The key itself was refused (whatever the server's wording)
                 raise TeamKeyError(reply.get("error", "The tribe key isn't accepted."))
+            if response.status == 410 and reply.get("moved"):
+                raise _Moved(reply.get("error", "The tribe server has moved."), [str(host) for host in
+                                                                                 reply.get("hosts") or []],
+                             int(reply.get("port") or self.key.port))
             if response.status == 404:
                 raise OldServerError(f"The IPAM server doesn't know {path.split('?')[0]}: it's running an older "
                                      "version of NOMAD.")

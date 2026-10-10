@@ -219,3 +219,9 @@ def test_unified_drawer_category_click_preserves_page_and_cycle_order(nav):
     nav.step(1)
     assert nav.title(nav.currentWidget()) == "Interfaces"
     assert nav.count() == 3
+
+
+def test_escape_closes_the_drawer_without_taking_the_pages_escape(nav):
+    nav.open_search()
+    QTest.keyClick(nav.search, Qt.Key_Escape)
+    assert not nav.drawer_open and not nav.panel.isVisible()

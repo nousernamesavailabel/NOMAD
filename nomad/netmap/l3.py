@@ -26,7 +26,7 @@ class L3Node:
     label: str
     detail: str = ""
     device: object = None  # The Device, for device nodes
-    tone: str = ""  # A theme colour for a subnet's outline (what Subnet Placement found), or "" for the usual
+    tone: str = ""  # A theme color for a subnet's outline (what Subnet Placement found), or "" for the usual
 
 
 def owned_addresses(network_map):

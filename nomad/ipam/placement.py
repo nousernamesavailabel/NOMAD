@@ -8,7 +8,7 @@ old VLAN link and adds the new one when specified, in the same change. And what 
 roles.py) where someone set it. As with VLANs,
 nothing is written to IPAM's networks, subnets or addresses.
 
-evaluate() puts the database and a map's netmap.placement.analyse() together into Rows, with what's wrong with each.
+evaluate() puts the database and a map's netmap.placement.analyze() together into Rows, with what's wrong with each.
 """
 import datetime
 import ipaddress
@@ -238,7 +238,7 @@ class Row:
 def evaluate(network_map, ipam_store, vlan_store, placement_store, network_id):
     """Rows for the network's subnets and every subnet on the map (None: no map), with their findings, worst first
     within each, sorted by VRF then address."""
-    from ..netmap.placement import analyse
+    from ..netmap.placement import analyze
     subnets = {subnet.cidr: subnet for subnet in ipam_store.subnets(network_id)} if network_id else {}
     domains = [domain for domain in vlan_store.domains() if not network_id or domain.network_id == network_id]
     planned = {}
@@ -251,7 +251,7 @@ def evaluate(network_map, ipam_store, vlan_store, placement_store, network_id):
     moves = {}
     for move in (placement_store.moves(network_id, open_only=True) if network_id else []):
         moves.setdefault(move.cidr, move)
-    found = analyse(network_map) if network_map is not None else []
+    found = analyze(network_map) if network_map is not None else []
 
     rows = {}
     for item in found:
