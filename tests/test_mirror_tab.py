@@ -102,6 +102,15 @@ def wait(tab):
     QApplication.processEvents()
 
 
+def test_routers_mirror_from_but_destinations_are_switches(page):
+    def keys(combo):
+        return [combo.itemData(index) for index in range(1, combo.count())]
+    assert "R1" in keys(page.source_combo) and "SW1" in keys(page.source_combo)
+    assert "R1" not in keys(page.dest_combo) and "SW1" in keys(page.dest_combo)
+    assert page.source_combo.itemText(0) == "Choose a switch or router" and page.dest_combo.itemText(0) == \
+        "Choose a switch"
+
+
 def test_plan_set_up_check_and_take_away(page):
     page.prefill(source="SW1", ports=["Gi1/0/1"], dest="SW1", dest_port="Gi1/0/10")
     assert [item.port for item in page.sources()] == ["Gi1/0/1"]
@@ -203,7 +212,7 @@ def test_this_pc_on_wifi_gets_erspan_to_its_address(page, monkeypatch):
     wifi.name, wifi.description = "Ethernet 3", "Some USB adapter"  # Not Wi-Fi, but its MAC is behind the AP
     page.fill_adapters()
     request = page.build_request()
-    assert request.to == mirror.TO_ADDRESS and "isn't on a switch port the map has" in page.pc_note
+    assert request.to == mirror.TO_ADDRESS and "isn't on a port the map has" in page.pc_note
 
     page.kind_combo.setCurrentIndex(page.kind_combo.findData(mirror.SPAN))
     assert page.build_request() is None and "SPAN needs one" in page.status_label.text()

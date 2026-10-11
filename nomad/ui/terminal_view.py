@@ -718,8 +718,8 @@ class SessionView(PromptAnswers, QWidget):
             self.note("Press Enter to try again.", NOTE_COLOR)
 
     def on_closed(self, reason):
+        self.close_transport()  # First, so the note below doesn't bring back the prompt of a closed connection
         self.note(reason, NOTE_COLOR)
-        self.close_transport()
         self.set_state(DISCONNECTED, reason)
         if self.should_reconnect():
             self.schedule_reconnect()
@@ -769,7 +769,6 @@ class SessionView(PromptAnswers, QWidget):
         self.set_state(DISCONNECTED, "Disconnected.")
 
     def close_transport(self):
-        self.stop_config_capture("Connection closed. No configuration file was saved.")
         self.prompter.cancel_all()
         if self.thread is not None:
             self.thread.stop()
@@ -780,6 +779,8 @@ class SessionView(PromptAnswers, QWidget):
             release_thread(self.thread, 3000 if self.state == CONNECTED else 200)
             self.thread = None
         self.transport = None
+        # After the transport's gone, so its note doesn't reprint the prompt either
+        self.stop_config_capture("Connection closed. No configuration file was saved.")
 
     def shutdown(self):
         """Close the connection and the log (the view is going away)."""
@@ -885,10 +886,13 @@ class SessionView(PromptAnswers, QWidget):
     def note(self, message, color):
         """Write one of NOMAD's own messages into the terminal, then the line it interrupted (the device's prompt and
         anything typed after it) again, so the cursor is back where the device has it: what's typed next, or Save
-        Config looking for the prompt, carries on from there."""
+        Config looking for the prompt, carries on from there. Only while connected: once the connection has
+        closed (an idle timeout, say), that prompt is dead and isn't written again."""
         column = self.model.screen.cursor.x
-        line = self.model.line(self.model.cursor_position().line)
-        interrupted = "".join(line[index].data for index in range(column))  # Spaces kept: "$ " stays "$ "
+        interrupted = ""
+        if self.state == CONNECTED and self.transport is not None:
+            line = self.model.line(self.model.cursor_position().line)
+            interrupted = "".join(line[index].data for index in range(column))  # Spaces kept: "$ " stays "$ "
         prefix = "\r\n" if column else ""
         self.model.feed_text(f"{prefix}{color}[{message}]{RESET}\r\n{interrupted}")
         self.after_output()

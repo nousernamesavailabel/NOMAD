@@ -4,6 +4,12 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.27.1] - 2026-10-11
+
+- **Changed:** Port Mirroring works with routers as well as switches, and says so; a router's ports can be mirrored from the map too. Copies still go to a switch port (or an address).
+- **Fixed:** Port Mirroring sends the right line for a service instance (source service instance N ...), and warns that some routers copy nothing from one.
+- **Fixed:** a terminal whose connection closed no longer shows the device's prompt again after the note.
+
 ## [1.27.0] - 2026-10-11
 
 - **New:** Help > What's New lists what each version added and fixed.

@@ -2397,7 +2397,7 @@ class NetworkMapTab(QWidget):
         menu.addSeparator()
         if device.mgmt_ip:
             actions[menu.addAction("Crawl from Here")] = lambda: self.crawl_from(device.mgmt_ip)
-        if device.kind == SWITCH and hasattr(self.window, "show_mirror"):  # In Tools, beside Ping and the rest
+        if device.kind in (SWITCH, ROUTER) and hasattr(self.window, "show_mirror"):  # In Tools, beside Ping...
             tools = next((action.menu() for action in menu.actions() if action.menu() is not None
                           and action.text() == "Tools"), menu)
             actions[tools.addAction("Mirror Ports...")] = lambda: self.window.show_mirror(source=key)
@@ -2631,7 +2631,8 @@ class NetworkMapTab(QWidget):
             self.add_vlan_link(menu, actions, number, domain or "")
         if device is not None and device.kind == SWITCH and key in self.network_map.devices:
             actions[menu.addAction("Carry a VLAN Here...")] = lambda: self.carry_vlan(b=key, port=port)
-            self.add_mirror_actions(menu, actions, key, port, hosts)
+        if device is not None and device.kind in (SWITCH, ROUTER) and key in self.network_map.devices:
+            self.add_mirror_actions(menu, actions, key, port, hosts, to_here=device.kind == SWITCH)
         if len(hosts) == 1:
             self.add_address_link(menu, actions, hosts[0].ip)
         if actions:
@@ -2646,13 +2647,16 @@ class NetworkMapTab(QWidget):
         if chosen in actions:
             actions[chosen]()
 
-    def add_mirror_actions(self, menu, actions, key, port, hosts):
-        """Mirror This Port... (to Port Mirroring, as a source) and Mirror to This Port... (as the destination)."""
+    def add_mirror_actions(self, menu, actions, key, port, hosts, to_here=True):
+        """Mirror This Port... (to Port Mirroring, as a source) and, with to_here (a switch's port: only a switch's
+        can be a destination), Mirror to This Port... (as the destination)."""
         if not hasattr(self.window, "show_mirror"):
             return
         label = "Mirror This Host's Port..." if len(hosts) == 1 else "Mirror This Port..."
         actions[menu.addAction(label)] = lambda: self.window.show_mirror(source=key, ports=[port])
-        actions[menu.addAction("Mirror to This Port...")] = lambda: self.window.show_mirror(dest=key, dest_port=port)
+        if to_here:
+            actions[menu.addAction("Mirror to This Port...")] = \
+                lambda: self.window.show_mirror(dest=key, dest_port=port)
 
     def add_host(self, device=None, port=""):
         if self.network_map is None or not self.network_map.devices:

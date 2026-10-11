@@ -13,7 +13,7 @@ from nomad.terminal.commands import CommandButton, CommandStore  # noqa: E402
 from nomad.terminal.highlight import HighlightStore  # noqa: E402
 from nomad.terminal.sessions import TELNET, Session, SessionStore  # noqa: E402
 from nomad.ui.terminal_tab import TerminalTab  # noqa: E402
-from nomad.ui.terminal_view import CONNECTED, DISCONNECTED  # noqa: E402
+from nomad.ui.terminal_view import CONNECTED, DISCONNECTED, NOTE_COLOR  # noqa: E402
 from nomad.ui.scp_view import FileSessionView  # noqa: E402
 
 
@@ -522,6 +522,29 @@ def test_no_reconnecting_when_it_is_off(page):
     one = connect(page, "one")
     one.on_closed("Connection closed.")
     assert not one.reconnect_timer.isActive()
+
+
+def screen_lines(view):
+    model = view.model
+    return [model.line_text(index).rstrip() for index in range(model.history_length, model.line_count)]
+
+
+def test_a_drop_does_not_write_the_prompt_again(page):
+    one = connect(page, "one")
+    one.model.feed(b"Switch1#")
+    one.on_closed("Connection closed by the device.")
+    lines = [line for line in screen_lines(one) if line]
+    assert lines[0] == "Switch1#"
+    assert "Switch1#" not in lines[1:]
+    assert one.model.screen.cursor.x == 0
+
+
+def test_a_note_while_connected_writes_the_prompt_again(page):
+    one = connect(page, "one")
+    one.model.feed(b"Switch1#sh")
+    one.note("Logging to x.log", NOTE_COLOR)
+    lines = [line for line in screen_lines(one) if line]
+    assert lines == ["Switch1#sh", "[Logging to x.log]", "Switch1#sh"]
 
 
 def test_failing_while_reconnecting_tries_again_until_disconnected(page):

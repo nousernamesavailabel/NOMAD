@@ -6,6 +6,17 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.27.1] - 2026-10-11
+
+### Changed
+
+- **Port Mirroring** no longer takes every device for a switch: the page, its messages and the plan say device (or switch or router) where either can be meant, and **Read All Switches** is **Read All Devices**. A router's ports can be mirrored from the map too (**Tools** > **Mirror Ports...** on a router, and **Mirror This Port...** on its port boxes). A destination port is still a switch's only: the list of where the copies go has only switches, and **Mirror to This Port...** is only on a switch's ports.
+
+### Fixed
+
+- **Port Mirroring:** a service instance (`Gi6.SI.6`, as the map names one) is mirrored with `source service instance 6 gigabitEthernet 6 both`, not `source interface Gi6.SI.6 both`, which IOS refuses. The plan warns that some routers take a service instance as the source but copy nothing, and that mirroring its port, with the capture filtered on its VLAN, works instead.
+- **Terminal:** when a connection closes (an idle timeout, say), the device's prompt is no longer written again under the note saying so, as if the session were still at it.
+
 ## [1.27.0] - 2026-10-11
 
 ### Added

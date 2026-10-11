@@ -70,7 +70,7 @@ def test_same_switch_is_span_with_a_free_session():
     request = Request("SW1", [Source("Gi1/0/1"), Source("Gi1/0/2", direction=RX)], dest_device="SW1",
                       dest_port="Gi1/0/3")
     result = plan(campus(), request, states(SW1=read(1, 2)))
-    assert result.ok and result.kind == SPAN and "same switch" in result.why
+    assert result.ok and result.kind == SPAN and "same device" in result.why
     step, = result.steps
     assert step.session == 3
     assert step.lines == ["monitor session 3 source interface Gi1/0/1 both",
@@ -78,6 +78,23 @@ def test_same_switch_is_span_with_a_free_session():
                           "monitor session 3 destination interface Gi1/0/3"]
     assert mirror.config_text(step).splitlines()[0] == "configure terminal"
     assert mirror.undo_text(step) == "configure terminal\nno monitor session 3\nend"
+
+
+def test_service_instance_sources():
+    assert Source("Gi6.SI.6").ios() == "service instance 6 gigabitEthernet 6 both"
+    assert Source("GigabitEthernet6.SI.6", direction=RX).ios() == "service instance 6 gigabitEthernet 6 rx"
+    assert Source("Te1/0/1.SI.200").ios() == "service instance 200 tenGigabitEthernet 1/0/1 both"
+    assert Source("Gi1/0/1").ios() == "interface Gi1/0/1 both"
+    network_map = campus()
+    network_map.devices["SW1"].port_vlans["Gi6.SI.6"] = {}
+    request = Request("SW1", [Source("Gi6.SI.6")], to=TO_ADDRESS, dest_ip="10.0.10.9")
+    result = plan(network_map, request, states())
+    assert result.ok and result.kind == ERSPAN
+    assert " source service instance 6 gigabitEthernet 6 both" in result.steps[0].lines
+    warning, = [finding.text for finding in result.findings if finding.severity == WARNING]
+    assert "copy nothing" in warning and "mirror Gi6 instead" in warning
+    plain = plan(network_map, Request("SW1", [Source("Gi1/0/5")], to=TO_ADDRESS, dest_ip="10.0.10.9"), states())
+    assert not any("service instance" in finding.text for finding in plain.findings)
 
 
 def test_destination_options():

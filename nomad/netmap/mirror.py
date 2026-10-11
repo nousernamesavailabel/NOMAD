@@ -63,9 +63,32 @@ class Source:
         return f"{what} ({DIRECTION_NAMES.get(self.direction, self.direction).lower()})"
 
     def ios(self):
-        """`interface Gi1/0/1 both` / `vlan 10 rx`, after `source`."""
-        what = f"vlan {self.vlan}" if self.vlan else f"interface {self.port}"
+        """`interface Gi1/0/1 both` / `vlan 10 rx` / `service instance 6 gigabitEthernet 6 both`, after `source`."""
+        if self.vlan:
+            what = f"vlan {self.vlan}"
+        else:
+            instance = SERVICE_INSTANCE.match(short_port(self.port))
+            what = (f"service instance {instance['number']} {ios_port_type(instance['port'])}" if instance
+                    else f"interface {self.port}")
         return f"{what} {self.direction}"
+
+
+# A service instance (EFP) of a port, as SNMP names it: GigabitEthernet6.SI.6 (Gi6.SI.6 short)
+SERVICE_INSTANCE = re.compile(r"^(?P<port>.+?)\.SI\.(?P<number>\d+)$", re.IGNORECASE)
+IOS_PORT_TYPES = {  # Short name -> the interface type as IOS's own keyword, for `service instance N <type> <number>`
+    "hu": "hundredGigE", "fo": "fortyGigabitEthernet", "twe": "twentyFiveGigE", "te": "tenGigabitEthernet",
+    "fi": "fiveGigabitEthernet", "tw": "twoGigabitEthernet", "gi": "gigabitEthernet", "fa": "fastEthernet",
+    "po": "port-channel", "eth": "ethernet", "et": "ethernet",
+}
+
+
+def ios_port_type(port):
+    """Gi6 -> `gigabitEthernet 6`, Te1/0/1 -> `tenGigabitEthernet 1/0/1` (a type not known kept as it is)."""
+    match = re.match(r"^([A-Za-z-]+)\s*(\d.*)$", port)
+    if not match:
+        return port
+    kind, number = match.groups()
+    return f"{IOS_PORT_TYPES.get(kind.lower(), kind)} {number}"
 
 
 @dataclass
@@ -351,7 +374,7 @@ def plan(network_map, request, states=None, applet_tag=""):
     devices = network_map.devices
     source = devices.get(request.source_device)
     if source is None or source.kind not in (SWITCH, ROUTER):
-        findings.append(Finding(ERROR, "Choose the switch whose ports (or VLANs) to mirror."))
+        findings.append(Finding(ERROR, "Choose the switch or router whose ports (or VLANs) to mirror."))
         return finish(result)
     sources = [item for item in request.sources if item.port or item.vlan]
     if not sources:
@@ -397,8 +420,8 @@ def plan(network_map, request, states=None, applet_tag=""):
         for step in result.steps:
             step.applet_name = result.applet_name
             step.applet = applet(result.applet_name, step, request.remove_after, request.name)
-        findings.append(Finding(INFO, f"Each switch takes its part away itself after {minutes_text(request.remove_after)} "
-                                      f"(EEM applet {result.applet_name}). A switch that refuses the applet has its "
+        findings.append(Finding(INFO, f"Each device takes its part away itself after {minutes_text(request.remove_after)} "
+                                      f"(EEM applet {result.applet_name}). A device that refuses the applet has its "
                                       "part taken away by NOMAD when the time's up, while NOMAD is open."))
     return finish(result)
 
@@ -442,16 +465,16 @@ def choose_kind(network_map, request, result):
     same = request.dest_device == request.source_device
     if same:
         if request.kind in ("", SPAN):
-            result.kind, result.why = SPAN, "the destination port is on the same switch"
+            result.kind, result.why = SPAN, "the destination port is on the same device"
         elif request.kind == ERSPAN:
-            findings.append(Finding(ERROR, "ERSPAN goes to another switch (or an address): the destination port is on "
-                                           "the same switch, so use SPAN."))
+            findings.append(Finding(ERROR, "ERSPAN goes to another device (or an address): the destination port is on "
+                                           "the same device, so use SPAN."))
         else:
-            findings.append(Finding(ERROR, "RSPAN goes to another switch: the destination port is on the same switch, "
+            findings.append(Finding(ERROR, "RSPAN goes to another switch: the destination port is on the same device, "
                                            "so use SPAN."))
         return
     if request.kind == SPAN:
-        findings.append(Finding(ERROR, f"SPAN stays on one switch: the destination is on "
+        findings.append(Finding(ERROR, f"SPAN stays on one device: the destination is on "
                                        f"{device_label(network_map, request.dest_device)}, not {source.label}."))
         return
     if request.kind == ERSPAN:
@@ -462,14 +485,14 @@ def choose_kind(network_map, request, result):
     if trial is not None and trial.route and trial.ok:
         result.kind = RSPAN
         result.why = "chosen" if request.kind == RSPAN else \
-            f"the switches are joined by switched links ({len(trial.route) - 1} hop{'' if len(trial.route) == 2 else 's'})"
+            f"the devices are joined by switched links ({len(trial.route) - 1} hop{'' if len(trial.route) == 2 else 's'})"
         return
     if request.kind == RSPAN:
         why = next((finding.text for finding in (trial.findings if trial is not None else [])
                     if finding.severity == ERROR), "there's no free VLAN for it")
         findings.append(Finding(ERROR, f"RSPAN can't reach {device_label(network_map, request.dest_device)}: {why}"))
         return
-    result.kind, result.why = ERSPAN, "no switched way between the switches (only through routers)"
+    result.kind, result.why = ERSPAN, "no switched way between the devices (only through routers)"
 
 
 def check_sources(network_map, request, sources, states, result):
@@ -489,8 +512,15 @@ def check_sources(network_map, request, sources, states, result):
         if other is not None:
             findings.append(Finding(INFO, f"{item.port} goes to {other.label}: everything crossing that link is "
                                           "copied.", key, item.port))
+        instance = SERVICE_INSTANCE.match(short_port(item.port))
+        if instance:
+            findings.append(Finding(WARNING, f"{item.port} is service instance {instance['number']} of "
+                                             f"{instance['port']}. Some routers take a service instance as the source "
+                                             "but copy nothing: if the capture stays empty, mirror "
+                                             f"{instance['port']} instead and filter the capture on the instance's "
+                                             "VLAN (vlan.id == its VLAN).", key, item.port))
     if any(item.vlan for item in sources) and any(item.direction != RX for item in sources):
-        findings.append(Finding(INFO, "Some switches only mirror a VLAN's received traffic: if one refuses, choose "
+        findings.append(Finding(INFO, "Some devices only mirror a VLAN's received traffic: if one refuses, choose "
                                       "Received."))
 
 
@@ -527,11 +557,11 @@ def check_destination(network_map, request, sources, states, result):
         findings.append(Finding(WARNING, f"This PC reaches the network through {device.label} {port}. While it's a "
                                          "mirror destination it gets the copies but"
                                          + (f" only reaches VLAN {request.ingress_vlan}"
-                                            if request.ingress_vlan else " can't reach the switches")
-                                         + ", so NOMAD may not be able to take it away: the switch's own timer will.",
+                                            if request.ingress_vlan else " can't reach the network devices")
+                                         + ", so NOMAD may not be able to take it away: the device's own timer will.",
                                 key, port))
         if not request.remove_after:
-            findings.append(Finding(ERROR, "Mirroring to the port this PC is on needs Remove after, so the switch "
+            findings.append(Finding(ERROR, "Mirroring to the port this PC is on needs Remove after, so the device "
                                            "takes it away itself. Or plug a second network adapter into a free "
                                            "port and mirror to that.", key, port))
     elif hosts and not request.to_this_pc:
@@ -567,20 +597,20 @@ def session_for(request, states, key, avoid=()):
     state = states.get(key)
     if request.session:
         if state is not None and request.session in state.sessions:
-            return request.session, Finding(ERROR, f"Session {request.session} is in use on the switch "
+            return request.session, Finding(ERROR, f"Session {request.session} is in use on the device "
                                                    f"({state.sessions[request.session].summary()}): choose another "
                                                    "or Auto.", key)
         if state is None or not state.read:
-            return request.session, Finding(WARNING, f"The switch's sessions weren't read: if session "
+            return request.session, Finding(WARNING, f"The device's sessions weren't read: if session "
                                                      f"{request.session} is in use, these lines change it.", key)
         return request.session, None
     if state is None or not state.read:
         why = f" ({state.problem.rstrip('.')})" if state is not None and state.problem else ""
-        return 0, Finding(ERROR, f"The switch's mirror sessions couldn't be read{why}, so NOMAD can't tell which "
+        return 0, Finding(ERROR, f"The device's mirror sessions couldn't be read{why}, so NOMAD can't tell which "
                                  "session number is free: log in over SSH, or choose a session number.", key)
     number = state.free_session(avoid)
     if not number:
-        return 0, Finding(ERROR, "Every session number is in use on the switch.", key)
+        return 0, Finding(ERROR, "Every session number is in use on the device.", key)
     return number, None
 
 
@@ -718,7 +748,7 @@ def plan_erspan(network_map, request, sources, states, result):
     else:
         result.dest_ip = request.dest_ip.strip()
         if result.dest_ip == origin:
-            findings.append(Finding(ERROR, "The copies can't go to the switch's own address."))
+            findings.append(Finding(ERROR, "The copies can't go to the device's own address."))
             return
 
     def source_lines(number):

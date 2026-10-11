@@ -46,11 +46,11 @@ CHECK_EVERY = 30000  # ms between looks for mirrors past their time that NOMAD h
 ASK_LOGIN = "A user name and password asked for"
 DEFAULT_MINUTES = 60
 SEVERITY_COLORS = {ERROR: "error", WARNING: "warning", INFO: "muted"}
-KIND_CHOICES = [("Auto", ""), ("SPAN (same switch)", SPAN), ("RSPAN (over switched links)", RSPAN),
+KIND_CHOICES = [("Auto", ""), ("SPAN (same device)", SPAN), ("RSPAN (over switched links)", RSPAN),
                 ("ERSPAN (over IP)", ERSPAN)]
-STEP_COLUMNS = ["Switch", "Role", "Session", "Changes", "Status", ""]
-RECORD_COLUMNS = ["Name", "Kind", "What", "Switches", "Set Up", "Removes Itself", "State"]
-SESSION_COLUMNS = ["Switch", "Session", "Type", "Details", "Made By"]
+STEP_COLUMNS = ["Device", "Role", "Session", "Changes", "Status", ""]
+RECORD_COLUMNS = ["Name", "Kind", "What", "Devices", "Set Up", "Removes Itself", "State"]
+SESSION_COLUMNS = ["Device", "Session", "Type", "Details", "Made By"]
 SETUP, UNDO = "setup", "undo"
 
 
@@ -285,9 +285,9 @@ class MirrorTab(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         intro = QLabel("Copy a port's traffic (or a VLAN's) to where it can be captured, on Cisco IOS / IOS-XE "
-                       "switches: SPAN to a port of the same switch, RSPAN to another switch over switched links, or "
-                       "ERSPAN over IP to an address, another switch or this PC. NOMAD picks the kind, checks the "
-                       "ports, sends it, and takes it away again (or the switches do, when the time's up).")
+                       "switches and routers: SPAN to a port of the same device, RSPAN to another switch over switched "
+                       "links, or ERSPAN over IP to an address, another device or this PC. NOMAD picks the kind, "
+                       "checks the ports, sends it, and takes it away again (or the devices do, when the time's up).")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         self.map_label = QLabel()
@@ -315,7 +315,7 @@ class MirrorTab(QWidget):
         # What to mirror
         grid.addWidget(QLabel("Mirror on:"), 0, 0)
         self.source_combo = QComboBox()
-        self.source_combo.setToolTip("The switch whose ports (or VLANs) are copied")
+        self.source_combo.setToolTip("The switch or router whose ports (or VLANs) are copied")
         self.source_combo.currentIndexChanged.connect(self.on_source_changed)
         grid.addWidget(self.source_combo, 0, 1)
         self.sources_table = QTableWidget(0, 2)
@@ -328,8 +328,8 @@ class MirrorTab(QWidget):
         self.sources_table.setColumnWidth(0, 160)
         grid.addWidget(self.sources_table, 1, 0, 1, 2)
         source_buttons = QHBoxLayout()
-        for text, slot, tip in (("Add Ports...", self.add_ports, "Choose ports of the switch to mirror"),
-                                ("Add VLAN...", self.add_vlan, "Mirror a VLAN's traffic on the switch (all its ports)"),
+        for text, slot, tip in (("Add Ports...", self.add_ports, "Choose ports of the device to mirror"),
+                                ("Add VLAN...", self.add_vlan, "Mirror a VLAN's traffic on the device (all its ports)"),
                                 ("Add Host...", self.add_host, "Mirror the port a device is on: its MAC, IP address "
                                                                "or name, as the map has it"),
                                 ("Remove", self.remove_sources, "")):
@@ -370,7 +370,7 @@ class MirrorTab(QWidget):
         self.adapter_combo = QComboBox()
         self.adapter_combo.setToolTip("This PC's network adapter to send the copies to. Plugged into a free port of "
                                       "its own (a second adapter), the copies go to that port; on the adapter this "
-                                      "PC reaches the switches through, ERSPAN sends them to its address, so the port "
+                                      "PC reaches the devices through, ERSPAN sends them to its address, so the port "
                                       "keeps working.")
         self.adapter_combo.currentIndexChanged.connect(self.plan_outdated)
         to_layout.addWidget(self.adapter_combo, 1, 1)
@@ -396,8 +396,8 @@ class MirrorTab(QWidget):
         options.addWidget(self.name_input)
         self.remove_check = QCheckBox("Remove after")
         self.remove_check.setChecked(True)
-        self.remove_check.setToolTip("Each switch takes its part away itself when the time's up (an EEM applet with a "
-                                     "countdown), even if this PC has gone. A switch that refuses the applet has "
+        self.remove_check.setToolTip("Each device takes its part away itself when the time's up (an EEM applet with a "
+                                     "countdown), even if this PC has gone. A device that refuses the applet has "
                                      "NOMAD take it away when the time's up, while NOMAD is open.")
         self.minutes_input = QSpinBox()
         self.minutes_input.setRange(1, mirror.MAX_MINUTES)
@@ -420,10 +420,10 @@ class MirrorTab(QWidget):
         more = QGridLayout(self.more_panel)
         more.setContentsMargins(0, 0, 0, 0)
         self.session_input = self.number_input(0, mirror.MAX_SESSION, "Auto",
-                                               "The session number on every switch (Auto: the first free one on each, "
+                                               "The session number on every device (Auto: the first free one on each, "
                                                "from what Plan reads)")
         self.rspan_input = self.number_input(0, 4094, "Auto", "RSPAN's VLAN: one used for nothing else (Auto: the "
-                                                              "first VLAN no switch on the map has, from 999 down)")
+                                                              "first VLAN no device on the map has, from 999 down)")
         self.erspan_input = self.number_input(0, mirror.MAX_ERSPAN_ID, "Auto", "The ERSPAN ID (session ID) both ends "
                                                                                "use")
         self.ingress_input = self.number_input(0, 4094, "Off", "The device on the destination port still reaches the "
@@ -431,7 +431,7 @@ class MirrorTab(QWidget):
                                                                "as getting the copies")
         self.origin_combo = QComboBox()
         self.origin_combo.setEditable(True)
-        self.origin_combo.setToolTip("ERSPAN: the source switch's address its GRE packets come from (a loopback or "
+        self.origin_combo.setToolTip("ERSPAN: the source device's address its GRE packets come from (a loopback or "
                                      "VLAN interface it has; blank: its management address)")
         self.origin_combo.currentTextChanged.connect(self.plan_outdated)
         self.vrf_input = QLineEdit()
@@ -456,16 +456,16 @@ class MirrorTab(QWidget):
         layout.addWidget(self.more_panel)
 
         login = QHBoxLayout()
-        self.read_check = QCheckBox("Read the switches first")
+        self.read_check = QCheckBox("Read the devices first")
         self.read_check.setChecked(True)
-        self.read_check.setToolTip("Plan logs in over SSH and reads each switch's mirror sessions (show monitor "
+        self.read_check.setToolTip("Plan logs in over SSH and reads each device's mirror sessions (show monitor "
                                    "session all), so a free session number is used and a busy port isn't")
         login.addWidget(self.read_check)
         login.addWidget(QLabel("Log in with:"))
         if self.sessions is not None:
             default = self.sessions.credentials.default
             self.login_picker = CredentialPicker(self, self.sessions, SSH, default.id if default else "", ASK_LOGIN)
-            self.login_picker.combo.setToolTip("For switches without a saved SSH session: a saved credential "
+            self.login_picker.combo.setToolTip("For devices without a saved SSH session: a saved credential "
                                                "(Manage... to add one), or a user name and password asked for once.")
             login.addWidget(self.login_picker, 2)
         else:
@@ -474,7 +474,7 @@ class MirrorTab(QWidget):
         self.enable_input = QLineEdit()
         self.enable_input.setEchoMode(QLineEdit.Password)
         self.enable_input.setPlaceholderText("If they log in at >")
-        self.enable_input.setToolTip("For switches that log in at the > prompt. Kept only while NOMAD is open.")
+        self.enable_input.setToolTip("For devices that log in at the > prompt. Kept only while NOMAD is open.")
         login.addWidget(self.enable_input, 1)
         self.trust_check = QCheckBox("Trust new SSH keys")
         self.trust_check.setChecked(True)
@@ -483,15 +483,15 @@ class MirrorTab(QWidget):
 
         buttons = QHBoxLayout()
         self.plan_button = accent_button("Plan")
-        self.plan_button.setToolTip("Read the switches and work out what each one gets (nothing is changed)")
+        self.plan_button.setToolTip("Read the devices and work out what each one gets (nothing is changed)")
         self.plan_button.clicked.connect(self.start_plan)
         buttons.addWidget(self.plan_button)
         self.setup_button = QPushButton("Set Up")
-        self.setup_button.setToolTip("Send every switch its lines over SSH, then check they took")
+        self.setup_button.setToolTip("Send every device its lines over SSH, then check they took")
         self.setup_button.clicked.connect(self.set_up)
         buttons.addWidget(self.setup_button)
         self.copy_all_button = QPushButton("Copy All")
-        self.copy_all_button.setToolTip("Every switch's lines and what takes them away, to paste somewhere")
+        self.copy_all_button.setToolTip("Every device's lines and what takes them away, to paste somewhere")
         self.copy_all_button.clicked.connect(self.copy_all)
         buttons.addWidget(self.copy_all_button)
         self.export_button = QPushButton("Export...")
@@ -560,16 +560,16 @@ class MirrorTab(QWidget):
         layout.addWidget(self.records_table, 1)
         buttons = QHBoxLayout()
         self.check_button = QPushButton("Check Now")
-        self.check_button.setToolTip("Read the switches of the mirrors listed: whether each is still there, and every "
+        self.check_button.setToolTip("Read the devices of the mirrors listed: whether each is still there, and every "
                                      "session they have (NOMAD's or not)")
         self.check_button.clicked.connect(self.check_now)
         buttons.addWidget(self.check_button)
-        self.check_all_button = QPushButton("Read All Switches")
-        self.check_all_button.setToolTip("Read every switch on the map: the mirror sessions each one has")
+        self.check_all_button = QPushButton("Read All Devices")
+        self.check_all_button.setToolTip("Read every switch and router on the map: the mirror sessions each one has")
         self.check_all_button.clicked.connect(self.check_all)
         buttons.addWidget(self.check_all_button)
         self.take_away_button = QPushButton("Take Away")
-        self.take_away_button.setToolTip("Send each switch the lines that take the mirror away, over SSH")
+        self.take_away_button.setToolTip("Send each device the lines that take the mirror away, over SSH")
         self.take_away_button.clicked.connect(self.take_away)
         buttons.addWidget(self.take_away_button)
         self.session_button = QToolButton()
@@ -584,12 +584,12 @@ class MirrorTab(QWidget):
         self.capture_button.clicked.connect(self.capture_here)
         buttons.addWidget(self.capture_button)
         self.forget_button = QPushButton("Forget")
-        self.forget_button.setToolTip("Take it off this list without touching the switches")
+        self.forget_button.setToolTip("Take it off this list without touching the devices")
         self.forget_button.clicked.connect(self.forget)
         buttons.addWidget(self.forget_button)
         buttons.addStretch()
         layout.addLayout(buttons)
-        self.switch_label = QLabel("On the switches (from Check Now):")
+        self.switch_label = QLabel("On the devices (from Check Now):")
         layout.addWidget(self.switch_label)
         self.sessions_table = read_only_table(SESSION_COLUMNS)
         self.sessions_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -651,18 +651,19 @@ class MirrorTab(QWidget):
         except AttributeError:
             return ""
 
-    def switches(self):
+    def switches(self, kinds=(SWITCH, ROUTER)):
+        """The map's devices that can mirror: switches and routers (only switches for a destination port)."""
         network_map = self.network_map()
         if network_map is None:
             return []
-        return sorted((device for device in network_map.devices.values() if device.kind in (SWITCH, ROUTER)),
+        return sorted((device for device in network_map.devices.values() if device.kind in kinds),
                       key=lambda device: device.label.lower())
 
     def on_map_shown(self):
         network_map = self.network_map()
         if network_map is None:
             set_hint(self.map_label, "No map is open on the Network Map page: crawl or open one there first. Port "
-                                     "Mirroring works from the map's switches, ports and links.", "warning")
+                                     "Mirroring works from the map's switches, routers, ports and links.", "warning")
         else:
             count = len(self.switches())
             set_hint(self.map_label, f"Map: {self.map_name() or 'the open map'}, {count} switches and routers.", "info")
@@ -674,14 +675,15 @@ class MirrorTab(QWidget):
         current = combo.currentData()
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("Choose a switch", "")
-        for device in self.switches():
+        source = combo is self.source_combo
+        combo.addItem("Choose a switch or router" if source else "Choose a switch", "")
+        for device in self.switches((SWITCH, ROUTER) if source else (SWITCH,)):  # A destination port is on a switch
             label = device.label + (f" ({device.mgmt_ip})" if device.mgmt_ip and device.mgmt_ip != device.label else "")
             combo.addItem(label, device.key)
         index = combo.findData(current)
         combo.setCurrentIndex(max(0, index))
         combo.blockSignals(False)
-        if combo is self.source_combo:
+        if source:
             self.fill_origins()
         else:
             self.fill_dest_ports()
@@ -793,7 +795,7 @@ class MirrorTab(QWidget):
     def add_ports(self):
         network_map, key = self.network_map(), self.source_combo.currentData()
         if network_map is None or not key:
-            set_hint(self.status_label, "Choose the switch to mirror on first.", "warning")
+            set_hint(self.status_label, "Choose the device to mirror on first.", "warning")
             return
         dialog = PortPicker(self, network_map, key, "Ports to Mirror",
                             chosen=[item.port for item in self.sources() if item.port])
@@ -804,9 +806,9 @@ class MirrorTab(QWidget):
 
     def add_vlan(self):
         if not self.source_combo.currentData():
-            set_hint(self.status_label, "Choose the switch to mirror on first.", "warning")
+            set_hint(self.status_label, "Choose the device to mirror on first.", "warning")
             return
-        vlan, ok = QInputDialog.getInt(self, "Mirror a VLAN", "VLAN to mirror (every port of the switch in it):", 1,
+        vlan, ok = QInputDialog.getInt(self, "Mirror a VLAN", "VLAN to mirror (every port of the device in it):", 1,
                                        1, 4094)
         if ok:
             self.add_source(Source(vlan=vlan, direction=mirror.RX))
@@ -814,7 +816,7 @@ class MirrorTab(QWidget):
     def add_host(self):
         network_map = self.network_map()
         if network_map is None:
-            set_hint(self.status_label, "Open a map first: hosts are found on its switches' ports.", "warning")
+            set_hint(self.status_label, "Open a map first: hosts are found on its devices' ports.", "warning")
             return
         text, ok = QInputDialog.getText(self, "Mirror a Host", "The device's MAC address, IP address or name:")
         if ok and text.strip():
@@ -830,7 +832,7 @@ class MirrorTab(QWidget):
             return False
         found = [location for location in macfind.search_map(network_map, query) if location.device]
         if not found:
-            set_hint(self.status_label, f"The map doesn't have {text} on a switch port. Find it with MAC Finder's "
+            set_hint(self.status_label, f"The map doesn't have {text} on a port. Find it with MAC Finder's "
                                         "Locate Now, then add its port here.", "warning")
             return False
         location = found[0]
@@ -866,7 +868,7 @@ class MirrorTab(QWidget):
         if source and not dest:
             set_hint(self.status_label, "Now choose where the copies go, then Plan.", "info")
         elif dest and not source:
-            set_hint(self.status_label, "Now choose the switch and ports to mirror, then Plan.", "info")
+            set_hint(self.status_label, "Now choose the device and ports to mirror, then Plan.", "info")
 
     # ----------------------------------------------------------------- Planning
 
@@ -886,7 +888,7 @@ class MirrorTab(QWidget):
             return None
         source = self.source_combo.currentData()
         if not source:
-            set_hint(self.status_label, "Choose the switch to mirror on.", "error")
+            set_hint(self.status_label, "Choose the device to mirror on.", "error")
             return None
         request = Request(source, self.sources(), kind=self.kind_combo.currentData(),
                           name=self.name_input.text().strip(), session=self.session_input.value(),
@@ -927,7 +929,7 @@ class MirrorTab(QWidget):
             switch = network_map.devices[host.device].label
             if reaching and request.kind in ("", ERSPAN) and mirror.is_ios_xe(source) is not False:
                 request.to, request.dest_ip = TO_ADDRESS, address
-                self.pc_note = (f"This PC ({adapter.name}) is on {switch} {host.port} and reaches the switches "
+                self.pc_note = (f"This PC ({adapter.name}) is on {switch} {host.port} and reaches the devices "
                                 f"through it, so the copies go to its address ({address}) over ERSPAN, and the port "
                                 "keeps working.")
                 return True
@@ -938,12 +940,12 @@ class MirrorTab(QWidget):
             return True
         if request.kind in ("", ERSPAN):
             request.to, request.dest_ip = TO_ADDRESS, address
-            where = "is on Wi-Fi" if wireless else "isn't on a switch port the map has"
+            where = "is on Wi-Fi" if wireless else "isn't on a port the map has"
             self.pc_note = f"{adapter.name} ({address}) {where}, so the copies go to its address over ERSPAN."
             if wireless:
                 self.pc_note += " They cross the Wi-Fi too: a busy port can mirror more than it carries."
             return True
-        where = "is on Wi-Fi, so it has no switch port" if wireless else f"({mac}) isn't on a switch port the map has"
+        where = "is on Wi-Fi, so it has no port of its own" if wireless else f"({mac}) isn't on a port the map has"
         set_hint(self.status_label, f"{adapter.name} {where}: {KIND_TITLES[request.kind]} needs one. Choose Auto or "
                                     "ERSPAN to send the copies to its address, or A switch port.", "error")
         return False
@@ -997,9 +999,9 @@ class MirrorTab(QWidget):
         self.fill_plan()
         self.show_plan_overlay()
         if self.plan.ok:
-            set_hint(self.status_label, f"{KIND_TITLES[self.plan.kind]}: {len(self.plan.steps)} switch"
-                                        f"{'' if len(self.plan.steps) == 1 else 'es'} to change. Set Up sends it all "
-                                        "over SSH, or send each switch's lines to a terminal session.", "success")
+            set_hint(self.status_label, f"{KIND_TITLES[self.plan.kind]}: {len(self.plan.steps)} device"
+                                        f"{'' if len(self.plan.steps) == 1 else 's'} to change. Set Up sends it all "
+                                        "over SSH, or send each device's lines to a terminal session.", "success")
         else:
             set_hint(self.status_label, "It can't be set up as it is: see the problems above.", "error")
         self.update_buttons()
@@ -1040,7 +1042,7 @@ class MirrorTab(QWidget):
             self.steps_table.setItem(row, 4, QTableWidgetItem(""))
             button = QToolButton()
             button.setText("Send")
-            button.setToolTip("Type its lines into a terminal session (to watch, or for a switch with Telnet only)")
+            button.setToolTip("Type its lines into a terminal session (to watch, or for a device with Telnet only)")
             button.setPopupMode(QToolButton.InstantPopup)
             menu = QMenu(button)
             menu.aboutToShow.connect(self.fill_step_menu)
@@ -1102,12 +1104,12 @@ class MirrorTab(QWidget):
         text = self.preview.toPlainText()
         if text:
             QApplication.clipboard().setText(text)
-            set_hint(self.status_label, "Copied. Paste it at the switch's enable (#) prompt.", "success")
+            set_hint(self.status_label, "Copied. Paste it at the device's enable (#) prompt.", "success")
 
     def copy_all(self):
         if self.plan is not None and self.plan.ok:
             QApplication.clipboard().setText(mirror.export_text(self.network_map(), self.plan))
-            set_hint(self.status_label, "Copied every switch's lines, and what takes them away.", "success")
+            set_hint(self.status_label, "Copied every device's lines, and what takes them away.", "success")
 
     def export_all(self):
         if self.plan is None or not self.plan.ok:
@@ -1150,7 +1152,7 @@ class MirrorTab(QWidget):
         from ..netmap import macssh
         store = self.sessions
         if store is None:
-            set_hint(self.status_label, "Saved sessions aren't available, so NOMAD can't log in to the switches.",
+            set_hint(self.status_label, "Saved sessions aren't available, so NOMAD can't log in to the devices.",
                      "error")
             return None
         sessions = [store.credentials.apply(session.copy()) for session in store.sessions if session.protocol == SSH]
@@ -1172,15 +1174,15 @@ class MirrorTab(QWidget):
                     return None
                 password = dialog.field.text()
         secrets = any(item.saved_password or item.saved_passphrase for item in sessions + [fallback])
-        if secrets and not ensure_unlocked(self, store, "Port Mirroring logs in to switches with saved passwords."):
+        if secrets and not ensure_unlocked(self, store, "Port Mirroring logs in to devices with saved passwords."):
             return None
         return macssh.SshLogins(sessions, fallback, password, label), self.enable_input.text()
 
     def ask_login(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Log In to Switches")
+        dialog.setWindowTitle("Log In to Devices")
         layout = QVBoxLayout(dialog)
-        label = QLabel("For switches without a saved SSH session (kept only while NOMAD is open):")
+        label = QLabel("For devices without a saved SSH session (kept only while NOMAD is open):")
         label.setWordWrap(True)
         layout.addWidget(label)
         form = QFormLayout()
@@ -1236,8 +1238,8 @@ class MirrorTab(QWidget):
         self.reader.state_read.connect(self.on_state_read)
         self.reader.finished.connect(self.on_read_finished)
         self.reader.start()
-        what = {"plan": "Reading the switches' mirror sessions", "check": "Checking the switches",
-                "verify": "Checking the switches took it"}.get(purpose, "Reading the switches")
+        what = {"plan": "Reading the devices' mirror sessions", "check": "Checking the devices",
+                "verify": "Checking the devices took it"}.get(purpose, "Reading the devices")
         set_hint(self.status_label, f"{what} ({len(targets)} over SSH)...", "info")
         self.set_busy(what)
         self.update_buttons()
@@ -1276,7 +1278,7 @@ class MirrorTab(QWidget):
         question = (f"Set up this {KIND_TITLES[plan.kind]} over SSH on {labels}?\n\n"
                     f"{mirror.describe_request(network_map, plan.request)}")
         if plan.request.remove_after:
-            question += f"\n\nThe switches take it away after {mirror.minutes_text(plan.request.remove_after)}."
+            question += f"\n\nThe devices take it away after {mirror.minutes_text(plan.request.remove_after)}."
         if QMessageBox.question(self, "Set Up Mirror", question, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         logins = self.saved_logins if self.saved_logins is not None else self.logins()
@@ -1311,7 +1313,7 @@ class MirrorTab(QWidget):
         self.pusher_thread.finished.connect(self.on_push_finished)
         self.pusher_thread.start()
         what = "Setting up the mirror" if kind == SETUP else "Taking the mirror away"
-        set_hint(self.status_label, f"{what} ({len(jobs)} switch{'' if len(jobs) == 1 else 'es'})...", "info")
+        set_hint(self.status_label, f"{what} ({len(jobs)} device{'' if len(jobs) == 1 else 's'})...", "info")
         self.set_busy(what)
         self.update_buttons()
 
@@ -1365,13 +1367,13 @@ class MirrorTab(QWidget):
             elif record is not None:
                 left = [step for step in record.steps if step.state != mirror.STEP_REMOVED]
                 if left:
-                    set_hint(self.status_label, f"{len(left)} switch{'' if len(left) == 1 else 'es'} still "
+                    set_hint(self.status_label, f"{len(left)} device{'' if len(left) == 1 else 's'} still "
                                                 f"{'has' if len(left) == 1 else 'have'} it ({left[0].label}: "
                                                 f"{left[0].problem or 'not sent'}). Try again, or take it away in a "
                                                 "session.", "error")
                 else:
-                    set_hint(self.status_label, f"Taken away from {len(record.steps)} switch"
-                                                f"{'' if len(record.steps) == 1 else 'es'}.", "success")
+                    set_hint(self.status_label, f"Taken away from {len(record.steps)} device"
+                                                f"{'' if len(record.steps) == 1 else 's'}.", "success")
         except Exception as error:
             log.exception("Finishing the mirror failed")
             set_hint(self.status_label, f"Something went wrong: {error}", "error")
@@ -1384,15 +1386,15 @@ class MirrorTab(QWidget):
             text = f"{problem.label} refused it ({problem.problem})." if problem is not None else "It failed."
             if done:
                 box = QMessageBox(QMessageBox.Warning, "Set Up Mirror",
-                                  f"{text}\n\nTake away what was already set up on {len(done)} switch"
-                                  f"{'' if len(done) == 1 else 'es'}?", QMessageBox.Yes | QMessageBox.No, self)
+                                  f"{text}\n\nTake away what was already set up on {len(done)} device"
+                                  f"{'' if len(done) == 1 else 's'}?", QMessageBox.Yes | QMessageBox.No, self)
                 if box.exec_() == QMessageBox.Yes:
                     self.take_away_record(record, done)
                     return
-            set_hint(self.status_label, text + " See View Log for what the switch said.", "error")
+            set_hint(self.status_label, text + " See View Log for what the device said.", "error")
             return
         refused = [step.label for step in record.steps if step.applet_ok is False]
-        text = f"Set up on {len(record.steps)} switch{'' if len(record.steps) == 1 else 'es'}."
+        text = f"Set up on {len(record.steps)} device{'' if len(record.steps) == 1 else 's'}."
         if refused:
             text += (f" {', '.join(refused)} refused the applet that takes it away, so NOMAD takes it away when the "
                      "time's up (while NOMAD is open).")
@@ -1424,10 +1426,10 @@ class MirrorTab(QWidget):
             self.show_status(index)
             problems += found
         if problems:
-            set_hint(self.status_label, f"Set up, but a switch doesn't show it as planned: {problems[0]}", "warning")
+            set_hint(self.status_label, f"Set up, but a device doesn't show it as planned: {problems[0]}", "warning")
         else:
             expires = f" It goes at {when_text(record.expires)}." if record.expires else ""
-            set_hint(self.status_label, f"Done: the switches show the mirror.{expires}", "success")
+            set_hint(self.status_label, f"Done: the devices show the mirror.{expires}", "success")
 
     # ----------------------------------------------------------------- Sent to terminal sessions
 
@@ -1558,7 +1560,7 @@ class MirrorTab(QWidget):
         record = self.selected_record()
         if record is not None:
             QApplication.clipboard().setText("\n!\n".join(f"! {step.label}\n{step.undo}" for step in record.steps))
-            set_hint(self.status_label, "Copied what takes it away, switch by switch.", "success")
+            set_hint(self.status_label, "Copied what takes it away, device by device.", "success")
 
     def take_away(self):
         record = self.selected_record()
@@ -1610,7 +1612,7 @@ class MirrorTab(QWidget):
             return
         if record.state != mirror.REMOVED:
             box = QMessageBox(QMessageBox.Warning, "Forget Mirror",
-                              f"{record.name or record.id} hasn't been taken away. Forget it anyway? The switches keep "
+                              f"{record.name or record.id} hasn't been taken away. Forget it anyway? The devices keep "
                               "it" + (" until their timers take it away." if record.expires and not record.nomad_timer
                                       else ".") + " Copy what takes it away first if you'll want it.",
                               QMessageBox.Yes | QMessageBox.No, self)
@@ -1652,7 +1654,8 @@ class MirrorTab(QWidget):
                 if step.address:
                     targets.setdefault(step.address, (step.device, step.address, step.names))
         if not targets:
-            set_hint(self.status_label, "No mirrors to check: Read All Switches reads every switch on the map.", "info")
+            set_hint(self.status_label, "No mirrors to check: Read All Devices reads every switch and router on the "
+                                        "map.", "info")
             return
         logins = self.saved_logins or self.logins()
         if logins is None:
@@ -1705,9 +1708,9 @@ class MirrorTab(QWidget):
                 self.mirrors.put(record)
         self.fill_records()
         failed = [state.problem for state in states.values() if not state.read]
-        text = f"Read {sum(1 for state in states.values() if state.read)} of {len(states)} switches."
+        text = f"Read {sum(1 for state in states.values() if state.read)} of {len(states)} devices."
         if gone:
-            text += f" {gone} mirror{'' if gone == 1 else 's'} the switches took away when the time was up."
+            text += f" {gone} mirror{'' if gone == 1 else 's'} the devices took away when the time was up."
         if missing:
             text += f" Not there: {', '.join(missing[:3])}."
         if failed:
@@ -1823,7 +1826,7 @@ class MirrorTab(QWidget):
                 self.mirrors.put(record)
                 return
             log.info("Port Mirroring: taking %s away (its time is up)", record.id)
-            set_hint(self.status_label, f"{record.name or record.id}'s time is up: taking it away from the switches "
+            set_hint(self.status_label, f"{record.name or record.id}'s time is up: taking it away from the devices "
                                         "that refused its applet.", "info")
             record.nomad_timer = False  # Tried once; Take Away by hand if it fails
             self.mirrors.put(record)
