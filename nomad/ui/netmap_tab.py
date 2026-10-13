@@ -2402,7 +2402,7 @@ class NetworkMapTab(QWidget):
                           and action.text() == "Tools"), menu)
             actions[tools.addAction("Mirror Ports...")] = lambda: self.window.show_mirror(source=key)
             if hasattr(self.window, "show_acls"):
-                actions[tools.addAction("ACLs...")] = lambda: self.window.show_acls(device=key)
+                actions[tools.addAction("ACLs & Route Maps...")] = lambda: self.window.show_acls(device=key)
         if self.worker is None:
             actions[menu.addAction("Put at the Top")] = lambda: self.put_at_top(key)
         if self.current_view() is self.view and self.worker is None:

@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.29.0] - 2026-10-13
+
+### Added
+
+- **Prefix lists and route maps** on the ACLs page, now **ACLs & Route Maps**: IPv4 and IPv6 prefix lists and route maps are read (with hit counts, and where each is used: BGP neighbors and peer groups per address family, redistribution and default-information originate, policy routing, distribute lists and OSPF area filters), edited entry by entry (numbers typed in or dragged; route-map match and set lines picked from what the device has, continue, descriptions), applied and taken off, and sent with the same revert timer, library, Changes Sent and undo as ACLs. **Checks** find entries that never match or aren't needed, lists and ACLs that aren't on the device, continue going backwards, and match lines IOS doesn't support where the route map is used. The **Route Tester** says what a prefix list or route map does with a route (prefix, next hop, AS path, communities, tag, metric, local preference), following continue. Changes go the way IOS takes them (found on IOS 15.7): a changed prefix list entry goes in at a new number before the old one comes out; a route-map entry is changed where it is (match values added before the old ones go, set lines out before the new ones go in); a moved entry is made at its new number first. Once a change touching a BGP neighbor's policy is confirmed, the neighbors are offered a **soft clear** (none ticked), over SSH or in the session.
+
 ## [1.28.0] - 2026-10-12
 
 ### Added

@@ -202,7 +202,7 @@ class MainWindow(QMainWindow):
                                       (self.web_check_tab, "Web Check")]),
             ("Network Management", [(self.netmap_tab, "Network Map"), (self.ipam_tab, "IP Addresses"),
                 (self.vlan_tab, "VLANs"), (self.placement_tab, "Subnet Placement"),
-                (self.snmp_config_tab, "SNMP Config"), (self.acl_tab, "ACLs"),
+                (self.snmp_config_tab, "SNMP Config"), (self.acl_tab, "ACLs & Route Maps"),
                 (self.inventory_tab, "Ansible Inventory")]),
             ("Capture & Logs", [(self.capture_tab, "Packet Capture"), (self.mirror_tab, "Port Mirroring"),
                                 (self.syslog_tab, "Syslog")]),

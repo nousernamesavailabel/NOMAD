@@ -1,4 +1,5 @@
-"""ACLs page: read the ACLs of Cisco IOS / IOS-XE devices, edit them, and send the changes back safely.
+"""ACLs & Route Maps page: read the ACLs, prefix lists and route maps of Cisco IOS / IOS-XE devices, edit them, and
+send the changes back safely.
 
 Pick a device (the open map's switches and routers, saved SSH sessions, or an address) and Read: NOMAD logs in over
 SSH and reads its ACLs (IPv4 standard and extended, numbered and named; IPv6), object groups, time ranges, where each
@@ -17,9 +18,14 @@ and only if that works says configure confirm (or leaves that to you: the device
 Put Back Now); a refused line or a failed login has it put back right away. Send to Session types the same lines into
 a terminal session (Confirm and Put Back Now are then typed there).
 
-The Library keeps ACLs on this PC (with the object groups and time ranges they name) to put on other devices; the
-Scratch Pad is a device that isn't one, to build an ACL from nothing. Changes Sent lists every change sent from this
-PC with what undoes it.
+Prefix lists and route maps (routepolicy.py, policy_editors.py) are edited the same way, entry by entry, and put on
+BGP neighbors, redistributions, policy routing and distribute lists; a route tester says what one does with a route.
+Once a change touching a BGP neighbor's policy is confirmed, the neighbors it affects are offered for a soft clear
+(none ticked), since BGP only applies a new policy to routes already learned after one.
+
+The Library keeps ACLs on this PC (with the object groups and time ranges they name), prefix lists, and route maps
+(with the prefix lists and ACLs they match) to put on other devices; the Scratch Pad is a device that isn't one, to
+build from nothing. Changes Sent lists every change sent from this PC with what undoes it.
 """
 import datetime
 import logging
@@ -30,12 +36,12 @@ from dataclasses import dataclass, field
 from PyQt5.QtCore import QDateTime, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateTimeEdit, QDialog, \
-    QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, \
+    QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, \
     QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QSplitter, \
-    QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QTimeEdit, QToolButton, QTreeWidget, \
-    QTreeWidgetItem, QVBoxLayout, QWidget
+    QStackedWidget, QTableWidgetItem, QTabWidget, QTimeEdit, QToolButton, QTreeWidget, QTreeWidgetItem, \
+    QVBoxLayout, QWidget
 
-from ..netmap import acl, aclcheck, configpush
+from ..netmap import acl, aclcheck, configpush, routepolicy
 from ..netmap.acl import INTERFACE, LINE, NETWORK, OTHER, SERVICE, STANDARD, V4, V6, DeviceAcls, ObjectGroup, \
     TimeRange
 from ..netmap.model import ROUTER, SWITCH, port_key
@@ -44,6 +50,8 @@ from ..terminal.sessions import SSH
 from .acl_dialogs import AddressPicker, ApplyDialog, DevicePicker, ImportDialog, NewAclDialog, RuleDialog, \
     TextDialog, severity_color
 from .common import StoppableThread, local_address_toward, read_only_table, release_thread, set_hint
+from .policy_dialogs import NewPolicyDialog
+from .policy_editors import PrefixListEditor, RouteMapEditor, SeqTable
 from .session_send import SessionSender
 from .ssh_push import Job, LoginRow
 from .theme import COLORS, accent_button, monospace_font
@@ -56,10 +64,10 @@ SCRATCH = "scratch"
 RULE_COLUMNS = ["Seq", "Action", "Protocol", "Source", "Src Ports", "Destination", "Dst Ports", "Options", "Hits",
                 "Remark"]
 STANDARD_HIDDEN = (2, 4, 5, 6, 7)
-LIBRARY_COLUMNS = ["Name", "ACL", "Rules", "Saved", "Notes"]
+LIBRARY_COLUMNS = ["Name", "What", "Entries", "Saved", "Notes"]
 HISTORY_COLUMNS = ["When", "Device", "Change", "How", "Outcome"]
-KIND_ACL, KIND_GROUP, KIND_RANGE = "acl", "group", "range"
-SEND, SAVE, CONFIRM, REVERT = "", "save", "confirm", "revert"  # What a SendJob does
+KIND_ACL, KIND_GROUP, KIND_RANGE, KIND_PLIST, KIND_RMAP = "acl", "group", "range", "plist", "rmap"
+SEND, SAVE, CONFIRM, REVERT, SOFT = "", "save", "confirm", "revert", "soft"  # What a SendJob does
 CONFIRM_AUTO, CONFIRM_MANUAL = "auto", "manual"
 EXPIRY_GRACE = 20  # Seconds past the revert time before NOMAD takes it the device has put it back
 DAY_CHOICES = ["weekdays", "weekend", "daily", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
@@ -113,7 +121,8 @@ class SendJob(Job):
     key: str = ""
     undo: str = ""
     title: str = ""
-    action: str = SEND  # SEND the text, or SAVE (write memory), CONFIRM (configure confirm), REVERT (revert now)
+    action: str = SEND  # SEND the text, or SAVE (write memory), CONFIRM (configure confirm), REVERT (revert now),
+    # SOFT (the text's lines are exec commands: BGP soft clears)
 
 
 @dataclass
@@ -146,7 +155,13 @@ class SendThread(StoppableThread):
                     break
                 self.step_started.emit(job.index)
                 try:
-                    if job.action in (SAVE, CONFIRM, REVERT):
+                    if job.action == SOFT:
+                        results = pusher.run_commands(job.address, job.text.splitlines(), job.names)
+                        said = "\n".join(f"{command}\n{answer}".strip() for command, answer, _ in results)
+                        problem = next((f"{command}: {answer}" for command, answer, took in results if not took),
+                                       "")
+                        outcome = configpush.Outcome(ok=not problem, transcript=said, problem=problem)
+                    elif job.action in (SAVE, CONFIRM, REVERT):
                         do = {SAVE: pusher.save_config, CONFIRM: pusher.confirm, REVERT: pusher.revert}[job.action]
                         ok, said = do(job.address, job.names)
                         outcome = configpush.Outcome(ok=ok, transcript=said, problem="" if ok else said)
@@ -165,38 +180,11 @@ class SendThread(StoppableThread):
             pusher.close()
 
 
-class RulesTable(QTableWidget):
+class RulesTable(SeqTable):
     """The rules, which can be dragged to a new place."""
-    rows_moved = pyqtSignal(list, int)  # Rows, the row they go before
 
     def __init__(self):
-        super().__init__(0, len(RULE_COLUMNS))
-        self.setHorizontalHeaderLabels(RULE_COLUMNS)
-        self.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)  # Seq cells only
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.InternalMove)
-        self.setDropIndicatorShown(True)
-        self.verticalHeader().setVisible(False)
-        self.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.horizontalHeader().setStretchLastSection(True)
-
-    def dropEvent(self, event):
-        if event.source() is not self:
-            event.ignore()
-            return
-        rows = sorted({index.row() for index in self.selectedIndexes()})
-        target = self.indexAt(event.pos()).row()
-        if target < 0:
-            target = self.rowCount()
-        elif self.dropIndicatorPosition() == QAbstractItemView.BelowItem:
-            target += 1
-        event.setDropAction(Qt.IgnoreAction)
-        event.accept()
-        if rows:
-            self.rows_moved.emit(rows, target)
+        super().__init__(RULE_COLUMNS)
 
 
 class AclTab(QWidget):
@@ -222,6 +210,9 @@ class AclTab(QWidget):
         self.pending_library = None  # (LibraryEntry, keys) to put on devices once they're read
         self.send_results = {}  # Job index -> whether it took
         self.selecting = ""  # An ACL (or "port:NAME") to show once the device is read
+        self.scratch_key = SCRATCH
+        self.pending_soft = {}  # key -> [routepolicy.SoftClear] for changes sent, offered once they're confirmed
+        self.soft_offers = {}  # key -> ([SoftClear], the terminal view the changes went to, or None)
         self.filling_rules = False  # The rules table is being filled (its itemChanged isn't the user typing)
         self.pending_number = None  # (row, text) typed into a Seq cell, taken once the editor has closed
         self.session_sender = SessionSender(self, window, None)
@@ -242,9 +233,10 @@ class AclTab(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-        intro = QLabel("Read, build and edit ACLs on Cisco IOS / IOS-XE devices (IPv4 and IPv6, object groups, time "
-                       "ranges), see rules that never match and whether a change would lock you out, and send the "
-                       "changes rule by rule with a revert timer, so a mistake puts itself back.")
+        intro = QLabel("Read, build and edit ACLs (IPv4 and IPv6, object groups, time ranges), prefix lists and "
+                       "route maps on Cisco IOS / IOS-XE devices, see entries that never match and whether a change "
+                       "would lock you out, test packets and routes, and send the changes entry by entry with a "
+                       "revert timer, so a mistake puts itself back.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         self.tabs = QTabWidget()
@@ -322,6 +314,9 @@ class AclTab(QWidget):
         self.new_button.setText("New")
         self.new_button.setPopupMode(QToolButton.InstantPopup)
         new_menu = QMenu(self.new_button)
+        new_menu.addAction("Prefix List...", self.new_prefix_list)
+        new_menu.addAction("Route Map...", self.new_route_map)
+        new_menu.addSeparator()
         new_menu.addAction("Network Object Group...", self.new_network_group)
         new_menu.addAction("Service Object Group...", self.new_service_group)
         new_menu.addAction("Time Range...", self.new_time_range)
@@ -333,14 +328,18 @@ class AclTab(QWidget):
 
     def make_editor(self):
         self.editor = QStackedWidget()
-        self.empty_label = QLabel("Read a device (or use the Scratch Pad), then pick an ACL, object group or time "
-                                  "range here.")
+        self.empty_label = QLabel("Read a device (or use the Scratch Pad), then pick an ACL, prefix list, route "
+                                  "map, object group or time range here.")
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setWordWrap(True)
         self.editor.addWidget(self.empty_label)
         self.editor.addWidget(self.make_acl_editor())
         self.editor.addWidget(self.make_group_editor())
         self.editor.addWidget(self.make_range_editor())
+        self.plist_editor = PrefixListEditor(self)
+        self.editor.addWidget(self.plist_editor)
+        self.rmap_editor = RouteMapEditor(self)
+        self.editor.addWidget(self.rmap_editor)
         return self.editor
 
     def make_acl_editor(self):
@@ -654,6 +653,7 @@ class AclTab(QWidget):
         waiting.addWidget(self.put_back_button)
         self.waiting_box.setVisible(False)
         layout.addWidget(self.waiting_box)
+        layout.addWidget(self.make_soft_box())
         row = QHBoxLayout()
         self.revert_check = QCheckBox("Put it back after")
         self.revert_check.setChecked(True)
@@ -703,12 +703,38 @@ class AclTab(QWidget):
         layout.addLayout(row)
         return box
 
+    def make_soft_box(self):
+        self.soft_box = QWidget()
+        soft = QHBoxLayout(self.soft_box)
+        soft.setContentsMargins(0, 0, 0, 0)
+        self.soft_label = QLabel()
+        self.soft_label.setWordWrap(True)
+        soft.addWidget(self.soft_label, 3)
+        self.soft_list = QListWidget()
+        self.soft_list.setFixedHeight(64)
+        self.soft_list.itemChanged.connect(self.update_buttons)
+        soft.addWidget(self.soft_list, 3)
+        self.soft_button = accent_button("Soft Clear Ticked")
+        self.soft_button.setToolTip("clear ip bgp NEIGHBOR soft in/out: the neighbor's routes go through the new "
+                                    "policy again (the session stays up)")
+        self.soft_button.clicked.connect(self.soft_clear)
+        soft.addWidget(self.soft_button)
+        self.soft_copy_button = QPushButton("Copy Commands")
+        self.soft_copy_button.clicked.connect(self.copy_soft)
+        soft.addWidget(self.soft_copy_button)
+        self.soft_dismiss_button = QPushButton("Not Now")
+        self.soft_dismiss_button.clicked.connect(self.dismiss_soft)
+        soft.addWidget(self.soft_dismiss_button)
+        self.soft_box.setVisible(False)
+        return self.soft_box
+
     def make_library_tab(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        label = QLabel("ACLs kept on this PC, with the object groups and time ranges they name: put one on a device "
-                       "(it's merged rule by rule into the ACL of the same name there, or made), on several, or "
-                       "build one on the Scratch Pad and save it here.")
+        label = QLabel("ACLs (with the object groups and time ranges they name), prefix lists and route maps (with "
+                       "the prefix lists and ACLs they match) kept on this PC: put one on a device (it's merged entry "
+                       "by entry into the one of the same name there, or made), on several, or build one on the "
+                       "Scratch Pad and save it here.")
         label.setWordWrap(True)
         layout.addWidget(label)
         split = QSplitter(Qt.Horizontal)
@@ -876,6 +902,8 @@ class AclTab(QWidget):
                 text += f"   [{count} change{'s' if count != 1 else ''} waiting]"
             if target.key in self.waiting:
                 text += f"   [to confirm by {self.waiting[target.key].at}]"
+            if self.soft_offers.get(target.key):
+                text += "   [BGP soft clear offered]"
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, target.key)
             note = self.notes.get(target.key, "")
@@ -990,7 +1018,10 @@ class AclTab(QWidget):
         self.read[key] = device
         self.working[key] = device.copy()
         if device.read:
-            self.notes[key] = f"Read at {device.when[11:16]}: {len(device.acls)} ACLs."
+            counts = [(len(device.acls), "ACL"), (len(device.prefix_lists), "prefix list"),
+                      (len(device.route_maps), "route map")]
+            self.notes[key] = f"Read at {device.when[11:16]}: " + ", ".join(
+                f"{count} {word}{'s' if count != 1 else ''}" for count, word in counts) + "."
         else:
             self.notes[key] = f"Couldn't read it: {device.problem}"
 
@@ -1055,6 +1086,7 @@ class AclTab(QWidget):
                     section.addChild(child)
                     if self.current_item == (KIND_ACL, item.key):
                         self.items_tree.setCurrentItem(child)
+            self.fill_policy_items(device, before)
             for title, kind, items in (("Object Groups", KIND_GROUP, device.groups),
                                        ("Time Ranges", KIND_RANGE, device.ranges)):
                 section = QTreeWidgetItem([title, str(len(items))])
@@ -1074,6 +1106,46 @@ class AclTab(QWidget):
             self.items_tree.resizeColumnToContents(0)
         self.items_tree.blockSignals(False)
         self.show_item()
+
+    def fill_policy_items(self, device, before):
+        """The tree's prefix lists (IPv4, IPv6) and route maps."""
+        sections = [("IPv4 Prefix Lists", V4), ("IPv6 Prefix Lists", V6)]
+        for title, family in sections:
+            items = [item for item in device.prefix_lists.values() if item.family == family]
+            if family == V6 and not items:
+                continue
+            section = QTreeWidgetItem([title, str(len(items))])
+            self.items_tree.addTopLevelItem(section)
+            for item in sorted(items, key=lambda value: value.name.lower()):
+                uses = routepolicy.uses_of(device, routepolicy.PREFIX_LIST, item.name, family)
+                maps = {rmap.name for rmap, _ in routepolicy.maps_naming(device, routepolicy.PREFIX_LIST, item.name,
+                                                                         family)}
+                places = [use.label() for use in uses[:2]] + [f"route map {name}" for name in sorted(maps)[:2]]
+                about = f"{len(item.entries)} entries" + (f", {', '.join(places)}" if places else "")
+                child = QTreeWidgetItem([item.name, about])
+                child.setData(0, Qt.UserRole, (KIND_PLIST, item.key))
+                child.setToolTip(1, about)
+                old = before.prefix_lists.get(item.key) if before else None
+                if old is None or routepolicy.prefix_differs(old, item):
+                    self.paint_changed(child)
+                section.addChild(child)
+                if self.current_item == (KIND_PLIST, item.key):
+                    self.items_tree.setCurrentItem(child)
+        section = QTreeWidgetItem(["Route Maps", str(len(device.route_maps))])
+        self.items_tree.addTopLevelItem(section)
+        for name, item in sorted(device.route_maps.items(), key=lambda pair: pair[0].lower()):
+            uses = routepolicy.uses_of(device, routepolicy.ROUTE_MAP, name)
+            about = f"{len(item.entries)} entries" + (f", on {', '.join(use.label() for use in uses[:2])}"
+                                                      if uses else "")
+            child = QTreeWidgetItem([name, about])
+            child.setData(0, Qt.UserRole, (KIND_RMAP, name))
+            child.setToolTip(1, about)
+            old = before.route_maps.get(name) if before else None
+            if old is None or routepolicy.map_differs(old, item):
+                self.paint_changed(child)
+            section.addChild(child)
+            if self.current_item == (KIND_RMAP, name):
+                self.items_tree.setCurrentItem(child)
 
     def mark_changed(self, tree_item, before, after):
         if before is None or acl.acl_differs(before, after):
@@ -1110,8 +1182,26 @@ class AclTab(QWidget):
             return None
         return device.ranges.get(self.current_item[1])
 
+    def current_plist(self):
+        device = self.device()
+        if device is None or self.current_item is None or self.current_item[0] != KIND_PLIST:
+            return None
+        return device.prefix_lists.get(tuple(self.current_item[1]))
+
+    def current_rmap(self):
+        device = self.device()
+        if device is None or self.current_item is None or self.current_item[0] != KIND_RMAP:
+            return None
+        return device.route_maps.get(self.current_item[1])
+
     def show_item(self):
-        if self.current_acl() is not None:
+        if self.current_plist() is not None:
+            self.editor.setCurrentWidget(self.plist_editor)
+            self.plist_editor.fill()
+        elif self.current_rmap() is not None:
+            self.editor.setCurrentWidget(self.rmap_editor)
+            self.rmap_editor.fill()
+        elif self.current_acl() is not None:
             self.editor.setCurrentIndex(1)
             self.fill_acl()
         elif self.current_group() is not None:
@@ -1582,6 +1672,34 @@ class AclTab(QWidget):
         self.current_item = None
         self.edited()
 
+    # ----------------------------------------------------------------- New prefix lists and route maps
+
+    def new_prefix_list(self):
+        self.new_policy(routepolicy.PREFIX_LIST)
+
+    def new_route_map(self):
+        self.new_policy(routepolicy.ROUTE_MAP)
+
+    def new_policy(self, kind):
+        device = self.device()
+        if device is None:
+            set_hint(self.status_label, "Read a device first (or use the Scratch Pad).", "warning")
+            return
+        plist = kind == routepolicy.PREFIX_LIST
+        items = device.prefix_lists if plist else device.route_maps
+        starts = [(f"A copy of {item.title}", item) for item in items.values()]
+        for entry in self.store.library:
+            found = entry.main() if entry.item.startswith(kind) else None
+            if found is not None:
+                starts.append((f"Library: {entry.name}", found))
+        dialog = NewPolicyDialog(self, kind, items, starts)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        made = dialog.made()
+        items[made.key] = made
+        self.current_item = (KIND_PLIST if plist else KIND_RMAP, made.key)
+        self.edited()
+
     # ----------------------------------------------------------------- Object groups and time ranges
 
     def new_network_group(self):
@@ -1791,6 +1909,8 @@ class AclTab(QWidget):
         data = tree_item.data(0, Qt.UserRole) if tree_item is not None else None
         menu = QMenu(self)
         actions = {menu.addAction("New ACL..."): self.new_acl,
+                   menu.addAction("New Prefix List..."): self.new_prefix_list,
+                   menu.addAction("New Route Map..."): self.new_route_map,
                    menu.addAction("New Network Object Group..."): self.new_network_group,
                    menu.addAction("New Service Object Group..."): self.new_service_group,
                    menu.addAction("New Time Range..."): self.new_time_range}
@@ -1800,6 +1920,13 @@ class AclTab(QWidget):
             actions[menu.addAction("Save to Library...")] = self.save_to_library
             actions[menu.addAction("Compare Across Devices...")] = self.compare_across
             actions[menu.addAction("Delete ACL")] = self.delete_acl
+        elif data is not None and data[0] in (KIND_PLIST, KIND_RMAP):
+            editor = self.plist_editor if data[0] == KIND_PLIST else self.rmap_editor
+            menu.addSeparator()
+            actions[menu.addAction("Apply To...")] = editor.apply_to
+            actions[menu.addAction("Save to Library...")] = editor.save_to_library
+            actions[menu.addAction("Compare Across Devices...")] = editor.compare
+            actions[menu.addAction("Delete")] = editor.delete_item
         chosen = menu.exec_(self.items_tree.viewport().mapToGlobal(position))
         if chosen in actions:
             actions[chosen]()
@@ -1862,6 +1989,7 @@ class AclTab(QWidget):
         if not errors:
             self.console_check.setChecked(False)
         self.show_waiting()
+        self.show_soft()
         self.update_buttons()
 
     def show_preview(self, *_):
@@ -1947,6 +2075,7 @@ class AclTab(QWidget):
         for index, key in enumerate(keys):
             target = self.targets[key]
             changes = self.changes_for(key)
+            self.pending_soft[key] = routepolicy.bgp_affected(self.read[key], self.working[key])
             title = "; ".join(change.title for change in changes)
             jobs.append(SendJob(index, target.address, list(target.names), self.lines_text(key), key=key,
                                 undo=self.undo_lines_text(key), title=title))
@@ -1987,6 +2116,9 @@ class AclTab(QWidget):
         if job.action in (CONFIRM, REVERT):
             self.waiting_done(job.key, job.action, outcome.ok, outcome.problem)
             return
+        if job.action == SOFT:
+            self.soft_done(job, target, outcome)
+            return
         if outcome.waiting:
             result = f"Sent; waiting to be confirmed (the device puts it back at {outcome.reverts_at} unless it is)"
         elif outcome.ok:
@@ -2011,6 +2143,9 @@ class AclTab(QWidget):
             self.tick.start()
         elif outcome.ok:
             self.saveable.add(job.key)
+            self.offer_soft(job.key, None)
+        else:
+            self.pending_soft.pop(job.key, None)
 
     def on_send_finished(self):
         thread, self.sender_thread = self.sender_thread, None
@@ -2069,6 +2204,7 @@ class AclTab(QWidget):
                 if now >= item.deadline + datetime.timedelta(seconds=EXPIRY_GRACE)]
         for key in gone:
             item = self.waiting.pop(key)
+            self.pending_soft.pop(key, None)
             self.notes[key] = f"Not confirmed: the device put its old configuration back at {item.at}."
             self.set_entry_outcome(item, f"Not confirmed: the device put it back at {item.at}")
         if not self.waiting:
@@ -2133,8 +2269,10 @@ class AclTab(QWidget):
                 text = f"Confirmed{how} (configure confirm)."
                 if not typed:
                     self.saveable.add(key)
+                self.offer_soft(key, item.view if item is not None else None)
             else:
                 text = f"Put back{how} (configure revert now)."
+                self.pending_soft.pop(key, None)
             self.set_entry_outcome(item, text.rstrip("."))
         elif "no rollback" in problem.lower() or "nothing waiting" in problem:
             self.waiting.pop(key, None)
@@ -2153,6 +2291,95 @@ class AclTab(QWidget):
         self.refresh_changes()
         if typed:
             set_hint(self.status_label, text, "success")
+
+    # ----------------------------------------------------------------- BGP soft clears
+
+    def offer_soft(self, key, view):
+        """Changes went in (and are confirmed): offer the BGP neighbors they touch a soft clear."""
+        clears = self.pending_soft.pop(key, [])
+        if clears:
+            self.soft_offers[key] = (clears, view)
+        self.show_soft()
+
+    def show_soft(self):
+        offer = self.soft_offers.get(self.current_key)
+        self.soft_box.setVisible(bool(offer))
+        if not offer:
+            return
+        clears, view = offer
+        where = f" (typed into {view.title})" if view is not None else " (over SSH)"
+        set_hint(self.soft_label, f"BGP puts routes it already has through a changed policy only after a soft "
+                                  f"clear (the session stays up). Tick the neighbors to clear{where}:", "info")
+        self.soft_list.blockSignals(True)
+        ticked = {self.soft_list.item(row).data(Qt.UserRole) for row in range(self.soft_list.count())
+                  if self.soft_list.item(row).checkState() == Qt.Checked}
+        self.soft_list.clear()
+        for clear in clears:
+            item = QListWidgetItem(f"{clear.label}:  {clear.command}")
+            item.setData(Qt.UserRole, clear.command)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if clear.command in ticked else Qt.Unchecked)
+            self.soft_list.addItem(item)
+        self.soft_list.blockSignals(False)
+
+    def ticked_soft(self):
+        return [self.soft_list.item(row).data(Qt.UserRole) for row in range(self.soft_list.count())
+                if self.soft_list.item(row).checkState() == Qt.Checked]
+
+    def soft_clear(self):
+        key = self.current_key
+        offer = self.soft_offers.get(key)
+        commands = self.ticked_soft()
+        if offer is None or not commands:
+            return
+        clears, view = offer
+        if view is not None:
+            if self.session_sender.send_to(view, "\n".join(commands), what="soft clear the BGP neighbors"):
+                self.store.record(self.targets[key].label, self.targets[key].address, "BGP soft clear",
+                                  "\n".join(commands), "", view.title, f"Typed into {view.title}")
+                self.soft_cleared(key, commands)
+            return
+        if self.busy():
+            return
+        logins = self.saved_logins or self.logins()
+        if logins is None:
+            return
+        self.saved_logins = logins
+        target = self.targets[key]
+        job = SendJob(0, target.address, list(target.names), "\n".join(commands), key=key, title="BGP soft clear",
+                      action=SOFT)
+        self.start_send([job], 0, logins)
+
+    def soft_done(self, job, target, outcome):
+        commands = job.text.splitlines()
+        result = "Soft cleared" if outcome.ok else f"Soft clear failed: {outcome.problem}"
+        self.store.record(target.label, job.address, job.title, job.text, "", "SSH", result)
+        self.notes[job.key] = result + "."
+        if outcome.ok:
+            self.soft_cleared(job.key, commands)
+
+    def soft_cleared(self, key, commands):
+        clears, view = self.soft_offers.get(key, ([], None))
+        left = [clear for clear in clears if clear.command not in commands]
+        if left:
+            self.soft_offers[key] = (left, view)
+        else:
+            self.soft_offers.pop(key, None)
+        self.fill_history()
+        self.fill_devices()
+        self.show_soft()
+        self.update_buttons()
+
+    def copy_soft(self):
+        offer = self.soft_offers.get(self.current_key)
+        if offer is not None:
+            QApplication.clipboard().setText("\n".join(self.ticked_soft() or [clear.command for clear in offer[0]]))
+            set_hint(self.status_label, "Copied the soft clear commands.", "success")
+
+    def dismiss_soft(self):
+        self.soft_offers.pop(self.current_key, None)
+        self.fill_devices()
+        self.show_soft()
 
     def save_startup(self):
         key = self.current_key
@@ -2192,6 +2419,9 @@ class AclTab(QWidget):
             changes = self.changes_for(key)
             title = "; ".join(change.title for change in changes)
             minutes = self.revert_minutes()
+            self.pending_soft[key] = routepolicy.bgp_affected(self.read[key], self.working[key])
+            if not minutes:
+                self.offer_soft(key, view)
             outcome = f"Typed into {view.title}" + (f" with a {minutes}-minute revert timer: Confirm once you've "
                                                     "checked you can still log in" if minutes else "")
             entry = self.store.record(target.label, target.address, title, self.lines_text(key),
@@ -2234,10 +2464,11 @@ class AclTab(QWidget):
         table = self.library_table
         table.setRowCount(len(self.store.library))
         for row, entry in enumerate(self.store.library):
-            library_acl = entry.acl()
-            cells = [entry.name, library_acl.title if library_acl else "?",
-                     str(len(library_acl.rules)) if library_acl else "", entry.saved.replace("T", " ")[:16],
-                     entry.notes]
+            item = entry.main()
+            count = len(getattr(item, "rules", getattr(item, "entries", []))) if item is not None else 0
+            title = item.title if item is not None else "?"
+            cells = [entry.name, title[:1].upper() + title[1:], str(count) if item is not None else "",
+                     entry.saved.replace("T", " ")[:16], entry.notes]
             for column, text in enumerate(cells):
                 cell = QTableWidgetItem(text)
                 cell.setData(Qt.UserRole, entry.id)
@@ -2258,11 +2489,36 @@ class AclTab(QWidget):
         self.update_buttons()
 
     def use_library(self, key, entry):
-        """Merge the library's ACL (and its groups, time ranges) into key's working copy: (ACL key, what happened)."""
+        """Merge the library's ACL (and its groups, time ranges), prefix list or route map (and the prefix lists and
+        ACLs it matches) into key's working copy: ((the tree's kind, its key), what happened)."""
         device = self.working.get(key)
         if device is None or not device.read:
             return None, "not read"
+        if entry.item:
+            return self.use_library_policy(device, entry)
+        acl_key, what = self.merge_library_acl(device, entry.device())
+        return ((KIND_ACL, acl_key) if acl_key is not None else None), what
+
+    def use_library_policy(self, device, entry):
         source = entry.device()
+        wanted = entry.main()
+        if wanted is None:
+            return None, "nothing in it"
+        for acl_key in list(source.acls):  # The ACLs and prefix lists a route map matches go in first
+            single = source.copy()
+            single.acls = {acl_key: source.acls[acl_key]}
+            self.merge_library_acl(device, single)
+        had = set(device.prefix_lists)
+        for plist_key, plist in source.prefix_lists.items():
+            device.prefix_lists[plist_key] = routepolicy.align_prefix(device.prefix_lists.get(plist_key), plist)
+        if isinstance(wanted, routepolicy.RouteMap):
+            existing = device.route_maps.get(wanted.name)
+            device.route_maps[wanted.name] = routepolicy.align_map(existing, wanted)
+            return (KIND_RMAP, wanted.name), "merged" if existing is not None else "made"
+        return (KIND_PLIST, wanted.key), "merged" if wanted.key in had else "made"
+
+    def merge_library_acl(self, device, source):
+        """Merge source's ACL (and its groups, time ranges) into device: (ACL key, what happened)."""
         library_acl = next(iter(source.acls.values()), None)
         if library_acl is None:
             return None, "nothing in it"
@@ -2291,11 +2547,11 @@ class AclTab(QWidget):
             set_hint(self.status_label, "Pick a device that's been read (or the Scratch Pad) on the Edit tab first.",
                      "warning")
             return
-        acl_key, what = self.use_library(key, entry)
-        if acl_key is None:
+        item_key, what = self.use_library(key, entry)
+        if item_key is None:
             set_hint(self.status_label, f"Couldn't use {entry.name}: {what}.", "error")
             return
-        self.current_item = (KIND_ACL, acl_key)
+        self.current_item = item_key
         self.tabs.setCurrentIndex(0)
         self.edited()
         set_hint(self.status_label, f"{entry.name} {what} into {self.targets[key].label}: check the changes, then "
@@ -2327,7 +2583,7 @@ class AclTab(QWidget):
             return
         results = []
         for key in keys:
-            acl_key, what = self.use_library(key, entry)
+            _, what = self.use_library(key, entry)
             results.append(f"{self.targets[key].label}: {what}")
         self.tabs.setCurrentIndex(0)
         self.edited()
@@ -2556,6 +2812,10 @@ class AclTab(QWidget):
         key = self.current_key
         device = self.device()
         has_changes = bool(self.changes_for(key)) if key else False
+        if hasattr(self, "soft_button"):
+            offer = self.soft_offers.get(key)
+            self.soft_button.setEnabled(bool(offer) and bool(self.ticked_soft()) and
+                                        (offer[1] is not None or not busy))
         real = key not in ("", SCRATCH)
         self.read_button.setEnabled(not busy)
         self.stop_button.setEnabled(busy)

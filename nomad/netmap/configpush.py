@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 import paramiko
 
 from ..terminal.transports import Cancelled, ConnectionFailed
-from . import acl, macssh, mirror
+from . import acl, macssh, mirror, routepolicy
 
 log = logging.getLogger(__name__)
 
@@ -286,6 +286,13 @@ class Pusher:
                 toward = shell.run(f"show ip cef {pc_ip}")
                 if macssh.INVALID.search(toward):
                     toward = shell.run(f"show ip route {pc_ip}")
+            prefixes = maps = ""
+            if "prefix-list " in running:
+                prefixes = shell.run("show ip prefix-list detail", timeout=macssh.TABLE_TIMEOUT)
+                if "ipv6 prefix-list " in running:
+                    prefixes += "\n" + shell.run("show ipv6 prefix-list detail", timeout=macssh.TABLE_TIMEOUT)
+            if "\nroute-map " in running:
+                maps = shell.run("show route-map", timeout=macssh.TABLE_TIMEOUT)
         except Cancelled:
             return acl.DeviceAcls(problem="stopped.")
         except (ConnectionFailed, paramiko.SSHException, OSError, EOFError) as error:
@@ -293,6 +300,10 @@ class Pusher:
             return acl.DeviceAcls(problem=str(error))
         device = acl.parse_running(running)
         acl.merge_show(device, acl.parse_show(f"{shown}\n{shown6}"))
+        if prefixes and not macssh.INVALID.search(prefixes):
+            routepolicy.merge_show_prefix(device, prefixes)
+        if maps and not macssh.INVALID.search(maps):
+            routepolicy.merge_show_maps(device, maps)
         device.toward_pc = acl.parse_toward(toward) if toward and not macssh.INVALID.search(toward) else ""
         device.when = acl.now_text()
         return device
@@ -444,6 +455,25 @@ class Pusher:
         except (Cancelled, ConnectionFailed, paramiko.SSHException, OSError, EOFError):
             return False
         return not macssh.INVALID.search(answer) and not mirror.errors_in(answer)
+
+    def run_commands(self, address, commands, names=()):
+        """Exec commands (BGP soft clears): [(command, what it said, whether it took)]."""
+        shell = self.shell(address, names)
+        if shell is None:
+            return [(command, f"Couldn't log in: {self.problems.get(address, 'no reason given')}", False)
+                    for command in commands]
+        results = []
+        for command in commands:
+            try:
+                answer = shell.run(command, timeout=LINE_TIMEOUT * 2)
+            except (Cancelled, ConnectionFailed, paramiko.SSHException, OSError, EOFError) as error:
+                self.forget(address)
+                results.append((command, str(error), False))
+                break
+            refused = macssh.INVALID.search(answer) or mirror.errors_in(answer) or \
+                re.search(r"^\s*%", answer, re.MULTILINE)
+            results.append((command, answer.strip(), not refused))
+        return results
 
     def save_config(self, address, names=()):
         """write memory: (ok, what it said)."""

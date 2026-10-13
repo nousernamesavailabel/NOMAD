@@ -78,8 +78,8 @@ TOOL_ART = {
     "SNMP Config": '<path d="M4 5h16M4 12h16M4 19h16 M8 3v4m8 3v4m-6 3v4"/>'
                    '<circle cx="8" cy="5" r="2"/><circle cx="16" cy="12" r="2"/>'
                    '<circle cx="10" cy="19" r="2"/>',
-    "ACLs": '<path d="M12 2 4 5v6c0 5 3.5 9 8 11 4.5-2 8-6 8-11V5z"/>'
-            '<path d="M9 9h6M9 13h6M9 17h3"/>',
+    "ACLs & Route Maps": '<path d="M12 2 4 5v6c0 5 3.5 9 8 11 4.5-2 8-6 8-11V5z"/>'
+                         '<path d="M9 9h6M9 13h6M9 17h3"/>',
     "Ansible Inventory": '<rect x="4" y="3" width="16" height="19" rx="2"/>'
                          '<path d="M9 3V1h6v2 M8 9h1m3 0h4 M8 13h1m3 0h4 M8 17h1m3 0h4"/>',
     "Packet Capture": '<path d="M2 7h20M5 7l3 13h8l3-13 M12 2v12m-3-3 3 3 3-3"/>',

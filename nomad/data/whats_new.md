@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.29.0] - 2026-10-13
+
+- **New:** the ACLs page is now ACLs & Route Maps: it reads, edits and tests prefix lists and route maps, puts them on BGP neighbors, redistributions, policy routing and distribute lists, and sends the changes entry by entry with the revert timer. After a change to a BGP neighbor's policy, it offers a soft clear.
+
 ## [1.28.0] - 2026-10-12
 
 - **New:** ACLs reads, builds and edits ACLs on Cisco IOS / IOS-XE devices (IPv4 and IPv6, object groups, time ranges), finds rules that never match, tests packets against them, and checks a change won't lock you out. Changes go rule by rule with a revert timer, confirmed only once NOMAD can still log in. A library keeps ACLs to put on other devices.

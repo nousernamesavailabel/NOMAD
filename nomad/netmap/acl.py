@@ -443,6 +443,13 @@ class DeviceAcls:
     toward_pc: str = ""  # The interface this PC is reached through (show ip cef), if read
     hits_read: bool = False
     when: str = ""
+    # Route policy (routepolicy.py)
+    prefix_lists: dict = field(default_factory=dict)  # (family, name): PrefixList
+    route_maps: dict = field(default_factory=dict)  # name: RouteMap
+    policy_uses: list = field(default_factory=list)  # [PolicyUse]
+    processes: dict = field(default_factory=dict)  # "router bgp 65000": RoutingProcess
+    as_paths: dict = field(default_factory=dict)  # name: [(action, regex)] (read only, for the route tester)
+    communities: dict = field(default_factory=dict)  # name: (standard / expanded, [(action, text)]) (the same)
 
     def acl(self, family, name):
         return self.acls.get((family, name))
@@ -470,7 +477,10 @@ class DeviceAcls:
                        groups={key: replace(group, entries=list(group.entries)) for key, group in self.groups.items()},
                        ranges={key: replace(item, entries=list(item.entries)) for key, item in self.ranges.items()},
                        applied=[replace(item) for item in self.applied],
-                       lines={key: dict(value) for key, value in self.lines.items()})
+                       lines={key: dict(value) for key, value in self.lines.items()},
+                       prefix_lists={key: item.copy() for key, item in self.prefix_lists.items()},
+                       route_maps={key: item.copy() for key, item in self.route_maps.items()},
+                       policy_uses=[item.copy() for item in self.policy_uses])
 
 
 # ----------------------------------------------------------------- Addresses and wildcards
@@ -781,6 +791,8 @@ def parse_running(text):
         fill_rules(acl, lines)
         device.acls[acl.key] = acl
     find_references(device, text)
+    from .routepolicy import read_policies
+    read_policies(device, text)
     return device
 
 
@@ -953,15 +965,19 @@ class Change:
 
     @property
     def numbers(self):
-        """{place of a rule in the ACL acl_change was given: the number it has once done}."""
-        if not isinstance(self.after, Acl):
+        """{place of a rule (or prefix list / route map entry) in what the change was planned from: the number it
+        has once done}."""
+        items = getattr(self.after, "rules", None) if isinstance(self.after, Acl) else \
+            getattr(self.after, "entries", None)
+        if items is None:
             return {}
-        return {rule.origin: rule.seq for rule in self.after.rules if rule.origin >= 0}
+        return {item.origin: item.seq for item in items if item.origin >= 0}
 
 
-# Where a change goes among several sent at once: taken off interfaces first, groups and time ranges before the
-# ACLs naming them, put on interfaces after, ACLs deleted after they're off everything, groups after the ACLs.
-UNAPPLY, OBJECTS, ACLS, APPLY, DELETE_ACL, DELETE_OBJECTS = range(6)
+# Where a change goes among several sent at once: taken off interfaces (and neighbors...) first, groups and time
+# ranges before the ACLs naming them, ACLs and prefix lists before the route maps matching them, put on interfaces
+# after, route maps deleted after they're off everything, ACLs and prefix lists after them, groups after the ACLs.
+UNAPPLY, OBJECTS, ACLS, MAPS, APPLY, DELETE_MAPS, DELETE_ACL, DELETE_OBJECTS = range(8)
 
 
 def config_text(changes, revert_minutes=0):
@@ -1075,10 +1091,12 @@ def fill_gap(low, high, wanted, taken, hard=None):
     return None
 
 
-def assign(before, after, family, kind):
-    """(numbers for after's rules, which of them stay where they are) or None when the gaps are too small."""
+def assign(before, after, family, kind, same=None, top=None):
+    """(numbers for after's rules, which of them stay where they are) or None when the gaps are too small. same:
+    whether a rule at a number is still the one there (default same_rule); top: the number past the last allowed."""
+    same = same or (lambda a, b: same_rule(a, b, family, kind))
     by_seq = {rule.seq: rule for rule in before}
-    identity = [rule.seq if rule.seq in by_seq and same_rule(rule, by_seq[rule.seq], family, kind) and
+    identity = [rule.seq if rule.seq in by_seq and same(rule, by_seq[rule.seq]) and
                 rule.want_seq in (0, rule.seq) else None for rule in after]  # A number typed in moves it
     fixed = longest_increasing(identity)
     numbers = [after[index].seq if index in fixed else None for index in range(len(after))]
@@ -1093,7 +1111,7 @@ def assign(before, after, family, kind):
         while end < len(after) and numbers[end] is None:
             end += 1
         low = numbers[index - 1] if index > 0 else 0
-        high = numbers[end] if end < len(after) else None
+        high = numbers[end] if end < len(after) else top
         gap = fill_gap(low, high, [after[spot].want_seq for spot in range(index, end)], taken, hard)
         if gap is None:
             return None
@@ -1454,7 +1472,8 @@ def device_changes(before, after):
         if spot not in new_spots:
             family, where, target, direction = spot
             changes.append(unapply_change(Applied(name, family, where, target, direction)))
-    return changes
+    from .routepolicy import policy_changes
+    return changes + policy_changes(before, after)
 
 
 def edited_rule_state(before_acl, rule, family, kind):
@@ -1503,13 +1522,28 @@ class LibraryEntry:
     config: str  # library_config text
     notes: str = ""
     saved: str = ""
+    item: str = ""  # What it keeps: "" an ACL, "route-map NAME", "prefix-list ipv4 NAME"
 
     def device(self):
-        """The text read as a DeviceAcls (the ACL, its groups and time ranges)."""
+        """The text read as a DeviceAcls (the ACL with its groups and time ranges, or the prefix list, or the route
+        map with what it matches)."""
         return parse_running(self.config)
 
     def acl(self):
+        """The ACL it keeps (None when it keeps a prefix list or route map)."""
+        if self.item:
+            return None
         device = self.device()
+        return next(iter(device.acls.values()), None)
+
+    def main(self):
+        """What it keeps: an Acl, PrefixList or RouteMap (None when the text has none)."""
+        device = self.device()
+        words = self.item.split()
+        if words[:1] == ["route-map"] and len(words) == 2:
+            return device.route_maps.get(words[1])
+        if words[:1] == ["prefix-list"] and len(words) == 3:
+            return device.prefix_lists.get((words[1], words[2]))
         return next(iter(device.acls.values()), None)
 
 
@@ -1567,14 +1601,15 @@ class AclStore:
                        "history": [asdict(item) for item in self.history]}, file, indent=1)
         replace_file(temporary, self.path)
 
-    def add_to_library(self, name, config, notes=""):
-        existing = next((item for item in self.library if item.name == name), None)
+    def add_to_library(self, name, config, notes="", item=""):
+        existing = next((entry for entry in self.library if entry.name == name), None)
         when = now_text()
         if existing is not None:
             existing.config, existing.notes, existing.saved = config, notes or existing.notes, when
+            existing.item = item
             entry = existing
         else:
-            entry = LibraryEntry(uuid.uuid4().hex, name, config, notes, when)
+            entry = LibraryEntry(uuid.uuid4().hex, name, config, notes, when, item)
             self.library.append(entry)
         self.save()
         return entry
