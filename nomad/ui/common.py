@@ -1,5 +1,6 @@
 """Widgets and helpers shared by the tabs."""
 import logging
+import socket
 import threading
 
 from PyQt5 import sip
@@ -15,6 +16,16 @@ log = logging.getLogger(__name__)
 INVALID_INPUT_STYLE = f"border: 1px solid {COLORS['error']};"
 HINT_COLORS = {kind: COLORS[name] for kind, name in
                {"error": "error", "warning": "warning", "info": "muted", "success": "success"}.items()}
+
+
+def local_address_toward(address):
+    """This PC's address that reaches address (no packet is sent), or ""."""
+    try:
+        with socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect((address, 9))
+            return probe.getsockname()[0]
+    except (OSError, UnicodeError):
+        return ""
 
 
 def set_invalid(line_edit, invalid):

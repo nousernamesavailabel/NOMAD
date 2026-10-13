@@ -2,25 +2,30 @@
 
 Choose the VLAN and B (and A, or let NOMAD start from where the VLAN already is), or set the whole route by hand,
 switch by switch. Plan reads the switches involved again (their VLANs, and how spanning tree has their ports for
-the VLAN), then lists what each switch needs: send each to a terminal session (typed in while you watch), copy it, or
-export all of it with the undo. Verify reads them again and says what's done. Gateways are only checked."""
+the VLAN), then lists what each switch needs: send it all over SSH with no one watching (Send All over SSH, in order,
+stopping at the first switch that refuses a line, then Verify), send each to a terminal session (typed in while you
+watch), copy it, or export all of it with the undo. Verify reads them again and says what's done. Undo Sent over SSH
+takes back out what was sent. Gateways are only checked."""
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 import functools
+import html
 import logging
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, \
+from PyQt5.QtWidgets import QAbstractItemView, QAction, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, \
     QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, \
     QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QSplitter, QTableWidget, \
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
 
-from ..netmap import vlan_path, vlans, watch
+from ..netmap import configpush, vlan_path, vlans, watch
 from ..netmap.crawl import apply_vlans
 from ..netmap.model import SNMP, SWITCH
 from .common import StoppableThread, set_hint
-from .netmap_view import PATH_BLOCKED, PATH_CARRIES, PATH_CHOSEN, PATH_OFFERED, PATH_PLANNED
+from .netmap_view import PATH_BLOCKED, PATH_CARRIES, PATH_CHOSEN, PATH_OFFERED, PATH_PLANNED, PATH_ROUTE
 from .session_send import SessionSender
+from .ssh_push import Job, LoginRow, PushThread
 from .theme import COLORS, accent_button, monospace_font
 
 log = logging.getLogger(__name__)
@@ -31,6 +36,24 @@ AUTOMATIC = ""  # A: start from wherever the VLAN already is
 SEVERITY_COLORS = {vlans.ERROR: "error", vlans.WARNING: "warning", vlans.INFO: "muted"}
 STEP_COLUMNS = ["Switch", "Changes", "Status", ""]
 ROUTE_COLUMNS = ["Switch", "Link to the next", "Check"]
+CONFIG, UNDO = "config", "undo"
+
+
+@dataclass
+class Sent:
+    """A step sent to a switch (over SSH or into a session), with what takes it back out: kept when planning again,
+    so Undo Sent over SSH still knows."""
+    device: str
+    label: str
+    address: str
+    vlan: int
+    redundant: bool
+    undo: str
+    names: list = field(default_factory=list)
+
+    @property
+    def key(self):
+        return self.device, self.redundant, self.vlan
 
 
 class PathReadThread(StoppableThread):
@@ -94,6 +117,16 @@ class VlanPathDialog(QDialog):
         self.after_send = []  # Findings from Verify
         self.previous_vlan = None  # The VLAN the map highlighted before, put back on closing
         self.picking = False  # Picking the route's switches on the map
+        self.edge_key = None  # The switch the edge ports listed are on
+        self.push_thread = None  # Sending over SSH
+        self.push_kind = CONFIG
+        self.push_plan = None  # The plan push_thread is sending (its rows mean nothing in another)
+        self.push_sent = {}  # Config push: plan row -> Sent, kept once the switch got lines
+        self.push_keys = []  # Undo push: Job.index -> Sent.key
+        self.push_failed = []  # Rows of the config push that failed
+        self.sent = {}  # Sent.key -> Sent, in the order sent
+        self.saved_logins = None  # (logins, enable secret), asked once until the login row changes
+        self.shell_factory = configpush.ConfigShell  # Tests swap in fake switches
         self.route_errors = []  # Problems with the route set by hand
         self.setWindowTitle("Carry VLAN")
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
@@ -208,6 +241,12 @@ class VlanPathDialog(QDialog):
         self.save_check = QCheckBox("Save each switch's configuration afterwards (write memory)")
         self.save_check.toggled.connect(self.show_preview)
         left_layout.addWidget(self.save_check)
+        ssh_box = QGroupBox("Send over SSH: switches without a saved SSH session")
+        ssh_layout = QVBoxLayout(ssh_box)
+        self.login_row = LoginRow(self, getattr(self.page.window, "session_store", None), "Carry VLAN", stacked=True)
+        self.login_row.changed.connect(self.on_login_changed)
+        ssh_layout.addWidget(self.login_row)
+        left_layout.addWidget(ssh_box)
         splitter.addWidget(left)
 
         right = QWidget()
@@ -217,17 +256,25 @@ class VlanPathDialog(QDialog):
         self.plan_button = accent_button("Plan")
         self.plan_button.setToolTip("Read the switches involved again (their VLANs, and spanning tree for this VLAN), "
                                     "then work out what each needs.")
+        self.send_button = QPushButton("Send All over SSH")
+        self.send_button.setToolTip("Log in to each switch over SSH and send its lines, in order, stopping at the "
+                                    "first switch that refuses one; then Verify.")
+        self.undo_button = QPushButton("Undo Sent over SSH")
+        self.undo_button.setToolTip("Take back out what was sent (over SSH or into a session), last first.")
         self.verify_button = QPushButton("Verify")
         self.verify_button.setToolTip("Read the switches again and check what's done.")
         self.edit_route_button = QPushButton("Edit This Route")
         self.edit_route_button.setToolTip("Copy the way NOMAD chose into the route set by hand, to change it.")
         self.export_button = QPushButton("Export All...")
         self.export_button.setToolTip("Save every switch's configuration, and its undo, to a text file.")
-        for button in (self.plan_button, self.verify_button, self.edit_route_button, self.export_button):
+        for button in (self.plan_button, self.send_button, self.undo_button, self.verify_button,
+                       self.edit_route_button, self.export_button):
             buttons.addWidget(button)
         buttons.addStretch(1)
         right_layout.addLayout(buttons)
         self.plan_button.clicked.connect(self.start_plan)
+        self.send_button.clicked.connect(self.send_all_over_ssh)
+        self.undo_button.clicked.connect(self.undo_sent_over_ssh)
         self.verify_button.clicked.connect(self.start_verify)
         self.edit_route_button.clicked.connect(self.edit_route)
         self.export_button.clicked.connect(self.export_all)
@@ -400,6 +447,8 @@ class VlanPathDialog(QDialog):
             self.page.view.stop_picking()
         self.fill_edge_ports()
         self.plan_outdated()
+        if self.plan is None:
+            self.show_route_preview()
 
     def b_key(self):
         if self.by_hand():
@@ -411,25 +460,40 @@ class VlanPathDialog(QDialog):
         self.plan_outdated()
 
     def fill_edge_ports(self, select=None):
-        """B's ports, ticked ones kept ticked (and select ticked)."""
-        ticked = set(self.edge_ports())
+        """B's ports, ticked ones kept ticked while B is the same switch (and select ticked)."""
+        key = self.b_key()
+        ticked = set(self.edge_ports()) if key == self.edge_key else set()  # Not another switch's same-named port
+        self.edge_key = key
         if select:
             ticked.add(select)
-        key = self.b_key()
         self.edge_list.blockSignals(True)
         self.edge_list.clear()
         device = self.network_map.devices.get(key) if self.network_map is not None and key else None
         if device is not None:
             select_key = vlan_path.logical_port(device, select) if select else None
+            neighbors = {vlan_path.port_key(link.port_on(key)): link.b if link.a == key else link.a
+                         for link in self.network_map.links_of(key)}
             for port, entry in vlan_path.edge_port_choices(self.network_map, key):
                 item = QListWidgetItem(f"{port}  ({vlan_path.describe_entry(entry)})")
+                if entry.get("mode") == vlan_path.TRUNK:
+                    self.warn_trunk(item, port, neighbors.get(vlan_path.port_key(port)))
                 item.setData(Qt.UserRole, port)
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(Qt.Checked if port in ticked or port == select_key else Qt.Unchecked)
                 self.edge_list.addItem(item)
         self.edge_list.blockSignals(False)
-        self.edge_label.setText(f"{device.label}'s edge ports to put in the VLAN too (optional):" if device is not None
-                                else "B's edge ports to put in the VLAN too (optional):")
+        self.edge_label.setText(f"<b>{html.escape(device.label)}</b>'s edge ports to put in the VLAN too (optional):"
+                                if device is not None else "B's edge ports to put in the VLAN too (optional):")
+
+    def warn_trunk(self, item, port, neighbor):
+        """An edge port that's a trunk: ticked, it keeps being a trunk and the VLAN is added to what it allows."""
+        other = vlan_path.label_of(self.network_map, neighbor) if neighbor else ""
+        item.setText(item.text() + f"  Warning: Trunk{f' to {other}' if other else ''}")
+        item.setForeground(QColor(COLORS["warning"]))
+        item.setToolTip(f"{port} is a trunk{f' to {other}' if other else ''}. Ticked, it stays a trunk and the VLAN "
+                        f"is added to the VLANs it allows (switchport trunk allowed vlan add), so whatever is at its "
+                        f"other end gets the VLAN tagged. It isn't made an access port. Leave it unticked unless "
+                        f"that's what you want.")
 
     def edge_ports(self):
         return [self.edge_list.item(row).data(Qt.UserRole) for row in range(self.edge_list.count())
@@ -491,6 +555,8 @@ class VlanPathDialog(QDialog):
         self.route_errors = [finding for finding in findings if finding.severity == vlans.ERROR]
         if self.by_hand():
             self.fill_edge_ports()
+        if self.plan is None:
+            self.show_route_preview()
 
     def on_hop_chosen(self, _index):
         combo = self.sender()
@@ -542,7 +608,7 @@ class VlanPathDialog(QDialog):
         self.picking = True
         self.pick_button.setText("Stop Picking")
         self.page.tabs.setCurrentWidget(view)
-        view.start_picking()
+        view.start_picking(self.route[-1] if self.route else None)
         set_hint(self.page.status_label, "Carry VLAN: click the switches of the route in order, A first. Esc, a "
                                          "right-click or a click on the background stops.", "info")
         set_hint(self.status_label, "Click the switches on the map in order, A first.", "info")
@@ -650,6 +716,8 @@ class VlanPathDialog(QDialog):
             return "Wait for the crawl to finish."
         if self.thread is not None:
             return "Still reading the switches."
+        if self.push_thread is not None:
+            return "Still sending to the switches."
         if self.vlan() is None:
             return f"Enter a VLAN number (1 to {vlans.MAX_VLAN})."
         if self.by_hand():
@@ -677,7 +745,7 @@ class VlanPathDialog(QDialog):
 
     def start_verify(self):
         plan = self.plan
-        if plan is None or self.thread is not None:
+        if plan is None or self.busy():
             return
         keys = list(dict.fromkeys([step.device for step in plan.changes] + plan.route))
         self.read(keys, "verify")
@@ -798,8 +866,7 @@ class VlanPathDialog(QDialog):
         self.route_label.clear()
         self.gateway_label.clear()
         self.update_buttons()
-        self.page.view.set_highlights({})
-        self.page.view.set_path_overlay(None)
+        self.show_route_preview()
 
     # ----------------------------------------------------------------- Showing the plan
 
@@ -844,8 +911,9 @@ class VlanPathDialog(QDialog):
             set_hint(self.status_label, f"Nothing to change: VLAN {plan.vlan} already gets there.", "success")
         else:
             failed = f" {len(self.failed)} didn't answer: {', '.join(self.failed[:4])}." if self.failed else ""
-            set_hint(self.status_label, f"{len(changes)} switch{'es' if len(changes) != 1 else ''} to change. Send "
-                                        f"each in order (the Send button on its row), then Verify.{failed}",
+            set_hint(self.status_label, f"{len(changes)} switch{'es' if len(changes) != 1 else ''} to change. Send All "
+                                        f"over SSH, or send each in order (the Send button on its row), then "
+                                        f"Verify.{failed}",
                      "warning" if self.failed else "success")
 
     def fill_findings(self):
@@ -897,8 +965,9 @@ class VlanPathDialog(QDialog):
             return
         item.setText(text)
         item.setToolTip(text)
-        color = COLORS["success"] if text.startswith("Done") else COLORS["error"] if text.startswith("Not done") \
-            else COLORS["text"] if text.startswith("Sent") else COLORS["muted"]
+        color = COLORS["success"] if text.startswith("Done") else COLORS["error"] if text.startswith(
+            ("Not done", "Refused", "Couldn't")) else COLORS["text"] if text.startswith(("Sent", "Undone")) \
+            else COLORS["muted"]
         item.setForeground(QColor(color))
 
     def step(self, row):
@@ -923,20 +992,40 @@ class VlanPathDialog(QDialog):
         hints = {}
         if device is not None and device.mgmt_ip:
             hints = dict(self.page.session_hints(self.network_map, device), address=device.mgmt_ip)
-        self.session_sender.fill_menu(menu, functools.partial(self.step_text, row, "config"), device=hints,
-                                      tag=(row, "config"))
+        self.session_sender.fill_menu(menu, functools.partial(self.step_text, row, CONFIG), device=hints,
+                                      tag=(row, CONFIG))
+        self.add_ssh_action(menu, menu, row, CONFIG)
         menu.addSeparator()
         undo = menu.addMenu("Send Undo")
-        self.session_sender.fill_menu(undo, functools.partial(self.step_text, row, "undo"), device=hints,
-                                      tag=(row, "undo"))
+        self.session_sender.fill_menu(undo, functools.partial(self.step_text, row, UNDO), device=hints,
+                                      tag=(row, UNDO))
+        self.add_ssh_action(menu, undo, row, UNDO)
+
+    def add_ssh_action(self, owner, menu, row, kind):
+        """Over SSH, first in menu (made in Python and owned by owner, so no stale wrapper is kept)."""
+        actions = menu.actions()
+        first = actions[0] if actions else None
+        action = QAction("Over SSH (no one watching)", owner)
+        action.setData((row, kind))
+        action.setEnabled(not self.busy())
+        action.triggered.connect(self.on_ssh_action)
+        menu.insertAction(first, action)
+        menu.insertSeparator(first)
 
     def lines_sent(self, view, tag):
         """SessionSender: lines went to a session."""
         if not tag or self.plan is None:
             return
         row, kind = tag
-        self.statuses[row] = f"Sent{' undo' if kind == 'undo' else ''} to {view.title}"
+        self.statuses[row] = f"Sent{' undo' if kind == UNDO else ''} to {view.title}"
         self.show_status(row)
+        sent = self.sent_for(row)
+        if sent is not None:
+            if kind == UNDO:
+                self.sent.pop(sent.key, None)
+            else:
+                self.sent[sent.key] = sent
+            self.update_buttons()
 
     def selected_step_row(self):
         rows = self.steps_table.selectionModel().selectedRows() if self.steps_table.selectionModel() else []
@@ -970,18 +1059,229 @@ class VlanPathDialog(QDialog):
             return
         set_hint(self.status_label, f"Saved every switch's configuration and undo to {path}.", "success")
 
+    def busy(self):
+        return self.thread is not None or self.push_thread is not None
+
     def update_buttons(self):
         plan = self.plan
-        reading = self.thread is not None
-        self.plan_button.setEnabled(not reading)
+        reading, pushing = self.thread is not None, self.push_thread is not None
+        self.plan_button.setEnabled(not reading and not pushing)
         ready = plan is not None and plan.ok and bool(plan.changes) and not reading
-        self.verify_button.setEnabled(ready)
+        self.verify_button.setEnabled(ready and not pushing)
         self.export_button.setEnabled(ready)
+        self.send_button.setText("Stop" if pushing else "Send All over SSH")
+        self.send_button.setEnabled(pushing or ready)
+        self.undo_button.setEnabled(bool(self.sent) and not reading and not pushing)
         self.edit_route_button.setEnabled(plan is not None and bool(plan.route) and not plan.by_hand and not reading)
 
     def set_busy(self, busy):
         self.plan_button.setText("Reading..." if busy else "Plan")
         self.update_buttons()
+
+    # ----------------------------------------------------------------- Sending over SSH
+
+    def on_login_changed(self):
+        self.saved_logins = None
+
+    def logins(self):
+        """(macssh.SshLogins, enable secret), asked for the first time they're needed; None if cancelled."""
+        if self.saved_logins is None:
+            self.saved_logins = self.login_row.logins(self.status_label)
+        return self.saved_logins
+
+    def sent_for(self, row):
+        """A Sent for the plan's step on row (with its undo as it would be sent now), or None."""
+        step = self.step(row)
+        device = self.network_map.devices.get(step.device) if step is not None else None
+        if device is None:
+            return None
+        names = [name for name in [device.name, *device.addresses] if name]
+        return Sent(step.device, device.label, device.mgmt_ip or "", self.plan.vlan, step.redundant,
+                    self.step_text(row, UNDO), names)
+
+    def send_all_over_ssh(self):
+        if self.push_thread is not None:
+            self.push_thread.stop()
+            set_hint(self.status_label, "Stopping after the switch being sent to now...", "warning")
+            return
+        plan = self.plan
+        if plan is None or not plan.ok or not plan.changes or self.busy():
+            return
+        rows = [row for row in range(len(plan.changes))
+                if not self.statuses.get(row, "").startswith(("Done", "Sent over SSH"))]
+        if not rows:
+            set_hint(self.status_label, "Every switch has been sent its lines: Verify to check.", "info")
+            return
+        self.send_rows(rows)
+
+    def on_ssh_action(self):
+        action = self.sender()
+        data = action.data() if action is not None else None
+        if not data or self.busy():
+            return
+        row, kind = data
+        sent = self.sent_for(row)
+        if sent is None:
+            return
+        if kind == UNDO:
+            self.undo_over_ssh([self.sent.get(sent.key, sent)])
+        else:
+            self.send_rows([row])
+
+    def send_rows(self, rows):
+        """Send the plan's steps on rows over SSH, in order, after asking."""
+        plan = self.plan
+        sents = {row: self.sent_for(row) for row in rows}
+        if None in sents.values():
+            return
+        missing = [sent.label for sent in sents.values() if not sent.address]
+        if missing:
+            set_hint(self.status_label, f"NOMAD has no address to log in to {', '.join(missing)} over SSH.", "error")
+            return
+        labels = "\n".join(sent.label + (" (redundant links)" if sent.redundant else "") for sent in sents.values())
+        saved = ("Each switch's configuration is saved afterwards (write memory)." if self.save_check.isChecked()
+                 else "Nothing is saved (write memory is off): a switch that reloads comes back without it.")
+        where = f"these {len(rows)} switches, one at a time in this order" if len(rows) > 1 else "this switch"
+        question = (f"Send VLAN {plan.vlan} to {where} over SSH?\n\n{labels}\n\nIt stops at the first line a switch "
+                    f"refuses. {saved}")
+        if QMessageBox.question(self, "Send over SSH", question, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        logins = self.logins()
+        if logins is None:
+            return
+        self.push_sent, self.push_failed = sents, []
+        jobs = [Job(row, sent.address, sent.names, self.step_text(row, CONFIG)) for row, sent in sents.items()]
+        self.start_push(jobs, CONFIG, logins)
+
+    def undo_sent_over_ssh(self):
+        if self.sent and not self.busy():
+            self.undo_over_ssh(list(reversed(self.sent.values())))
+
+    def undo_over_ssh(self, items):
+        """Send each Sent's undo, in the order given (after asking), carrying on past switches that refuse."""
+        missing = [item.label for item in items if not item.address]
+        if missing:
+            set_hint(self.status_label, f"NOMAD has no address to log in to {', '.join(missing)} over SSH.", "error")
+            return
+        numbers = ", ".join(str(vlan) for vlan in sorted({item.vlan for item in items}))
+        labels = "\n".join(item.label + (" (redundant links)" if item.redundant else "") for item in items)
+        question = (f"Take VLAN {numbers} back out over SSH, in this order?\n\n{labels}\n\nEach switch gets the undo "
+                    "of what it was sent: the trunks lose the VLAN, edge ports go back to the VLAN they were in, and a "
+                    "VLAN NOMAD created is deleted.")
+        if QMessageBox.question(self, "Undo over SSH", question, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        logins = self.logins()
+        if logins is None:
+            return
+        for item in items:  # Undoing a step only typed in by hand still needs a place to come off
+            self.sent.setdefault(item.key, item)
+        self.push_keys = [item.key for item in items]
+        jobs = [Job(index, item.address, item.names, item.undo) for index, item in enumerate(items)]
+        self.start_push(jobs, UNDO, logins)
+
+    def start_push(self, jobs, kind, logins):
+        self.push_kind, self.push_plan = kind, self.plan
+        thread = PushThread(jobs, self.login_row.pusher_maker(logins, self.shell_factory), kind == CONFIG, self)
+        thread.step_started.connect(self.on_push_started)
+        thread.step_done.connect(self.on_push_done)
+        thread.finished.connect(self.on_push_finished)
+        self.push_thread = thread
+        self.page.check_threads.append(thread)
+        what = "Sending to" if kind == CONFIG else "Taking it back out of"
+        set_hint(self.status_label, f"{what} {len(jobs)} switch{'es' if len(jobs) != 1 else ''} over SSH...", "info")
+        self.update_buttons()
+        thread.start()
+
+    def row_of(self, key):
+        """The plan's row for a Sent.key (while it's the plan being sent for), or None."""
+        plan = self.plan
+        if plan is None or plan is not self.push_plan or not plan.ok:
+            return None
+        device, redundant, vlan = key
+        if vlan != plan.vlan:
+            return None
+        return next((row for row, step in enumerate(plan.changes)
+                     if step.device == device and step.redundant == redundant), None)
+
+    def set_row_status(self, row, text):
+        if row is not None and self.plan is not None and self.plan is self.push_plan:
+            self.statuses[row] = text
+            self.show_status(row)
+
+    def on_push_started(self, index):
+        if self.push_kind == CONFIG:
+            self.set_row_status(index, "Sending over SSH...")
+        elif 0 <= index < len(self.push_keys):
+            self.set_row_status(self.row_of(self.push_keys[index]), "Undoing over SSH...")
+
+    def on_push_done(self, index, outcome):
+        if outcome.transcript:
+            log.info("Carry VLAN, %s:\n%s", self.push_kind, outcome.transcript)
+        if self.push_kind == CONFIG:
+            sent = self.push_sent.get(index)
+            if sent is not None and (outcome.ok or outcome.transcript):  # Lines went in, even if one was refused
+                self.sent[sent.key] = sent
+            if not outcome.ok:
+                self.push_failed.append(index)
+            if outcome.ok:
+                status = "Sent over SSH"
+            elif outcome.refused:
+                status = f"Refused: {outcome.first_error}"
+            else:
+                status = f"Couldn't send: {outcome.problem or 'no reason given'}"
+            self.set_row_status(index, status)
+        elif 0 <= index < len(self.push_keys):
+            key = self.push_keys[index]
+            if outcome.ok:
+                self.sent.pop(key, None)
+            self.set_row_status(self.row_of(key), "Undone over SSH" if outcome.ok else
+                                f"Couldn't undo: {outcome.problem or 'no reason given'}")
+
+    def on_push_finished(self):
+        thread = self.sender()
+        if thread is not self.push_thread:
+            return
+        self.push_thread = None
+        if thread in self.page.check_threads:
+            self.page.check_threads.remove(thread)
+        thread.deleteLater()
+        self.update_buttons()
+        if self.push_kind == UNDO:
+            left = [self.sent[key].label for key in self.push_keys if key in self.sent]
+            total = len(self.push_keys)
+            if left:
+                set_hint(self.status_label, f"Couldn't take it back out of {', '.join(left)}: see the Status column "
+                                            "(and View Log for what the switch said).", "error")
+            elif thread.stopping:
+                set_hint(self.status_label, "Stopped.", "warning")
+            else:
+                set_hint(self.status_label, f"Taken back out of {total} switch{'es' if total != 1 else ''}. Verify "
+                                            "(or Plan) reads them again.", "success")
+            return
+        sent_now = [sent for sent in self.push_sent.values() if self.sent.get(sent.key) is sent]
+        count = f"{len(sent_now)} switch{'es' if len(sent_now) != 1 else ''}"
+        if thread.failed:
+            failed = self.push_sent.get(self.push_failed[0]) if self.push_failed else None
+            label = failed.label if failed is not None else "A switch"
+            text = f"{label} didn't take it, so nothing more was sent."
+            if sent_now:
+                names = ", ".join(sent.label for sent in sent_now)
+                partly = f" (with what {label} took before it refused)" if failed in sent_now else ""
+                box = QMessageBox(QMessageBox.Warning, "Send over SSH",
+                                  f"{text}\n\nTake back out what was already sent to {names}{partly}?",
+                                  QMessageBox.Yes | QMessageBox.No, self)
+                if box.exec_() == QMessageBox.Yes:
+                    self.undo_over_ssh(list(reversed(sent_now)))
+                    return
+            set_hint(self.status_label, text + " See the Status column (and View Log for what the switch said).",
+                     "error")
+        elif thread.stopping:
+            set_hint(self.status_label, f"Stopped after {count}.", "warning")
+        elif self.plan is not None and self.plan is self.push_plan:
+            set_hint(self.status_label, f"Sent to {count} over SSH. Checking it took...", "success")
+            self.start_verify()
+        else:
+            set_hint(self.status_label, f"Sent to {count} over SSH. Plan again to check it.", "success")
 
     # ----------------------------------------------------------------- Checking it worked
 
@@ -1025,7 +1325,10 @@ class VlanPathDialog(QDialog):
 
     def show_highlights(self):
         plan = self.plan
-        if plan is None or self.page.network_map is not self.network_map:
+        if plan is None:
+            self.show_route_preview()
+            return
+        if self.page.network_map is not self.network_map:
             return
         if self.page.vlan_shown != (plan.vlan, None):
             self.page.highlight_vlan(plan.vlan, None)
@@ -1074,7 +1377,40 @@ class VlanPathDialog(QDialog):
             else:
                 put(hop, PATH_PLANNED, "on the route: " + (note(hop) or "the switches need the VLAN"))
         devices = set(plan.route) | {step.device for step in plan.changes}
-        return {"vlan": plan.vlan, "devices": devices, "links": links}
+        return {"vlan": plan.vlan, "devices": devices, "links": links, "order": list(plan.route)}
+
+    def show_route_preview(self):
+        """Before Plan, the route set by hand on the map as it's being set: its switches ringed and numbered in
+        order, the link chosen between each two (or every link that could be, until one is chosen), a red line where
+        two have no link between them, and while picking, a line from the last one picked to the mouse."""
+        view = self.page.view
+        if self.network_map is None or self.page.network_map is not self.network_map:
+            return
+        if not self.by_hand() or not self.route:
+            view.set_highlights({})
+            view.set_path_overlay(None)
+            view.set_pick_anchor(None)
+            return
+        graph = self.graph()
+        links, gaps = {}, []
+        for index, (one, other) in enumerate(zip(self.route, self.route[1:])):
+            step = f"{index + 1} to {index + 2}, {graph.label(one)} to {graph.label(other)}"
+            between = graph.between(one, other)
+            if not between:
+                gaps.append((one, other, f"No link between {graph.label(one)} and {graph.label(other)} ({step}): "
+                                         "Fill In Between adds the switches between them."))
+                continue
+            wanted = self.hop_choices.get(frozenset([one, other]))
+            chosen = [hop for hop in between if hop.key == wanted] or (between if len(between) == 1 else [])
+            for hop in between:
+                entry = (PATH_ROUTE, f"the route set by hand ({step})") if hop in chosen else \
+                    (PATH_OFFERED, f"one of {len(between)} links for {step}: choose one in the route")
+                for link in hop.links:
+                    links[link.key] = entry
+        view.set_highlights({key: COLORS["accent"] for key in self.route})
+        view.set_path_overlay({"vlan": self.vlan(), "devices": set(self.route), "links": links,
+                               "order": list(self.route), "gaps": gaps})
+        view.set_pick_anchor(self.route[-1] if self.picking else None)
 
     def on_map_shown(self):
         if self.page.network_map is not self.network_map:

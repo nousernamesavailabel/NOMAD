@@ -6,8 +6,8 @@ from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QGridLayout, QLabel, QScr
 from ..netmap.model import AP, FIREWALL, ROUTER, SERVER, SHARED_PORT_HOSTS, SWITCH, UNKNOWN
 from ..netmap.monitor import DOWN, UNKNOWN as NOT_CHECKED, UP
 from ..netmap.vlans import ACCESS, NATIVE, ONE_END, TAGGED
-from .netmap_view import KIND_COLORS, KIND_TAGS, PATH_BLOCKED, PATH_CARRIES, PATH_CHOSEN, PATH_OFFERED, PATH_PLANNED, \
-    PATH_STYLES, STATUS_COLORS, VLAN_LINK_COLORS
+from .netmap_view import KIND_COLORS, KIND_TAGS, PATH_BLOCKED, PATH_CARRIES, PATH_CHOSEN, PATH_GAP, PATH_OFFERED, \
+    PATH_PLANNED, PATH_ROUTE, PATH_STYLES, STATUS_COLORS, VLAN_LINK_COLORS
 from .theme import COLORS
 
 SWATCH_WIDTH, SWATCH_HEIGHT = 96, 40
@@ -277,12 +277,19 @@ SECTIONS = [
         (device(mark="#c792ea"), "Color By: one color per model, software version, site... (gray: not known or "
                                  "one of the rarer ones)"),
     ]),
-    ("Carry VLAN (while its window is open): the route planned", [
+    ("Carry VLAN (while its window is open): the route set by hand, and the route planned", [
+        (line(*PATH_STYLES[PATH_ROUTE]), "Green dash-dot: a link of the route set by hand (before Plan)"),
+        (line(*PATH_GAP), "Red dashed, \"no link\": switches next to each other on the route set by hand with no "
+                          "link between them (Fill In Between adds the switches between)"),
+        (device(ring=COLORS["accent"]), "Green ring, numbered at its corner: a switch of the route, in order (1 is "
+                                        "A); a dashed line follows the mouse from the last one picked"),
         (line(*PATH_STYLES[PATH_PLANNED]), "Thick green dashed: a link of the route the VLAN will be added to"),
         (line(*PATH_STYLES[PATH_CARRIES]), "Thick green: a link of the route that carries it (already, or once "
                                            "sent and verified)"),
         (line(*PATH_STYLES[PATH_CHOSEN]), "Thick amber dashed: a redundant link ticked to carry it too"),
-        (line(*PATH_STYLES[PATH_OFFERED]), "Amber dotted: a redundant link not ticked (left as it is)"),
+        (line(*PATH_STYLES[PATH_OFFERED]), "Amber dotted: a redundant link not ticked (left as it is), or one of "
+                                           "several links between two switches of the route set by hand, until one "
+                                           "is chosen"),
         (line(*PATH_STYLES[PATH_BLOCKED]), "Red dashed: a link of the route that can't carry it (an access port in "
                                            "another VLAN)"),
         (device(ring=COLORS["warning"]), "Amber ring: a switch the plan changes"),

@@ -4,6 +4,12 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.28.0] - 2026-10-12
+
+- **New:** ACLs reads, builds and edits ACLs on Cisco IOS / IOS-XE devices (IPv4 and IPv6, object groups, time ranges), finds rules that never match, tests packets against them, and checks a change won't lock you out. Changes go rule by rule with a revert timer, confirmed only once NOMAD can still log in. A library keeps ACLs to put on other devices.
+- **New:** Carry VLAN sends over SSH too (Send All over SSH, Undo Sent over SSH), and numbers the route you pick on the map.
+- **New:** in the Packet Capture viewer, right-click a packet > Add to Filter (or Exclude from Filter, Show Only This).
+
 ## [1.27.1] - 2026-10-11
 
 - **Changed:** Port Mirroring works with routers as well as switches, and says so; a router's ports can be mirrored from the map too. Copies still go to a switch port (or an address).

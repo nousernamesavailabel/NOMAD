@@ -373,6 +373,7 @@ def test_the_page_shows_a_capture_live_and_stops_with_it(app, tmp_path, monkeypa
         assert page.live_check.isChecked()
         page.start()
         assert made == [True] and page.viewer.live is not None
+        assert page.settings_panel.isHidden()  # Folded away while capturing
         assert settle(page.viewer, lambda: page.viewer.model.rowCount() == 35)
         page.stop(save=False)
         assert page.viewer.live is None and page.viewer.model.rowCount() == 35

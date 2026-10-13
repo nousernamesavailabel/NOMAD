@@ -4,9 +4,9 @@ import logging
 import os
 import subprocess
 
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, \
-    QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget
+    QMessageBox, QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget
 
 from .. import erspan
 from ..capture import DEFAULT_FILE_SIZE_MB, PROTOCOLS, Capture, default_output_path, validate_filter
@@ -43,13 +43,16 @@ class CaptureTab(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        self.settings_panel = QWidget()  # Folds away (the Settings button) to give the packets the room
+        panel = QVBoxLayout(self.settings_panel)
+        panel.setContentsMargins(0, 0, 0, 0)
         intro = QLabel("Capture network traffic on every adapter with Windows' built-in packet monitor (pktmon), "
                        "watch it below as it comes, save it as a pcapng file, and look through it: filters, "
                        "conversations, problems found, streams. Needs administrator rights. A filter keeps the "
                        "capture small; leave the fields blank to capture everything. Starting a capture clears any "
                        "packet filters you've set in pktmon yourself.")
         intro.setWordWrap(True)
-        layout.addWidget(intro)
+        panel.addWidget(intro)
 
         self.address_input = QLineEdit()
         self.address_input.setPlaceholderText("Optional: an IP address or subnet, such as 10.0.0.5 or 10.0.0.0/24")
@@ -139,23 +142,31 @@ class CaptureTab(QWidget):
         form.addRow("Options:", options_row)
         form.addRow("Mirrored to this PC:", erspan_row)
         form.addRow("Save to:", output_row)
-        layout.addLayout(form)
+        panel.addLayout(form)
+        layout.addWidget(self.settings_panel)
 
         buttons = QHBoxLayout()
         self.start_button = accent_button("Start Capture")
         self.stop_button = QPushButton("Stop and Save")
         self.discard_button = QPushButton("Discard")
         self.discard_button.setToolTip("Stop without saving.")
+        self.settings_button = QToolButton()
+        self.settings_button.setCheckable(True)
+        self.settings_button.setChecked(True)
+        self.settings_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.settings_button.setToolTip("Show or hide what to capture and where to save it. They fold away by "
+                                        "themselves while capturing.")
         self.folder_button = QPushButton("Open Folder")
+        self.status_label = QLabel()  # Beside the buttons, not a row of its own
+        self.status_label.setWordWrap(True)
         for button in (self.start_button, self.stop_button, self.discard_button):
             buttons.addWidget(button)
-        buttons.addStretch()
+        buttons.addSpacing(8)
+        buttons.addWidget(self.status_label, 1)
+        buttons.addWidget(self.settings_button)
         buttons.addWidget(self.folder_button)
         layout.addLayout(buttons)
 
-        self.status_label = QLabel()
-        self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
         self.viewer = CaptureViewer(self.window, self)
         layout.addWidget(self.viewer, 1)
 
@@ -166,10 +177,39 @@ class CaptureTab(QWidget):
         self.folder_button.clicked.connect(self.open_folder)
         for line_edit in (self.address_input, self.port_input, self.output_input):
             line_edit.textChanged.connect(lambda _, line_edit=line_edit: set_invalid(line_edit, False))
+        self.settings_button.toggled.connect(self.show_settings)
+        for line_edit in (self.address_input, self.port_input):
+            line_edit.textChanged.connect(self.describe_settings)
+        self.protocol_combo.currentTextChanged.connect(self.describe_settings)
+        for check in (self.unwrap_check, self.span_check):
+            check.toggled.connect(self.describe_settings)
+        self.show_settings(True)
+
+    def show_settings(self, shown):
+        self.settings_panel.setVisible(shown)
+        self.settings_button.blockSignals(True)
+        self.settings_button.setChecked(shown)
+        self.settings_button.blockSignals(False)
+        self.settings_button.setArrowType(Qt.DownArrow if shown else Qt.RightArrow)
+        self.describe_settings()
+
+    def describe_settings(self, *_):
+        """The Settings button says what a capture would take, so it can be seen with the settings folded away."""
+        try:
+            what = validate_filter(self.address_input.text(), self.port_input.text(),
+                                   self.protocol_combo.currentText()).describe()
+        except ValueError:
+            what = "check the filter"
+        if self.span_check.isChecked():
+            what += ", SPAN copies"
+        if self.unwrap_check.isChecked():
+            what += ", ERSPAN"
+        self.settings_button.setText(f"Settings: {what}")
 
     # ----------------------------------------------------------------- Page interface
 
     def focus_find(self):
+        self.show_settings(True)
         self.address_input.setFocus()
         self.address_input.selectAll()
 
@@ -187,6 +227,7 @@ class CaptureTab(QWidget):
         settings.setValue("capture/span_adapter", self.span_adapter_combo.currentData() or self.span_adapter_name)
         settings.setValue("capture/folder", os.path.dirname(self.output_input.text()))
         settings.setValue("capture/viewer_splitter", self.viewer.packet_splitter.saveState())
+        settings.setValue("capture/settings_shown", self.settings_button.isChecked())
 
     def restore_settings(self, settings):
         self.address_input.setText(settings.value("capture/address", "", str))
@@ -205,6 +246,7 @@ class CaptureTab(QWidget):
         state = settings.value("capture/viewer_splitter")
         if state is not None:
             self.viewer.packet_splitter.restoreState(state)
+        self.show_settings(settings.value("capture/settings_shown", True, bool))
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -259,12 +301,14 @@ class CaptureTab(QWidget):
 
     def capture_host(self, address):
         """Fill in a host to capture (from other pages)."""
+        self.show_settings(True)
         self.address_input.setText(address)
         self.port_input.clear()
         self.protocol_combo.setCurrentText("Any")
 
     def capture_span(self, adapter_name):
         """Fill in a capture of what a switch mirrors (SPAN or RSPAN) to this PC's adapter (from Port Mirroring)."""
+        self.show_settings(True)
         self.address_input.clear()
         self.port_input.clear()
         self.protocol_combo.setCurrentText("Any")
@@ -340,6 +384,7 @@ class CaptureTab(QWidget):
         def started(_):
             self.busy = False
             self.capture = capture
+            self.show_settings(False)  # They can't be changed while capturing: the room goes to the packets
             self.timer.start(UPDATE_MILLISECONDS)
             self.window.set_busy("capture", "Capturing packets")
             log.info("Capturing %s", capture_filter.describe())

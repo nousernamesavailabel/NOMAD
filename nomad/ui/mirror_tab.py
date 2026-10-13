@@ -13,14 +13,12 @@ import datetime
 import functools
 import logging
 import re
-import socket
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, \
-    QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, \
+    QDialogButtonBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, \
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, \
     QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
 
@@ -30,20 +28,15 @@ from ..netmap.mirror import BOTH, DIRECTION_NAMES, DIRECTIONS, ERSPAN, KIND_TITL
 from ..netmap.model import ROUTER, SWITCH, port_key, port_sort_key
 from ..netmap.vlans import ERROR, INFO, WARNING, port_info
 from ..oui import format_mac, normalize_mac
-from ..terminal.hostkeys import KnownHosts
-from ..terminal.sessions import AUTH_PASSWORD, SSH, Session
-from .common import StoppableThread, read_only_table, release_thread, set_hint
-from .credential_dialogs import CredentialPicker
-from .prompts import SecretDialog
+from .common import StoppableThread, local_address_toward, read_only_table, release_thread, set_hint
 from .session_send import SessionSender
+from .ssh_push import Job, LoginRow, PushThread
 from .theme import COLORS, accent_button, monospace_font
-from .vault_dialog import ensure_unlocked
 
 log = logging.getLogger(__name__)
 
 READ_WORKERS = 4
 CHECK_EVERY = 30000  # ms between looks for mirrors past their time that NOMAD has to take away
-ASK_LOGIN = "A user name and password asked for"
 DEFAULT_MINUTES = 60
 SEVERITY_COLORS = {ERROR: "error", WARNING: "warning", INFO: "muted"}
 KIND_CHOICES = [("Auto", ""), ("SPAN (same device)", SPAN), ("RSPAN (over switched links)", RSPAN),
@@ -52,16 +45,6 @@ STEP_COLUMNS = ["Device", "Role", "Session", "Changes", "Status", ""]
 RECORD_COLUMNS = ["Name", "Kind", "What", "Devices", "Set Up", "Removes Itself", "State"]
 SESSION_COLUMNS = ["Device", "Session", "Type", "Details", "Made By"]
 SETUP, UNDO = "setup", "undo"
-
-
-def local_address_toward(address):
-    """This PC's address that reaches address (no packet is sent), or ""."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-            probe.connect((address, 9))
-            return probe.getsockname()[0]
-    except OSError:
-        return ""
 
 
 def is_wireless(adapter):
@@ -84,16 +67,6 @@ def when_text(iso):
         return iso
     today = datetime.date.today()
     return moment.strftime("%H:%M") if moment.date() == today else moment.strftime("%Y-%m-%d %H:%M")
-
-
-@dataclass
-class Job:
-    """One switch's lines to send, for PushThread."""
-    index: int  # The plan's step, or the record's
-    address: str
-    names: list
-    text: str
-    applet: str = ""
 
 
 class ReadThread(StoppableThread):
@@ -121,40 +94,6 @@ class ReadThread(StoppableThread):
                     self.state_read.emit(key, state)
             with ThreadPoolExecutor(max_workers=max(1, min(READ_WORKERS, len(self.targets)))) as executor:
                 list(executor.map(read, self.targets))
-        finally:
-            pusher.close()
-
-
-class PushThread(StoppableThread):
-    """Sends each switch its lines in turn: setting up stops at the first switch that refuses; taking away carries
-    on."""
-    step_started = pyqtSignal(int)
-    step_done = pyqtSignal(int, object)  # Job index, configpush.Outcome
-
-    def __init__(self, jobs, make_pusher, setting_up, parent=None):
-        super().__init__(parent)
-        self.jobs, self.make_pusher, self.setting_up = jobs, make_pusher, setting_up
-        self.failed = False
-
-    def run(self):
-        pusher = self.make_pusher(lambda: self.stopping)
-        try:
-            for job in self.jobs:
-                if self.stopping:
-                    break
-                self.step_started.emit(job.index)
-                try:
-                    if self.setting_up:
-                        outcome = pusher.set_up(job.address, job.text, job.applet, job.names)
-                    else:
-                        outcome = pusher.take_away(job.address, job.text, job.names)
-                except Exception as error:
-                    log.exception("Sending to %s failed", job.address)
-                    outcome = configpush.Outcome(problem=str(error))
-                self.step_done.emit(job.index, outcome)
-                if self.setting_up and not outcome.ok:
-                    self.failed = True
-                    break
         finally:
             pusher.close()
 
@@ -248,7 +187,6 @@ class MirrorTab(QWidget):
         self.sessions = getattr(window, "session_store", None)  # Saved sessions and credentials, for SSH
         self.mirrors = store if store is not None else mirror.MirrorStore.default()
         self.shell_factory = configpush.ConfigShell  # Tests swap in fake switches
-        self.ssh_user = ""
         self.request = None
         self.plan = None
         self.plan_tag = ""
@@ -461,24 +399,11 @@ class MirrorTab(QWidget):
         self.read_check.setToolTip("Plan logs in over SSH and reads each device's mirror sessions (show monitor "
                                    "session all), so a free session number is used and a busy port isn't")
         login.addWidget(self.read_check)
-        login.addWidget(QLabel("Log in with:"))
-        if self.sessions is not None:
-            default = self.sessions.credentials.default
-            self.login_picker = CredentialPicker(self, self.sessions, SSH, default.id if default else "", ASK_LOGIN)
-            self.login_picker.combo.setToolTip("For devices without a saved SSH session: a saved credential "
-                                               "(Manage... to add one), or a user name and password asked for once.")
-            login.addWidget(self.login_picker, 2)
-        else:
-            self.login_picker = None
-        login.addWidget(QLabel("Enable password:"))
-        self.enable_input = QLineEdit()
-        self.enable_input.setEchoMode(QLineEdit.Password)
-        self.enable_input.setPlaceholderText("If they log in at >")
-        self.enable_input.setToolTip("For devices that log in at the > prompt. Kept only while NOMAD is open.")
-        login.addWidget(self.enable_input, 1)
-        self.trust_check = QCheckBox("Trust new SSH keys")
-        self.trust_check.setChecked(True)
-        login.addWidget(self.trust_check)
+        self.login_row = LoginRow(self, self.sessions, "Port Mirroring")
+        self.login_picker = self.login_row.picker
+        self.enable_input = self.login_row.enable_input
+        self.trust_check = self.login_row.trust_check
+        login.addWidget(self.login_row, 1)
         layout.addLayout(login)
 
         buttons = QHBoxLayout()
@@ -606,21 +531,15 @@ class MirrorTab(QWidget):
         settings.setValue("mirror/remove", self.remove_check.isChecked())
         settings.setValue("mirror/minutes", self.minutes_input.value())
         settings.setValue("mirror/read", self.read_check.isChecked())
-        settings.setValue("mirror/trust", self.trust_check.isChecked())
-        settings.setValue("mirror/user", self.ssh_user)
         settings.setValue("mirror/more", self.more_button.isChecked())
-        if self.login_picker is not None:
-            settings.setValue("mirror/login", self.login_picker.credential_id())
+        self.login_row.save_settings(settings, "mirror")
 
     def restore_settings(self, settings):
         self.remove_check.setChecked(settings.value("mirror/remove", True, bool))
         self.minutes_input.setValue(settings.value("mirror/minutes", DEFAULT_MINUTES, int))
         self.read_check.setChecked(settings.value("mirror/read", True, bool))
-        self.trust_check.setChecked(settings.value("mirror/trust", True, bool))
-        self.ssh_user = settings.value("mirror/user", "", str)
         self.more_button.setChecked(settings.value("mirror/more", False, bool))
-        if self.login_picker is not None and settings.contains("mirror/login"):
-            self.login_picker.fill(settings.value("mirror/login", "", str))
+        self.login_row.restore_settings(settings, "mirror")
 
     def shutdown(self):
         self.timer.stop()
@@ -1149,81 +1068,16 @@ class MirrorTab(QWidget):
 
     def logins(self):
         """(macssh.SshLogins, enable secret) for the switches, asking what's needed now; None if cancelled."""
-        from ..netmap import macssh
-        store = self.sessions
-        if store is None:
-            set_hint(self.status_label, "Saved sessions aren't available, so NOMAD can't log in to the devices.",
-                     "error")
-            return None
-        sessions = [store.credentials.apply(session.copy()) for session in store.sessions if session.protocol == SSH]
-        credential = self.login_picker.credential() if self.login_picker is not None else None
-        password = None
-        if credential is None:
-            asked = self.ask_login()
-            if asked is None:
-                return None
-            username, password = asked
-            fallback, label = Session("", username=username), f"user {username} (typed)"
-        else:
-            fallback = store.credentials.apply(Session("", credential_id=credential.id))
-            label = f"credential {credential.name}"
-            if credential.auth == AUTH_PASSWORD and not credential.saved_password:
-                dialog = SecretDialog(self, "Password", f"Password for {credential.username} (the credential "
-                                                       f"{credential.name}):", False)
-                if dialog.exec_() != QDialog.Accepted:
-                    return None
-                password = dialog.field.text()
-        secrets = any(item.saved_password or item.saved_passphrase for item in sessions + [fallback])
-        if secrets and not ensure_unlocked(self, store, "Port Mirroring logs in to devices with saved passwords."):
-            return None
-        return macssh.SshLogins(sessions, fallback, password, label), self.enable_input.text()
-
-    def ask_login(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Log In to Devices")
-        layout = QVBoxLayout(dialog)
-        label = QLabel("For devices without a saved SSH session (kept only while NOMAD is open):")
-        label.setWordWrap(True)
-        layout.addWidget(label)
-        form = QFormLayout()
-        username = QLineEdit(self.ssh_user)
-        password = QLineEdit()
-        password.setEchoMode(QLineEdit.Password)
-        form.addRow("User name:", username)
-        form.addRow("Password:", password)
-        layout.addLayout(form)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        (password if self.ssh_user else username).setFocus()
-        if dialog.exec_() != QDialog.Accepted or not username.text().strip():
-            return None
-        self.ssh_user = username.text().strip()
-        return self.ssh_user, password.text()
+        return self.login_row.logins(self.status_label)
 
     def quiet_logins(self):
         """Logins that need nothing typed (for NOMAD's own timer), or None."""
-        from ..netmap import macssh
         if self.saved_logins is not None:
             return self.saved_logins
-        store = self.sessions
-        if store is None or (store.vault.enabled and not store.vault.unlocked):
-            return None
-        sessions = [store.credentials.apply(session.copy()) for session in store.sessions if session.protocol == SSH]
-        credential = self.login_picker.credential() if self.login_picker is not None else None
-        fallback = store.credentials.apply(Session("", credential_id=credential.id)) if credential is not None and \
-            credential.saved_password else None
-        return macssh.SshLogins(sessions, fallback, None, "saved"), self.enable_input.text()
+        return self.login_row.quiet_logins()
 
     def pusher_maker(self, logins):
-        login, secret = logins
-        vault = self.sessions.vault if self.sessions is not None else None
-        trust, factory = self.trust_check.isChecked(), self.shell_factory
-
-        def make(should_stop):
-            return configpush.Pusher(login, vault, KnownHosts(), trust, secret, should_stop, shell_factory=factory)
-        return make
+        return self.login_row.pusher_maker(logins, self.shell_factory)
 
     # ----------------------------------------------------------------- Reading the switches
 

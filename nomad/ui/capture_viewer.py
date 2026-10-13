@@ -20,13 +20,14 @@ from ..capture import find_wireshark
 from ..packets import capfile, dfilter, expert, stats, streams
 from ..packets.live import LiveCapture
 from ..packets.reader import CaptureError
-from .common import ColumnFitter, SortableTableItem, StoppableThread, add_action, read_only_table, release_thread, \
-    set_hint
+from .common import ColumnFitter, OneLineLabel, SortableTableItem, StoppableThread, add_action, add_submenu, \
+    read_only_table, release_thread, set_hint
 from .theme import COLORS, monospace_font
 
 log = logging.getLogger(__name__)
 
-COLUMNS = ["No.", "Time", "Source", "Destination", "Protocol", "Length", "Info"]
+COLUMNS = ["No.", "Time", "Source", "Src Port", "Destination", "Dst Port", "Protocol", "Length", "Info"]
+NUMBER_COLUMNS = (0, 1, 3, 5, 7)  # Right-aligned
 ROW_COLORS = {  # Packet list row colors (background, text), as Wireshark's coloring rules but for a dark theme
     "bad": ("#4a1f24", "#ffc2c2"), "reset": ("#3f1a1a", "#ff9e9e"), "syn": ("#262d35", "#c9d1d9"),
     "error": ("#3d3115", "#ffd98a"), "icmp": ("#33213b", "#e9c6ff"), "arp": ("#2a2547", "#d6ccff"),
@@ -45,6 +46,9 @@ LIVE_TICK_SECONDS = 0.25  # How often a live capture looks for new packets when 
 LIVE_COUNT_SECONDS = 1.0
 LIVE_SUM_MILLISECONDS = 3000  # How often a live capture's summaries and problems are worked out again
 NOT_ASKED = object()
+COLUMN_FILTERS = {2: "source", 3: "source port", 4: "destination", 5: "destination port", 6: "protocol",
+                  8: "destination port"}  # Offered first (in bold)
+FILTER_WAYS = [("Add to Filter", "and"), ("Add to Filter with Or", "or"), ("Exclude from Filter", "not")]
 
 
 class LoadThread(StoppableThread):
@@ -265,33 +269,59 @@ class PacketModel(QAbstractTableModel):
             if column == 2:
                 return packet.src
             if column == 3:
-                return packet.dst
+                return "" if packet.sport is None else str(packet.sport)
             if column == 4:
-                return packet.protocol
+                return packet.dst
             if column == 5:
+                return "" if packet.dport is None else str(packet.dport)
+            if column == 6:
+                return packet.protocol
+            if column == 7:
                 return str(packet.wire_length)
             return packet.info
         if role == Qt.BackgroundRole or role == Qt.ForegroundRole:
             brushes = self.brushes.get(packet.color)
             return None if brushes is None else brushes[0 if role == Qt.BackgroundRole else 1]
-        if role == Qt.TextAlignmentRole and column in (0, 1, 5):
+        if role == Qt.TextAlignmentRole and column in NUMBER_COLUMNS:
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.ToolTipRole:
             if column == 1:
                 return packet.clock()
-            if column == 6:
+            if column == 8:
                 return packet.info
         return None
 
     def sort(self, column, order=Qt.AscendingOrder):
         keys = [lambda packet: packet.number, lambda packet: packet.time, lambda packet: sort_address(packet.src),
-                lambda packet: sort_address(packet.dst), lambda packet: packet.protocol.lower(),
+                lambda packet: sort_port(packet.sport), lambda packet: sort_address(packet.dst),
+                lambda packet: sort_port(packet.dport), lambda packet: packet.protocol.lower(),
                 lambda packet: packet.wire_length, lambda packet: packet.info.lower()]
         key = keys[column]
         packets = self.packets
         self.layoutAboutToBeChanged.emit()
         self.rows.sort(key=lambda index: key(packets[index]), reverse=order == Qt.DescendingOrder)
         self.layoutChanged.emit()
+
+
+def detail_filter(item):
+    """The filter for a details line: its own, else the nearest line above it that has one (its protocol's)."""
+    while item is not None:
+        text = item.data(0, Qt.UserRole + 1)
+        if text and makes_sense(text):
+            return text
+        item = item.parent()
+    return ""
+
+
+def makes_sense(text):
+    try:
+        return dfilter.compile_filter(text) is not None
+    except dfilter.FilterError:
+        return False
+
+
+def sort_port(port):
+    return -1 if port is None else port
 
 
 def sort_address(text):
@@ -574,6 +604,19 @@ class FilterEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+class TabCorner(QWidget):
+    """What sits beside a tab widget's tabs: as wide as the room the tabs leave (a tab widget gives its corner
+    widget the width it asks for)."""
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        tabs = self.parentWidget()
+        if isinstance(tabs, QTabWidget):
+            room = tabs.width() - tabs.tabBar().sizeHint().width() - 8
+            hint.setWidth(max(room, self.minimumSizeHint().width()))
+        return hint
+
+
 class CaptureViewer(QWidget):
     """The viewer: open a capture with open(path)."""
     filter_applied = pyqtSignal(str)
@@ -630,12 +673,16 @@ class CaptureViewer(QWidget):
         top.addWidget(self.wireshark_button)
         layout.addLayout(top)
 
-        status = QHBoxLayout()
-        self.status_label = QLabel("Packets show here as they're captured, and the whole capture opens here after "
-                                   "Stop and Save. Or open a capture file.")
-        self.status_label.setWordWrap(True)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+        self.corner = TabCorner()  # Beside the tabs, not a row of its own, so the packet list gets the room
+        status = QHBoxLayout(self.corner)
+        status.setContentsMargins(12, 0, 4, 0)
+        self.status_label = OneLineLabel("Packets show here as they're captured, and the whole capture opens here "
+                                         "after Stop and Save. Or open a capture file.")
+        self.status_label.set_one_line(True)
         self.progress = QProgressBar()
-        self.progress.setMaximumWidth(220)
+        self.progress.setMaximumWidth(160)
         self.progress.setTextVisible(False)
         self.progress.hide()
         self.duplicates_check = QCheckBox("Hide duplicates")
@@ -650,10 +697,7 @@ class CaptureViewer(QWidget):
         status.addWidget(self.progress)
         status.addWidget(self.follow_check)
         status.addWidget(self.duplicates_check)
-        layout.addLayout(status)
-
-        self.tabs = QTabWidget()
-        layout.addWidget(self.tabs, 1)
+        self.tabs.setCornerWidget(self.corner, Qt.TopRightCorner)
 
         # Packets
         self.model = PacketModel(self)
@@ -670,7 +714,7 @@ class CaptureViewer(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(True)
-        for column, width in enumerate((70, 100, 145, 145, 90, 75)):
+        for column, width in enumerate((70, 100, 145, 85, 145, 85, 90, 75)):
             self.table.setColumnWidth(column, width)
         self.details = QTreeWidget()
         self.details.setHeaderHidden(True)
@@ -684,7 +728,7 @@ class CaptureViewer(QWidget):
         self.packet_splitter = QSplitter(Qt.Vertical)
         self.packet_splitter.addWidget(self.table)
         self.packet_splitter.addWidget(lower)
-        self.packet_splitter.setSizes([420, 260])
+        self.packet_splitter.setSizes([540, 220])
         self.tabs.addTab(self.packet_splitter, "Packets")
 
         # Summaries
@@ -1243,6 +1287,7 @@ class CaptureViewer(QWidget):
     def tree_item(self, node):
         item = QTreeWidgetItem([node.text])
         item.setData(0, Qt.UserRole, (node.start, node.end))
+        item.setData(0, Qt.UserRole + 1, node.field)
         item.setToolTip(0, node.text)
         for child in node.children:
             item.addChild(self.tree_item(child))
@@ -1280,6 +1325,8 @@ class CaptureViewer(QWidget):
             add_action(menu, f"Show Only {packet.dst}", self.filter_destination)
         if packet.protocol:
             add_action(menu, f"Hide {packet.protocol}", self.filter_out_protocol)
+        filters, clicked = self.row_filters(packet, index.column())
+        self.add_filter_menus(menu, filters, clicked)
         menu.addSeparator()
         add_action(menu, "Copy Summary", self.copy_summary)
         add_action(menu, "Copy Details", self.copy_details)
@@ -1289,6 +1336,15 @@ class CaptureViewer(QWidget):
         if self.details.topLevelItemCount() == 0:
             return
         menu = QMenu(self)
+        item = self.details.itemAt(position)
+        text = detail_filter(item)
+        if text:
+            self.details.setCurrentItem(item)
+            add_action(menu, "Show Only This", self.filter_from_menu).setData(("only", text))
+            for title, how in FILTER_WAYS:
+                add_action(menu, title, self.filter_from_menu).setData((how, text))
+            add_action(menu, text.replace("&", "&&")).setEnabled(False)  # Says what they'd add
+            menu.addSeparator()
         add_action(menu, "Expand All", self.details.expandAll)
         add_action(menu, "Collapse All", self.details.collapseAll)
         add_action(menu, "Copy Details", self.copy_details)
@@ -1342,15 +1398,49 @@ class CaptureViewer(QWidget):
         if packet is None or not packet.chain:
             return
         name = packet.chain[-1] if packet.chain[-1] != "data" or len(packet.chain) < 2 else packet.chain[-2]
-        current = self.filter_input.text().strip()
-        self.apply_filter_text(f"({current}) && !{name}" if current else f"!{name}")
+        self.apply_filter_text(dfilter.combine(self.filter_input.text(), name, "not"))
+
+    def row_filters(self, packet, column):
+        """Filters for what a packet list row shows, the one for the column right-clicked first, and whether there
+        was one for it."""
+        try:
+            found = dfilter.packet_filters(packet.dissect(), packet)
+        except Exception:  # A menu mustn't fail over a packet that won't decode
+            log.exception("Working out filters for packet %s failed", packet.number)
+            return [], False
+        wanted = COLUMN_FILTERS.get(column)
+        found = [pair for pair in found if makes_sense(pair[1])]
+        found.sort(key=lambda pair: pair[0] != wanted)
+        return [text for _, text in found], bool(found) and found[0][0] == wanted
+
+    def add_filter_menus(self, menu, filters, clicked=False):
+        """Add to Filter, ...with Or and Exclude from Filter submenus, each offering these filters (clicked: the
+        first is for the column right-clicked, shown in bold)."""
+        if not filters:
+            return
+        menu.addSeparator()
+        for title, how in FILTER_WAYS:
+            submenu = add_submenu(menu, title)
+            for text in filters:
+                action = add_action(submenu, text.replace("&", "&&"), self.filter_from_menu)
+                action.setData((how, text))
+                if clicked and text is filters[0]:
+                    submenu.setDefaultAction(action)
+
+    def filter_from_menu(self):
+        """An Add to Filter (or Show Only This) entry: its data is (how, filter)."""
+        action = self.sender()
+        how, text = (action.data() if action is not None else None) or (None, "")
+        if text:
+            self.apply_filter_text(text if how == "only" else dfilter.combine(self.filter_input.text(), text, how))
 
     def copy_summary(self):
         packet = self.menu_packet or self.selected_packet()
         if packet is not None:
-            QApplication.clipboard().setText("\t".join([str(packet.number), f"{packet.time:.6f}", packet.src,
-                                                        packet.dst, packet.protocol, str(packet.wire_length),
-                                                        packet.info]))
+            ports = ["" if port is None else str(port) for port in (packet.sport, packet.dport)]
+            QApplication.clipboard().setText("\t".join([str(packet.number), f"{packet.time:.6f}", packet.src, ports[0],
+                                                        packet.dst, ports[1], packet.protocol,
+                                                        str(packet.wire_length), packet.info]))
 
     def copy_details(self):
         lines = []

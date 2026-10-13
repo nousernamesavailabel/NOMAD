@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest  # noqa: E402
 from capture_samples import erspan_wrap, frame_ip, sample_packets, udp, write_pcapng  # noqa: E402
 from PyQt5.QtCore import Qt  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
+from PyQt5.QtWidgets import QAction, QApplication, QMenu, QWidget  # noqa: E402
 
 from nomad.netmap import mirror  # noqa: E402
 from nomad.ui import capture_tab, capture_viewer  # noqa: E402
@@ -98,10 +98,102 @@ def test_open_filter_and_look_at_a_packet(viewer):
     assert viewer.model.rowCount() == 35
 
 
+def menu_action(menu, *path):
+    """The entry at path (submenu titles, then the entry's text) in menu."""
+    for text in path:
+        action = next(action for action in menu.actions() if action.text() == text)
+        menu = action.menu() or menu
+    return action
+
+
+def test_the_list_shows_ports_in_their_own_columns(viewer):
+    viewer.open(viewer.sample_path)
+    wait(viewer)
+    model = viewer.model
+    assert [model.headerData(column, Qt.Horizontal) for column in range(model.columnCount())] == [
+        "No.", "Time", "Source", "Src Port", "Destination", "Dst Port", "Protocol", "Length", "Info"]
+
+    def row(number):
+        index = model.row_of(number)
+        return [model.data(model.index(index, column)) for column in range(model.columnCount())]
+
+    http = model.packet(model.row_of(13))
+    assert row(13)[2:7] == ["10.0.10.9", str(http.sport), "10.0.20.80", "80", "HTTP"]
+    assert model.data(model.index(model.row_of(13), 5), Qt.TextAlignmentRole) == int(Qt.AlignRight | Qt.AlignVCenter)
+    arp = next(packet for packet in viewer.view.packets if packet.protocol == "ARP")
+    assert row(arp.number)[3] == row(arp.number)[5] == ""  # No ports
+
+    model.sort(5, Qt.AscendingOrder)  # By destination port: the ones without come first
+    ports = [model.packet(index).dport for index in range(model.rowCount())]
+    assert ports[0] is None and ports[-1] == max(port for port in ports if port is not None)
+    model.sort(0, Qt.AscendingOrder)
+
+    viewer.menu_packet = http
+    viewer.copy_summary()
+    assert QApplication.clipboard().text().split("	")[2:7] == ["10.0.10.9", str(http.sport), "10.0.20.80", "80",
+                                                                  "HTTP"]
+    viewer.menu_packet = None
+
+
+def test_right_click_adds_to_the_filter(viewer):
+    viewer.open(viewer.sample_path)
+    wait(viewer)
+    viewer.apply_filter_text("tcp")
+    wait(viewer)
+    packet = viewer.model.packet(viewer.model.row_of(13))  # The HTTP request
+    filters, clicked = viewer.row_filters(packet, 4)  # Right-clicked its destination
+    assert filters[0] == "ip.addr == 10.0.20.80" and clicked
+    assert "tcp.port == 80" in filters and "http" in filters
+    assert viewer.row_filters(packet, 8)[0][0] == "tcp.port == 80"  # Info: the port it's to
+    assert viewer.row_filters(packet, 5) == (viewer.row_filters(packet, 8)[0], True)  # Its destination port
+    assert viewer.row_filters(packet, 3)[0][0] == f"tcp.port == {packet.sport}"  # Its source port
+    assert viewer.row_filters(packet, 0)[1] is False  # No.: nothing in particular
+
+    menu = QMenu(viewer)
+    viewer.add_filter_menus(menu, filters, clicked)
+    assert [action.text() for action in menu.actions() if action.menu()] == [
+        "Add to Filter", "Add to Filter with Or", "Exclude from Filter"]
+    assert menu_action(menu, "Add to Filter", "ip.addr == 10.0.20.80").menu() is None
+    assert menu.actions()[-3].menu().defaultAction().text() == "ip.addr == 10.0.20.80"
+    menu_action(menu, "Add to Filter", "ip.addr == 10.0.20.80").trigger()
+    wait(viewer)
+    assert viewer.filter_input.text() == "tcp && ip.addr == 10.0.20.80"
+    assert numbers(viewer) == [10, 11, 12, 13, 14, 15, 16]
+    menu_action(menu, "Exclude from Filter", "http").trigger()
+    wait(viewer)
+    assert viewer.filter_input.text() == "tcp && ip.addr == 10.0.20.80 && !http"
+    assert 13 not in numbers(viewer) and 10 in numbers(viewer)
+    menu_action(menu, "Add to Filter with Or", "tcp.port == 80").trigger()
+    wait(viewer)
+    assert viewer.filter_input.text() == "tcp && ip.addr == 10.0.20.80 && !http || tcp.port == 80"
+    assert 13 in numbers(viewer)
+
+    # A line of the packet's details: its own field, or the protocol it's under
+    viewer.clear_filter()
+    wait(viewer)
+    viewer.table.selectRow(viewer.model.row_of(13))
+    QApplication.processEvents()
+    ip = viewer.details.topLevelItem(2)
+    lines = {ip.child(index).text(0).split(":")[0]: ip.child(index) for index in range(ip.childCount())}
+    assert capture_viewer.detail_filter(lines["Source address"]) == "ip.src == 10.0.10.9"
+    assert capture_viewer.detail_filter(lines["Header checksum"]) == "ip"
+    assert capture_viewer.detail_filter(None) == ""
+    viewer.apply_filter_text("udp")
+    wait(viewer)
+    action = QAction("Add to Filter with Or", viewer)
+    action.setData(("or", "ip.src == 10.0.10.9"))
+    action.triggered.connect(viewer.filter_from_menu)
+    action.trigger()
+    wait(viewer)
+    assert viewer.filter_input.text() == "udp || ip.src == 10.0.10.9"
+    menu.deleteLater()
+    action.deleteLater()
+
+
 def test_sorting_and_filtering_keep_the_packet_looked_at(viewer):
     viewer.open(viewer.sample_path)
     wait(viewer)
-    viewer.table.sortByColumn(5, Qt.DescendingOrder)  # Length
+    viewer.table.sortByColumn(7, Qt.DescendingOrder)  # Length
     lengths = [viewer.model.packet(row).wire_length for row in range(viewer.model.rowCount())]
     assert lengths == sorted(lengths, reverse=True)
     row = viewer.model.row_of(21)
@@ -187,6 +279,27 @@ def test_a_file_that_isnt_a_capture(viewer, tmp_path):
     wait(viewer)
     assert "Couldn't open notes.pcapng: It isn't a pcapng or pcap capture." in viewer.status_label.text()
     assert viewer.model.rowCount() == 0
+
+
+def test_the_page_folds_its_settings_away(app):
+    window = Window()
+    page = capture_tab.CaptureTab(window)
+    assert not page.settings_panel.isHidden() and page.settings_button.text() == "Settings: all traffic"
+    page.show_settings(False)
+    assert page.settings_panel.isHidden() and not page.settings_button.isChecked()
+    page.address_input.setText("10.0.0.5")
+    page.port_input.setText("443")
+    assert page.settings_button.text() == "Settings: to or from 10.0.0.5 port 443"  # Seen while folded away
+    page.port_input.setText("nope")
+    assert page.settings_button.text() == "Settings: check the filter"
+    page.settings_button.click()
+    assert not page.settings_panel.isHidden()
+    page.show_settings(False)
+    page.capture_host("10.0.0.9")  # Filled in from another page: shown, to see what was
+    assert not page.settings_panel.isHidden()
+    page.viewer.shutdown()
+    page.deleteLater()
+    window.deleteLater()
 
 
 def test_the_page_offers_span_copies_on_an_adapter(app, tmp_path, monkeypatch):

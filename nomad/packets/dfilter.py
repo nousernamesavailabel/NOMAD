@@ -285,6 +285,75 @@ def shortcut_for(text):
     return f"{'ipv6' if network.version == 6 else 'ip'}.addr == {text}"
 
 
+def combine(current, expression, how="and"):
+    """The filter current with expression added to it: how is "and" (packets matching both), "or" (either) or "not"
+    (current's, leaving out those matching expression)."""
+    current = (current or "").strip()
+    current = shortcut_for(current) or current
+    if how == "not":
+        expression = f"!{expression}" if is_one_word(expression) else f"!({expression})"
+    elif how == "and" and current and has_or(expression):
+        expression = f"({expression})"
+    if not current:
+        return expression
+    if how == "or":
+        return f"{current} || {expression}"
+    return f"({current}) && {expression}" if has_or(current) else f"{current} && {expression}"
+
+
+def is_one_word(text):
+    match = TOKEN.fullmatch(text)
+    return bool(match) and match.lastgroup == "word"
+
+
+def has_or(text):
+    """Whether text has an or outside any parentheses (so needs them around it to be and-ed with more)."""
+    depth, position = 0, 0
+    while position < len(text):
+        match = TOKEN.match(text, position)
+        if not match or match.end() == position:
+            return text[position:].strip() != ""  # Text the parser won't understand either: bracket it anyway
+        kind, value = match.lastgroup, match.group(match.lastgroup)
+        if value == "(":
+            depth += 1
+        elif value == ")":
+            depth -= 1
+        elif depth == 0 and (value == "||" or (kind == "word" and value.lower() == "or")):
+            return True
+        position = match.end()
+    return False
+
+
+def packet_filters(d, packet=None):
+    """Filters for what a packet list row shows: [(what, filter)], what being "source", "destination" (addresses,
+    either way), "source port", "destination port", "vlan", "protocol" or "stream" (its TCP or UDP conversation).
+    d: the packet's Dissection."""
+    found = []
+    if d.ips:
+        family = "ip" if d.ips[0].version == 4 else "ipv6"
+        found.append(("source", f"{family}.addr == {d.ips[0]}"))
+        if d.ips[1] != d.ips[0]:
+            found.append(("destination", f"{family}.addr == {d.ips[1]}"))
+    elif d.macs:
+        found.append(("source", f"eth.addr == {d.macs[0]}"))
+        if d.macs[1] != d.macs[0]:
+            found.append(("destination", f"eth.addr == {d.macs[1]}"))
+    if d.ports:
+        kind, source, destination = d.ports
+        found.append(("source port", f"{kind}.port == {source}"))
+        if destination != source:
+            found.append(("destination port", f"{kind}.port == {destination}"))
+    vlans = d.get("vlan.id")
+    if vlans:
+        found.append(("vlan", f"vlan.id == {vlans[0]}"))
+    protocols = [name for name in d.protocols if name not in ("data", "_ws.malformed")]
+    if protocols:
+        found.append(("protocol", protocols[-1]))
+    if packet is not None and packet.kind and packet.stream >= 0:
+        found.append(("stream", f"{packet.kind}.stream == {packet.stream}"))
+    return found
+
+
 class Parser:
     def __init__(self, text):
         self.text = text

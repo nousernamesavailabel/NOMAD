@@ -2401,6 +2401,8 @@ class NetworkMapTab(QWidget):
             tools = next((action.menu() for action in menu.actions() if action.menu() is not None
                           and action.text() == "Tools"), menu)
             actions[tools.addAction("Mirror Ports...")] = lambda: self.window.show_mirror(source=key)
+            if hasattr(self.window, "show_acls"):
+                actions[tools.addAction("ACLs...")] = lambda: self.window.show_acls(device=key)
         if self.worker is None:
             actions[menu.addAction("Put at the Top")] = lambda: self.put_at_top(key)
         if self.current_view() is self.view and self.worker is None:
@@ -2633,6 +2635,8 @@ class NetworkMapTab(QWidget):
             actions[menu.addAction("Carry a VLAN Here...")] = lambda: self.carry_vlan(b=key, port=port)
         if device is not None and device.kind in (SWITCH, ROUTER) and key in self.network_map.devices:
             self.add_mirror_actions(menu, actions, key, port, hosts, to_here=device.kind == SWITCH)
+            if hasattr(self.window, "show_acls"):
+                actions[menu.addAction("ACLs on This Port...")] =                     lambda: self.window.show_acls(device=key, port=port)
         if len(hosts) == 1:
             self.add_address_link(menu, actions, hosts[0].ip)
         if actions:

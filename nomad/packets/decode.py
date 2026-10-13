@@ -7,6 +7,7 @@ server name a client asks for), HTTP, SMB2, SNMP, syslog, NTP, TFTP, RADIUS, 802
 HSRP, VRRP, OSPF, EIGRP, IGMP, PIM, BGP, GRE, ERSPAN and VXLAN (whose frames inside are decoded too). Anything else is
 named by its port.
 """
+import re
 import socket
 import struct
 
@@ -17,6 +18,7 @@ RAW_IP_TYPES = {12, 14, 101, 228, 229}
 VLAN_TYPES = {0x8100, 0x88A8, 0x9100}
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 MAX_DEPTH = 4  # Tunnels inside tunnels
+BARE_VALUE = re.compile(r"[A-Za-z0-9_.:/\-]+")  # A filter value that needn't be quoted
 
 ETHERTYPES = {0x0800: "IPv4", 0x86DD: "IPv6", 0x0806: "ARP", 0x8035: "RARP", 0x8100: "802.1Q", 0x88A8: "802.1ad",
               0x9100: "802.1Q (QinQ)", 0x88CC: "LLDP", 0x8809: "Slow Protocols", 0x8847: "MPLS", 0x8848: "MPLS",
@@ -45,6 +47,9 @@ UDP_PORTS = {53: "DNS", 67: "DHCP", 68: "DHCP", 69: "TFTP", 88: "Kerberos", 123:
 FILTER_NAMES = {"FTP-DATA": "ftp-data", "TACACS+": "tacplus", "HTTPS": "tls", "SMB": "smb", "NBNS": "nbns",
                 "NBDS": "nbdgm", "MDNS": "mdns", "LLMNR": "llmnr", "iPerf3": "iperf3", "SIP-TLS": "tls",
                 "LDAPS": "tls", "SMTPS": "tls", "IMAPS": "tls", "POPS": "tls"}
+TCP_FLAG_FIELDS = {"URG": "tcp.flags.urg", "ACK": "tcp.flags.ack", "PSH": "tcp.flags.push", "RST": "tcp.flags.reset",
+                   "SYN": "tcp.flags.syn", "FIN": "tcp.flags.fin"}
+OPTION_FIELDS = {"mss": "tcp.options.mss_val", "scale": "tcp.options.wscale.shift"}
 TCP_FLAGS = [(0x100, "NS"), (0x080, "CWR"), (0x040, "ECE"), (0x020, "URG"), (0x010, "ACK"), (0x008, "PSH"),
              (0x004, "RST"), (0x002, "SYN"), (0x001, "FIN")]
 ICMP_TYPES = {0: "Echo (ping) reply", 3: "Destination unreachable", 4: "Source quench", 5: "Redirect",
@@ -148,14 +153,15 @@ STP_ROLES = ["Unknown", "Alternate/Backup", "Root", "Designated"]
 
 
 class Node:
-    """A line of the details tree, and the bytes (start, end) of the packet it's about."""
-    __slots__ = ("text", "start", "end", "children")
+    """A line of the details tree, the bytes (start, end) of the packet it's about, and the display filter for what
+    it shows (field), such as ip.src == 10.0.0.5 or a protocol's name ("": the line it's under has one)."""
+    __slots__ = ("text", "start", "end", "children", "field")
 
-    def __init__(self, text, start=-1, end=-1):
-        self.text, self.start, self.end, self.children = text, start, end, []
+    def __init__(self, text, start=-1, end=-1, field=""):
+        self.text, self.start, self.end, self.children, self.field = text, start, end, [], field
 
-    def add(self, text, start=-1, end=-1):
-        node = Node(text, start, end)
+    def add(self, text, start=-1, end=-1, field=""):
+        node = Node(text, start, end, field)
         self.children.append(node)
         return node
 
@@ -165,7 +171,7 @@ class NoNode:
     __slots__ = ()
     children = ()
 
-    def add(self, text, start=-1, end=-1):
+    def add(self, text, start=-1, end=-1, field=""):
         return self
 
 
@@ -198,7 +204,7 @@ class Dissection:
         self.protocols.append(protocol)
         if not self.tree:
             return NO_NODE
-        node = Node(text, start, end)
+        node = Node(text, start, end, protocol)
         self.nodes.append(node)
         return node
 
@@ -246,13 +252,20 @@ class Dissection:
         self.protocols.append("_ws.malformed")
         self.info = (self.info + " " if self.info else "") + f"[Malformed {what}]"
         if self.tree:
-            self.nodes.append(Node(f"[Malformed packet: {what}]", start, len(self.data)))
+            self.nodes.append(Node(f"[Malformed packet: {what}]", start, len(self.data), "_ws.malformed"))
 
 
 # ----------------------------------------------------------------- Helpers
 
 def mac(raw):
     return bytes(raw).hex(":")
+
+
+def field_filter(name, value):
+    """The display filter for a field having this value: ip.src == 10.0.0.5, dns.qry.name == "my host"."""
+    if isinstance(value, str) and not BARE_VALUE.fullmatch(value):
+        value = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return f"{name} == {value}"
 
 
 def mac_text(address):
@@ -333,13 +346,13 @@ def dissect(raw, link_type=ETHERNET, tree=False, packet=None, tracker=None, inde
     d.packet, d.tracker, d.index = packet, tracker, index
     if packet is not None and tree:
         frame = Node(f"Frame {packet.number}: {packet.wire_length} bytes on wire, {len(data)} bytes captured", 0,
-                     len(data))
+                     len(data), field_filter("frame.number", packet.number))
         d.nodes.append(frame)
         frame.add(f"Arrival time: {packet.clock()}")
         frame.add(f"Time since first frame: {packet.time:.6f} seconds")
         frame.add(f"Time since previous frame: {packet.delta:.6f} seconds")
         if packet.interface:
-            frame.add(f"Interface: {packet.interface}")
+            frame.add(f"Interface: {packet.interface}", field=field_filter("frame.interface_name", packet.interface))
         if packet.note:
             frame.add(packet.note)
     try:
@@ -354,7 +367,8 @@ def dissect(raw, link_type=ETHERNET, tree=False, packet=None, tracker=None, inde
     except (struct.error, IndexError, ValueError) as error:
         d.bad(str(error) or type(error).__name__)
     if d.tree and d.nodes and packet is not None:
-        d.nodes[0].add("Protocols in frame: " + ":".join(name for name in d.protocols if name != "_ws.malformed"))
+        d.nodes[0].add("Protocols in frame: " + ":".join(name for name in d.protocols if name != "_ws.malformed"),
+                       field=field_filter("frame.protocols", ":".join(d.protocols)))
     return d
 
 
@@ -380,16 +394,17 @@ def ethernet(d, data, offset):
         node = d.layer("eth", d.tree and f"IEEE 802.3 Ethernet, Src: {source}, Dst: {destination}", offset,
                        offset + 14)
         if d.tree:
-            node.add(f"Destination: {mac_text(destination)}", offset, offset + 6)
-            node.add(f"Source: {mac_text(source)}", offset + 6, offset + 12)
-            node.add(f"Length: {ethertype}", offset + 12, offset + 14)
+            node.add(f"Destination: {mac_text(destination)}", offset, offset + 6, field_filter("eth.dst", destination))
+            node.add(f"Source: {mac_text(source)}", offset + 6, offset + 12, field_filter("eth.src", source))
+            node.add(f"Length: {ethertype}", offset + 12, offset + 14, field_filter("eth.len", ethertype))
         end = min(len(data), offset + 14 + ethertype)
         return llc(d, data, offset + 14, end)
     node = d.layer("eth", d.tree and f"Ethernet II, Src: {source}, Dst: {destination}", offset, offset + 14)
     if d.tree:
-        node.add(f"Destination: {mac_text(destination)}", offset, offset + 6)
-        node.add(f"Source: {mac_text(source)}", offset + 6, offset + 12)
-        node.add(f"Type: {ETHERTYPES.get(ethertype, 'Unknown')} (0x{ethertype:04x})", offset + 12, offset + 14)
+        node.add(f"Destination: {mac_text(destination)}", offset, offset + 6, field_filter("eth.dst", destination))
+        node.add(f"Source: {mac_text(source)}", offset + 6, offset + 12, field_filter("eth.src", source))
+        node.add(f"Type: {ETHERTYPES.get(ethertype, 'Unknown')} (0x{ethertype:04x})", offset + 12, offset + 14,
+                 field_filter("eth.type", f"0x{ethertype:04x}"))
     next_ethertype(d, data, offset + 14, ethertype)
 
 
@@ -440,10 +455,11 @@ def vlan(d, data, offset, ethertype):
     d.put("vlan.etype", inner)
     node = d.layer("vlan", f"802.1Q Virtual LAN, PRI: {priority}, DEI: {dei}, ID: {vlan_id}", offset, offset + 4)
     if d.tree:
-        node.add(f"Priority: {priority}", offset, offset + 2)
-        node.add(f"DEI: {dei}", offset, offset + 2)
-        node.add(f"ID: {vlan_id}", offset, offset + 2)
-        node.add(f"Type: {ETHERTYPES.get(inner, 'Unknown')} (0x{inner:04x})", offset + 2, offset + 4)
+        node.add(f"Priority: {priority}", offset, offset + 2, field_filter("vlan.priority", priority))
+        node.add(f"DEI: {dei}", offset, offset + 2, field_filter("vlan.dei", dei))
+        node.add(f"ID: {vlan_id}", offset, offset + 2, field_filter("vlan.id", vlan_id))
+        node.add(f"Type: {ETHERTYPES.get(inner, 'Unknown')} (0x{inner:04x})", offset + 2, offset + 4,
+                 field_filter("vlan.etype", f"0x{inner:04x}"))
     if inner <= 1500:
         return llc(d, data, offset + 4, min(len(data), offset + 4 + inner))
     next_ethertype(d, data, offset + 4, inner)
@@ -547,11 +563,15 @@ def arp(d, data, offset):
     if d.tree:
         node.add(f"Hardware type: {'Ethernet' if hardware == 1 else hardware} ({hardware})", offset, offset + 2)
         node.add(f"Protocol type: IPv4 (0x{protocol:04x})", offset + 2, offset + 4)
-        node.add(f"Opcode: {kind} ({opcode})", offset + 6, offset + 8)
-        node.add(f"Sender MAC address: {mac_text(sender_mac)}", offset + 8, offset + 14)
-        node.add(f"Sender IP address: {sender_ip}", offset + 14, offset + 18)
-        node.add(f"Target MAC address: {mac_text(target_mac)}", offset + 18, offset + 24)
-        node.add(f"Target IP address: {target_ip}", offset + 24, offset + 28)
+        node.add(f"Opcode: {kind} ({opcode})", offset + 6, offset + 8, field_filter("arp.opcode", opcode))
+        node.add(f"Sender MAC address: {mac_text(sender_mac)}", offset + 8, offset + 14,
+                 field_filter("arp.src.hw_mac", sender_mac))
+        node.add(f"Sender IP address: {sender_ip}", offset + 14, offset + 18,
+                 field_filter("arp.src.proto_ipv4", sender_ip))
+        node.add(f"Target MAC address: {mac_text(target_mac)}", offset + 18, offset + 24,
+                 field_filter("arp.dst.hw_mac", target_mac))
+        node.add(f"Target IP address: {target_ip}", offset + 24, offset + 28,
+                 field_filter("arp.dst.proto_ipv4", target_ip))
     destination = d.dst if d.dst != BROADCAST else "Broadcast"
     d.columns("ARP", info, d.src, destination)
 
@@ -591,20 +611,26 @@ def ipv4(d, data, offset):
     node = d.layer("ip", d.tree and f"Internet Protocol Version 4, Src: {source}, Dst: {destination}", offset,
                    offset + header_length)
     if d.tree:
-        node.add(f"Header length: {header_length} bytes", offset, offset + 1)
-        node.add(f"Differentiated services: DSCP {tos >> 2}, ECN {tos & 3}", offset + 1, offset + 2)
-        node.add(f"Total length: {total}", offset + 2, offset + 4)
-        node.add(f"Identification: 0x{ident:04x} ({ident})", offset + 4, offset + 6)
+        node.add(f"Header length: {header_length} bytes", offset, offset + 1, field_filter("ip.hdr_len", header_length))
+        node.add(f"Differentiated services: DSCP {tos >> 2}, ECN {tos & 3}", offset + 1, offset + 2,
+                 field_filter("ip.dsfield.dscp", tos >> 2))
+        node.add(f"Total length: {total}", offset + 2, offset + 4, field_filter("ip.len", total))
+        node.add(f"Identification: 0x{ident:04x} ({ident})", offset + 4, offset + 6,
+                 field_filter("ip.id", f"0x{ident:04x}"))
         names = [name for name, on in (("Don't fragment", dont_fragment), ("More fragments", more)) if on]
         flags = node.add(f"Flags: {', '.join(names) or 'none'}", offset + 6, offset + 8)
-        flags.add(f"Don't fragment: {'Set' if dont_fragment else 'Not set'}", offset + 6, offset + 7)
-        flags.add(f"More fragments: {'Set' if more else 'Not set'}", offset + 6, offset + 7)
-        node.add(f"Fragment offset: {fragment_offset}", offset + 6, offset + 8)
-        node.add(f"Time to live: {ttl}", offset + 8, offset + 9)
-        node.add(f"Protocol: {IP_PROTOCOLS.get(protocol, 'Unknown')} ({protocol})", offset + 9, offset + 10)
+        flags.add(f"Don't fragment: {'Set' if dont_fragment else 'Not set'}", offset + 6, offset + 7,
+                  field_filter("ip.flags.df", int(dont_fragment)))
+        flags.add(f"More fragments: {'Set' if more else 'Not set'}", offset + 6, offset + 7,
+                  field_filter("ip.flags.mf", int(more)))
+        node.add(f"Fragment offset: {fragment_offset}", offset + 6, offset + 8,
+                 field_filter("ip.frag_offset", fragment_offset))
+        node.add(f"Time to live: {ttl}", offset + 8, offset + 9, field_filter("ip.ttl", ttl))
+        node.add(f"Protocol: {IP_PROTOCOLS.get(protocol, 'Unknown')} ({protocol})", offset + 9, offset + 10,
+                 field_filter("ip.proto", protocol))
         node.add(f"Header checksum: 0x{checksum:04x}", offset + 10, offset + 12)
-        node.add(f"Source address: {source}", offset + 12, offset + 16)
-        node.add(f"Destination address: {destination}", offset + 16, offset + 20)
+        node.add(f"Source address: {source}", offset + 12, offset + 16, field_filter("ip.src", source))
+        node.add(f"Destination address: {destination}", offset + 16, offset + 20, field_filter("ip.dst", destination))
     start = offset + header_length
     if fragment_offset:
         d.columns("IPv4", f"Fragmented IP protocol (proto={IP_PROTOCOLS.get(protocol, protocol)} {protocol}, "
@@ -635,11 +661,12 @@ def ipv6(d, data, offset):
                    offset + 40)
     if d.tree:
         node.add(f"Traffic class: 0x{traffic_class:02x}, Flow label: 0x{flow:05x}", offset, offset + 4)
-        node.add(f"Payload length: {payload_length}", offset + 4, offset + 6)
-        node.add(f"Next header: {IP_PROTOCOLS.get(next_header, 'Unknown')} ({next_header})", offset + 6, offset + 7)
-        node.add(f"Hop limit: {hop_limit}", offset + 7, offset + 8)
-        node.add(f"Source address: {source}", offset + 8, offset + 24)
-        node.add(f"Destination address: {destination}", offset + 24, offset + 40)
+        node.add(f"Payload length: {payload_length}", offset + 4, offset + 6, field_filter("ipv6.plen", payload_length))
+        node.add(f"Next header: {IP_PROTOCOLS.get(next_header, 'Unknown')} ({next_header})", offset + 6, offset + 7,
+                 field_filter("ipv6.nxt", next_header))
+        node.add(f"Hop limit: {hop_limit}", offset + 7, offset + 8, field_filter("ipv6.hlim", hop_limit))
+        node.add(f"Source address: {source}", offset + 8, offset + 24, field_filter("ipv6.src", source))
+        node.add(f"Destination address: {destination}", offset + 24, offset + 40, field_filter("ipv6.dst", destination))
     end = min(len(data), offset + 40 + payload_length) if payload_length else len(data)
     start = offset + 40
     while next_header in IPV6_EXTENSIONS or next_header == 44:
@@ -712,14 +739,14 @@ def icmp(d, data, start, end):
     name = ICMP_TYPES.get(kind, f"Type {kind}")
     info = name
     node = d.layer("icmp", "Internet Control Message Protocol", start, end)
-    node.add(f"Type: {kind} ({name})", start, start + 1)
-    node.add(f"Code: {code}", start + 1, start + 2)
+    node.add(f"Type: {kind} ({name})", start, start + 1, field_filter("icmp.type", kind))
+    node.add(f"Code: {code}", start + 1, start + 2, field_filter("icmp.code", code))
     if kind in (0, 8) and end >= start + 8:
         ident, sequence = u16(data, start + 4), u16(data, start + 6)
         d.put("icmp.ident", ident)
         d.put("icmp.seq", sequence)
-        node.add(f"Identifier: {ident} (0x{ident:04x})", start + 4, start + 6)
-        node.add(f"Sequence number: {sequence}", start + 6, start + 8)
+        node.add(f"Identifier: {ident} (0x{ident:04x})", start + 4, start + 6, field_filter("icmp.ident", ident))
+        node.add(f"Sequence number: {sequence}", start + 6, start + 8, field_filter("icmp.seq", sequence))
         info += f"  id=0x{ident:04x}, seq={sequence}"
         if d.addresses:
             ttl = d.get("ip.ttl")
@@ -878,33 +905,40 @@ def tcp(d, data, start, end):
                                      f"Seq: {rel_seq}{f', Ack: {rel_ack}' if flags & 0x010 else ''}, Len: {length}",
                    start, payload_start)
     if d.tree:
-        node.add(f"Source port: {source}", start, start + 2)
-        node.add(f"Destination port: {destination}", start + 2, start + 4)
+        node.add(f"Source port: {source}", start, start + 2, field_filter("tcp.srcport", source))
+        node.add(f"Destination port: {destination}", start + 2, start + 4, field_filter("tcp.dstport", destination))
         if stream >= 0:
-            node.add(f"[Stream index: {stream}]")
-        node.add(f"Sequence number: {rel_seq}{'    (relative)' if relative else ''}", start + 4, start + 8)
+            node.add(f"[Stream index: {stream}]", field=field_filter("tcp.stream", stream))
+        node.add(f"Sequence number: {rel_seq}{'    (relative)' if relative else ''}", start + 4, start + 8,
+                 field_filter("tcp.seq", rel_seq))
         if relative:
-            node.add(f"Sequence number (raw): {sequence}", start + 4, start + 8)
-        node.add(f"Acknowledgment number: {rel_ack}{'    (relative)' if relative else ''}", start + 8, start + 12)
-        node.add(f"Header length: {header_length} bytes", start + 12, start + 13)
-        flag_node = node.add(f"Flags: 0x{flags:03x} ({flag_names or 'none'})", start + 12, start + 14)
+            node.add(f"Sequence number (raw): {sequence}", start + 4, start + 8, field_filter("tcp.seq_raw", sequence))
+        node.add(f"Acknowledgment number: {rel_ack}{'    (relative)' if relative else ''}", start + 8, start + 12,
+                 field_filter("tcp.ack", rel_ack))
+        node.add(f"Header length: {header_length} bytes", start + 12, start + 13,
+                 field_filter("tcp.hdr_len", header_length))
+        flag_node = node.add(f"Flags: 0x{flags:03x} ({flag_names or 'none'})", start + 12, start + 14,
+                             field_filter("tcp.flags", f"0x{flags:03x}"))
         for bit, name in TCP_FLAGS:
-            flag_node.add(f"{name}: {'Set' if flags & bit else 'Not set'}", start + 12, start + 14)
-        node.add(f"Window: {window}", start + 14, start + 16)
+            flag_field = TCP_FLAG_FIELDS.get(name)
+            flag_node.add(f"{name}: {'Set' if flags & bit else 'Not set'}", start + 12, start + 14,
+                          field_filter(flag_field, int(bool(flags & bit))) if flag_field else "")
+        node.add(f"Window: {window}", start + 14, start + 16, field_filter("tcp.window_size_value", window))
         if scaled is not None and scaled != window:
-            node.add(f"[Calculated window size: {scaled}]")
+            node.add(f"[Calculated window size: {scaled}]", field=field_filter("tcp.window_size", scaled))
         node.add(f"Checksum: 0x{checksum:04x}", start + 16, start + 18)
         if options:
             option_node = node.add("Options: " + ", ".join(option_text(key, value) for key, value in options.items()),
                                    start + 20, payload_start)
             for key, value in options.items():
-                option_node.add(option_text(key, value))
+                option_node.add(option_text(key, value),
+                                field=field_filter(OPTION_FIELDS[key], value) if key in OPTION_FIELDS else "")
         if analysis:
-            analysis_node = node.add("[SEQ/ACK analysis]")
+            analysis_node = node.add("[SEQ/ACK analysis]", field="tcp.analysis.flags")
             for flag in analysis:
-                analysis_node.add(f"[{ANALYSIS_TEXT.get(flag, flag)}]")
+                analysis_node.add(f"[{ANALYSIS_TEXT.get(flag, flag)}]", field=f"tcp.analysis.{flag}")
         if length:
-            node.add(f"TCP payload ({length} bytes)", payload_start, end)
+            node.add(f"TCP payload ({length} bytes)", payload_start, end, field_filter("tcp.len", length))
     d.columns("TCP", (marks + " " if marks else "") + info)
     resent = any(flag.endswith("retransmission") or flag == "out_of_order" for flag in analysis)
     if length and not flags & 0x004 and not resent:  # A resent segment is shown as TCP, as in Wireshark
@@ -1007,11 +1041,11 @@ def udp(d, data, start, end):
     node = d.layer("udp", d.tree and f"User Datagram Protocol, Src Port: {source}, Dst Port: {destination}", start,
                    start + 8)
     if d.tree:
-        node.add(f"Source port: {source}", start, start + 2)
-        node.add(f"Destination port: {destination}", start + 2, start + 4)
+        node.add(f"Source port: {source}", start, start + 2, field_filter("udp.srcport", source))
+        node.add(f"Destination port: {destination}", start + 2, start + 4, field_filter("udp.dstport", destination))
         if stream >= 0:
-            node.add(f"[Stream index: {stream}]")
-        node.add(f"Length: {length}", start + 4, start + 6)
+            node.add(f"[Stream index: {stream}]", field=field_filter("udp.stream", stream))
+        node.add(f"Length: {length}", start + 4, start + 6, field_filter("udp.length", length))
         node.add(f"Checksum: 0x{checksum:04x}", start + 6, start + 8)
     d.columns("UDP", f"{source} → {destination} Len={end - start - 8}")
     udp_application(d, data, start + 8, end, source, destination)
@@ -1161,7 +1195,7 @@ def dns(d, data, start, end, protocol):
     if response:
         d.put("dns.flags.rcode", rcode)
     if d.tree:
-        node.add(f"Transaction ID: 0x{ident:04x}", start, start + 2)
+        node.add(f"Transaction ID: 0x{ident:04x}", start, start + 2, field_filter("dns.id", f"0x{ident:04x}"))
         node.add(f"Flags: 0x{flags:04x} {'Standard query response' if response else 'Standard query'}"
                  f"{', ' + DNS_RCODES.get(rcode, str(rcode)) if response else ''}", start + 2, start + 4)
         node.add(f"Questions: {questions}, Answer RRs: {answers}, Authority RRs: {authority}, "
@@ -1176,7 +1210,7 @@ def dns(d, data, start, end, protocol):
         asked.append(f"{DNS_TYPES.get(kind, kind)} {query}")
         d.put("dns.qry.name", query)
         d.put("dns.qry.type", kind)
-        queries.add(f"{query}: type {DNS_TYPES.get(kind, kind)}")
+        queries.add(f"{query}: type {DNS_TYPES.get(kind, kind)}", field=field_filter("dns.qry.name", query))
     answered = []
     answer_node = node.add("Answers") if answers and d.tree else NO_NODE
     for index in range(min(answers + authority, 60)):

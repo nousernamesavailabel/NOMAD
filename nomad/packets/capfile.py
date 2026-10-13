@@ -23,8 +23,8 @@ class Cancelled(Exception):
 
 class Packet:
     __slots__ = ("number", "time", "epoch", "delta", "data", "link_type", "wire_length", "interface", "note", "src",
-                 "dst", "protocol", "info", "chain", "stream", "kind", "relative", "window", "analysis", "color",
-                 "fast")
+                 "dst", "sport", "dport", "protocol", "info", "chain", "stream", "kind", "relative", "window", "analysis",
+                 "color", "fast")
 
     def __init__(self, number, epoch, data, link_type, wire_length, interface=""):
         self.number, self.epoch, self.data, self.link_type = number, epoch, data, link_type
@@ -32,6 +32,7 @@ class Packet:
         self.time = self.delta = 0.0
         self.note = ""
         self.src = self.dst = self.protocol = self.info = ""
+        self.sport = self.dport = None  # TCP or UDP ports
         self.chain = ()
         self.stream, self.kind = -1, ""
         self.relative = self.window = None
@@ -402,6 +403,7 @@ class Analyzer:
         packet.stream, packet.kind = -1, ""
         d = decode.dissect(packet.data, packet.link_type, False, packet, self.view.tracker, index)
         packet.src, packet.dst, packet.protocol, packet.info = d.src, d.dst, d.protocol, d.info
+        packet.sport, packet.dport = d.ports[1:] if d.ports else (None, None)
         chain = tuple(d.protocols)
         packet.chain = self.chains.setdefault(chain, chain)
         packet.fast = fast_record(d, self.shared)

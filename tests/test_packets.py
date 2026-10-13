@@ -153,6 +153,82 @@ def test_filter_mistakes_are_explained(text, message):
         dfilter.compile_filter(text)
 
 
+def test_every_details_line_filter_shows_its_own_packet(sample):
+    capture, view = sample
+    checked = 0
+    for packet in view.packets + capture.mirrored:
+        d = packet.dissect(tree=True)
+
+        def walk(node):
+            nonlocal checked
+            if node.field:
+                filter_ = dfilter.compile_filter(node.field)
+                assert filter_.matches(packet), (packet.number, node.text, node.field)
+                checked += 1
+            for child in node.children:
+                walk(child)
+        for node in d.nodes:
+            walk(node)
+    assert checked > 500
+
+
+def test_details_lines_name_their_fields(sample):
+    _, view = sample
+    d = view.packets[12].dissect(tree=True)  # The HTTP request
+    fields = {}
+
+    def walk(node):
+        fields[node.text.split(":")[0]] = node.field
+        for child in node.children:
+            walk(child)
+    for node in d.nodes:
+        walk(node)
+    assert fields["Source address"] == "ip.src == 10.0.10.9"
+    assert fields["Destination port"] == "tcp.dstport == 80"
+    assert fields["SYN"] == "tcp.flags.syn == 0"
+    assert fields["Frame 13"] == "frame.number == 13"
+    assert fields["Hypertext Transfer Protocol"] == "http"
+    assert fields["Header checksum"] == ""  # No filter field: the line it's under (ip) is offered instead
+    assert decode.field_filter("dns.qry.name", 'my "odd" name') == r'dns.qry.name == "my \"odd\" name"'
+    assert dfilter.compile_filter(decode.field_filter("dns.qry.name", 'my "odd" name'))
+
+
+@pytest.mark.parametrize("current, expression, how, combined", [
+    ("", "ip.addr == 10.0.0.5", "and", "ip.addr == 10.0.0.5"),
+    ("", "dns", "not", "!dns"),
+    ("", "ip.addr == 10.0.0.5", "not", "!(ip.addr == 10.0.0.5)"),
+    ("dns", "ip.addr == 10.0.0.5", "and", "dns && ip.addr == 10.0.0.5"),
+    ("dns", "arp", "or", "dns || arp"),
+    ("dns || arp", "ip.addr == 10.0.0.5", "and", "(dns || arp) && ip.addr == 10.0.0.5"),
+    ("(dns || arp) && ip", "tcp", "and", "(dns || arp) && ip && tcp"),
+    ("dns or arp", "tcp", "not", "(dns or arp) && !tcp"),
+    ("ip", "tcp.port == 1 || udp.port == 1", "and", "ip && (tcp.port == 1 || udp.port == 1)"),
+    ('frame contains "a || b"', "tcp", "and", 'frame contains "a || b" && tcp'),
+    ("10.0.0.5", "tcp.port == 443", "and", "ip.addr == 10.0.0.5 && tcp.port == 443"),  # A shortcut spelled out
+])
+def test_adding_to_a_filter(current, expression, how, combined):
+    assert dfilter.combine(current, expression, how) == combined
+    dfilter.compile_filter(combined)
+
+
+def test_a_packet_rows_filters(sample):
+    _, view = sample
+    packet = view.packets[12]  # The HTTP request
+    found = dict(dfilter.packet_filters(packet.dissect(), packet))
+    assert found == {"source": "ip.addr == 10.0.10.9", "destination": "ip.addr == 10.0.20.80",
+                     "source port": f"tcp.port == {found['source port'].split()[-1]}",
+                     "destination port": "tcp.port == 80", "protocol": "http",
+                     "stream": f"tcp.stream == {packet.stream}"}
+    arp_request = view.packets[0]
+    found = dict(dfilter.packet_filters(arp_request.dissect(), arp_request))
+    assert found["source"].startswith("eth.addr == ") and found["protocol"] == "arp"
+    tagged = view.packets[29]
+    assert ("vlan", "vlan.id == 20") in dfilter.packet_filters(tagged.dissect(), tagged)
+    for packet in view.packets:
+        for _, text in dfilter.packet_filters(packet.dissect(), packet):
+            assert dfilter.compile_filter(text).matches(packet), (packet.number, text)
+
+
 def test_unknown_field_suggests_one():
     with pytest.raises(dfilter.FilterError, match="Did you mean tcp.analysis"):
         dfilter.compile_filter("tcp.analysis.retrans")

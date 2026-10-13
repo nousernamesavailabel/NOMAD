@@ -47,6 +47,7 @@ from .sweep_tab import SweepTab
 from .switch_tab import SwitchTab
 from .mac_finder_tab import MacFinderTab
 from .mirror_tab import MirrorTab
+from .acl_tab import AclTab
 from .syslog_tab import SyslogTab
 from .tftp_tab import TftpTab
 from .theme import COLORS, DEFAULT_TEXT_SCALE, TEXT_SCALES, set_text_scale
@@ -173,6 +174,7 @@ class MainWindow(QMainWindow):
         self.tftp_tab = TftpTab(self)
         self.subnet_tab = SubnetTab(self)
         self.snmp_config_tab = SnmpConfigTab(self)
+        self.acl_tab = AclTab(self)  # The Network Map's switches and routers, saved sessions' SSH logins
         self.inventory_tab = InventoryTab(self)  # The Network Map's devices and the saved sessions
         self.wake_tab = WakeTab(self)
         terminal_store = SessionFolderStore(self.session_store, TERMINAL_PROTOCOLS)
@@ -200,7 +202,8 @@ class MainWindow(QMainWindow):
                                       (self.web_check_tab, "Web Check")]),
             ("Network Management", [(self.netmap_tab, "Network Map"), (self.ipam_tab, "IP Addresses"),
                 (self.vlan_tab, "VLANs"), (self.placement_tab, "Subnet Placement"),
-                (self.snmp_config_tab, "SNMP Config"), (self.inventory_tab, "Ansible Inventory")]),
+                (self.snmp_config_tab, "SNMP Config"), (self.acl_tab, "ACLs"),
+                (self.inventory_tab, "Ansible Inventory")]),
             ("Capture & Logs", [(self.capture_tab, "Packet Capture"), (self.mirror_tab, "Port Mirroring"),
                                 (self.syslog_tab, "Syslog")]),
             ("Utilities", [(self.subnet_tab, "Subnet Calculator")]),
@@ -359,6 +362,12 @@ class MainWindow(QMainWindow):
         Map's credentials."""
         self.navigator.setCurrentWidget(self.snmp_config_tab)
         self.snmp_config_tab.prefill(destination, credential, from_map)
+
+    def show_acls(self, device=None, acl="", port=""):
+        """The ACLs page, with the Network Map device's ACLs (read now if they haven't been): acl, or the one on
+        port."""
+        self.navigator.setCurrentWidget(self.acl_tab)
+        self.acl_tab.prefill(device or "", acl, port)
 
     def show_mirror(self, source=None, ports=(), vlan=0, dest=None, dest_port="", host=""):
         """The Port Mirroring page, filled in from the Network Map: mirror ports (or a VLAN, or a host's port) of

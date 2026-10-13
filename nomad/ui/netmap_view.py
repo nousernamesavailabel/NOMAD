@@ -46,10 +46,13 @@ VLAN_LINK_NAMES = {TAGGED: "tagged", NATIVE: "native (untagged)", ACCESS: "acces
 # Carry VLAN's planned path, drawn over the links while its window is open: (color, width, line style)
 PATH_PLANNED, PATH_CARRIES, PATH_CHOSEN, PATH_OFFERED, PATH_BLOCKED = "planned", "carries", "chosen", "offered", \
     "blocked"
+PATH_ROUTE = "route"  # A link of a route set by hand, before it's planned
 PATH_STYLES = {PATH_PLANNED: (COLORS["accent"], 5, Qt.DashLine), PATH_CARRIES: (COLORS["accent"], 5, Qt.SolidLine),
                PATH_CHOSEN: (COLORS["warning"], 5, Qt.DashLine), PATH_OFFERED: (COLORS["warning"], 2, Qt.DotLine),
-               PATH_BLOCKED: (COLORS["error"], 5, Qt.DashLine)}
-PATH_ORDER = [PATH_BLOCKED, PATH_PLANNED, PATH_CHOSEN, PATH_CARRIES, PATH_OFFERED]  # Which shows, for several links
+               PATH_BLOCKED: (COLORS["error"], 5, Qt.DashLine), PATH_ROUTE: (COLORS["accent"], 4, Qt.DashDotLine)}
+PATH_GAP = (COLORS["error"], 2, Qt.DashLine)  # Switches next to each other on a route with no link between them
+PATH_ORDER = [PATH_BLOCKED, PATH_PLANNED, PATH_ROUTE, PATH_CHOSEN, PATH_CARRIES, PATH_OFFERED]  # Which shows, for
+# several links
 FADED = 0.22
 OVERLAY_LINE_STYLES = {DASH: Qt.DashLine, DOT: Qt.DotLine}
 OVERLAY_ORDER = ["error", "warning"]  # A line standing for several links shows the worst of their overlay marks
@@ -128,6 +131,7 @@ class NodeItem(QGraphicsItem):
         self.mark = None  # The overlay showing's netmap.overlays.Mark for it (see MapView.set_overlay)
         self.base_tip = None  # Its tooltip without what the overlay showing adds (once one has)
         self.group_item = None  # The GroupItem it's directly in
+        self.route_text = ""  # Its place on Carry VLAN's route ("1", or "2, 5" when it's on it twice)
         self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable
                       | QGraphicsItem.ItemSendsGeometryChanges)
         self.setZValue(2)
@@ -135,6 +139,11 @@ class NodeItem(QGraphicsItem):
     def set_highlight(self, color):
         self.highlight = color
         self.update()
+
+    def set_route_text(self, text):
+        if text != self.route_text:
+            self.route_text = text
+            self.update()
 
     def set_mark(self, mark):
         if self.base_tip is None:
@@ -176,6 +185,9 @@ class NodeItem(QGraphicsItem):
                 link.update_position()
             if self.group_item is not None and not self.view.groups_suspended:
                 self.group_item.update_rect()
+            for gap in self.view.gap_items:
+                if self in (gap.a_item, gap.b_item):
+                    gap.update_position()
         elif change == QGraphicsItem.ItemSelectedHasChanged:
             self.update()
         return super().itemChange(change, value)
@@ -231,6 +243,19 @@ class DeviceItem(NodeItem):
         painter.setFont(font)
         painter.setPen(QColor(COLORS["panel"]))
         painter.drawText(tag, Qt.AlignCenter, self.news_text)
+
+    def draw_route_text(self, painter):
+        """Its place on Carry VLAN's route, in a tag over the top left corner."""
+        font = small_font(0.75, bold=True)
+        height = NEWS_HEIGHT + 3
+        width = max(height, QFontMetrics(font).horizontalAdvance(self.route_text) + 10)
+        tag = QRectF(self.rect.left() - 8, self.rect.top() - 9, width, height)
+        path = QPainterPath()
+        path.addRoundedRect(tag, height / 2, height / 2)
+        painter.fillPath(path, QColor(COLORS["accent"]))
+        painter.setFont(font)
+        painter.setPen(QColor(COLORS["panel"]))
+        painter.drawText(tag, Qt.AlignCenter, self.route_text)
 
     def paint(self, painter, option, widget=None):
         device = self.device
@@ -301,6 +326,8 @@ class DeviceItem(NodeItem):
             self.draw_status_dot(painter, state)
         if self.news_text:
             self.draw_news(painter)
+        if self.route_text:
+            self.draw_route_text(painter)
 
         if self.host_count:
             painter.setPen(QPen(QColor(COLORS["border"]), 1))
@@ -824,6 +851,51 @@ class LinkItem(QGraphicsItem):
             painter.drawText(box, Qt.AlignCenter, text)
 
 
+class GapItem(QGraphicsItem):
+    """Two things next to each other on Carry VLAN's route with no link between them: a red dashed line."""
+
+    def __init__(self, a_item, b_item, note):
+        super().__init__()
+        self.a_item, self.b_item = a_item, b_item
+        self.line = QLineF()
+        self.setZValue(1)
+        self.setToolTip(note)
+        self.update_position()
+
+    def update_position(self):
+        self.prepareGeometryChange()
+        self.line = QLineF(self.a_item.center(), self.b_item.center())
+
+    def boundingRect(self):
+        return QRectF(self.line.p1(), self.line.p2()).normalized().adjusted(-40, -12, 40, 12)
+
+    def shape(self):
+        path = QPainterPath(self.line.p1())
+        path.lineTo(self.line.p2())
+        stroker = QPainterPathStroker()
+        stroker.setWidth(10)
+        return stroker.createStroke(path)
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.Antialiasing)
+        color, width, style = PATH_GAP
+        pen = QPen(QColor(color), width)
+        pen.setStyle(style)
+        painter.setPen(pen)
+        painter.drawLine(self.line)
+        font = small_font(0.72, bold=True)
+        metrics = QFontMetrics(font)
+        text = "no link"
+        box = QRectF(0, 0, metrics.horizontalAdvance(text) + 8, metrics.height() + 2)
+        box.moveCenter(self.line.center())
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(COLORS["background"]))
+        painter.drawRoundedRect(box, 3, 3)
+        painter.setFont(font)
+        painter.setPen(QColor(color))
+        painter.drawText(box, Qt.AlignCenter, text)
+
+
 class MapView(QGraphicsView):
     selection_changed = pyqtSignal(object)  # ("device", key), ("node", key), ("port", key, port) or None
     positions_changed = pyqtSignal()
@@ -866,6 +938,10 @@ class MapView(QGraphicsView):
         self.vlan_focus = None  # netmap.vlans.Focus of the VLAN highlighted, or None
         self.overlay = None  # The netmap.overlays.Overlay showing (one at a time, instead of a VLAN), or None
         self.path_overlay = None  # Carry VLAN's planned path (see set_path_overlay), or None
+        self.gap_items = []  # Its GapItems
+        self.pick_anchor = None  # While picking: the device a rubber line goes from to the mouse (the last picked)
+        self.pick_rubber = None  # That line
+        self.pick_mouse = None  # Where the mouse is (scene)
         self.scene().selectionChanged.connect(self.on_selection_changed)
 
     def set_map(self, network_map, positions):
@@ -875,6 +951,7 @@ class MapView(QGraphicsView):
         self.vlan_focus = None  # Its links are new: the page highlights the VLAN again
         self.overlay = None  # Or shows its overlay again
         self.path_overlay = None  # And Carry VLAN draws its path again
+        self.gap_items, self.pick_rubber = [], None  # Gone with the scene
         self.network_map, self.links = network_map, network_map.links
         self.groups_suspended = True
         for key, device in network_map.devices.items():
@@ -894,6 +971,7 @@ class MapView(QGraphicsView):
         self.vlan_focus = None  # Its links are new: the page highlights the VLAN again
         self.overlay = None  # Or shows its overlay again
         self.path_overlay = None  # And Carry VLAN draws its path again
+        self.gap_items, self.pick_rubber = [], None  # Gone with the scene
         self.network_map, self.links, self.last_found = None, [], None
         self.update_scene_rect()
 
@@ -905,6 +983,7 @@ class MapView(QGraphicsView):
         self.vlan_focus = None  # Its links are new: the page highlights the VLAN again
         self.overlay = None  # Or shows its overlay again
         self.path_overlay = None  # And Carry VLAN draws its path again
+        self.gap_items, self.pick_rubber = [], None  # Gone with the scene
         self.network_map, self.links = None, links
         for key, node in nodes.items():
             item = DeviceItem(node.device, {}, self) if node.device is not None else SimpleNodeItem(node, self)
@@ -938,8 +1017,8 @@ class MapView(QGraphicsView):
             item = LinkItem(a_item, b_item, links, ends, lambda key: self.items_by_key[key].label)
             self.scene().addItem(item)
             self.link_items.append(item)
-        if self.vlan_focus is not None or self.overlay is not None:  # The new lines show it too
-            self.refresh_overlays()
+        if self.vlan_focus is not None or self.overlay is not None or self.path_overlay is not None:
+            self.refresh_overlays()  # The new lines show it too
 
     # ----------------------------------------------------------------- Groups
 
@@ -1254,13 +1333,16 @@ class MapView(QGraphicsView):
         self.apply_path_overlay()
 
     def set_path_overlay(self, overlay):
-        """Draw Carry VLAN's planned path over the links: {"vlan": number, "devices": keys kept bright, "links":
-        {Link.key: (PATH_PLANNED, PATH_CARRIES... , what it does there)}}. None takes it off."""
+        """Draw Carry VLAN's path over the links: {"vlan": number (or None), "devices": keys kept bright, "links":
+        {Link.key: (PATH_PLANNED, PATH_CARRIES... , what it does there)}, and optionally "order": the route's device
+        keys, numbered on the map, and "gaps": [(key, key, why)], switches next to each other on it with no link
+        between them}. None takes it off."""
         self.path_overlay = overlay
         self.set_vlan_focus(self.vlan_focus)  # Opacities and tooltips as the VLAN highlight has them, then the path
 
     def apply_path_overlay(self):
         overlay = self.path_overlay
+        title = "Carry VLAN" + (f" {overlay['vlan']}" if overlay is not None and overlay.get("vlan") else "")
         for item in self.link_items:
             tip = item.toolTip().split("\nCarry VLAN")[0]
             found = [overlay["links"][link.key] for link in item.links
@@ -1269,7 +1351,7 @@ class MapView(QGraphicsView):
             item.path_kind = found[0][0] if found else None
             if found:
                 item.setOpacity(1.0)
-                tip += f"\nCarry VLAN {overlay['vlan']}: " + "; ".join(dict.fromkeys(note for _, note in found))
+                tip += f"\n{title}: " + "; ".join(dict.fromkeys(note for _, note in found))
             item.setToolTip(tip)
             item.update()
         if overlay is not None:
@@ -1279,6 +1361,26 @@ class MapView(QGraphicsView):
                     item.setOpacity(1.0)
                     if item.group_item is not None:
                         item.group_item.setOpacity(1.0)
+        self.apply_route_order(overlay)
+
+    def apply_route_order(self, overlay):
+        """Number the route's devices, and draw its gaps."""
+        places = {}
+        for index, key in enumerate(overlay.get("order", ()) if overlay is not None else ()):
+            places.setdefault(key, []).append(str(index + 1))
+        for key, item in self.items_by_key.items():
+            item.set_route_text(", ".join(places.get(key, [])))
+        for gap in self.gap_items:
+            self.scene().removeItem(gap)
+        self.gap_items = []
+        for one, other, note in overlay.get("gaps", ()) if overlay is not None else ():
+            if one not in self.items_by_key or other not in self.items_by_key:
+                continue
+            a_item, b_item = self.representative(one), self.representative(other)
+            if a_item is not b_item:
+                gap = GapItem(a_item, b_item, note)
+                self.scene().addItem(gap)
+                self.gap_items.append(gap)
 
     def set_highlights(self, colors):
         """Ring the items in {key: color}; clear the rest."""
@@ -1336,18 +1438,46 @@ class MapView(QGraphicsView):
         self.setFocus()
         return True
 
-    def start_picking(self):
+    def start_picking(self, anchor=None):
         """Each click on a device is device_picked, until the background is clicked, Esc or the right button (or
-        stop_picking)."""
+        stop_picking). anchor: a device a dashed line goes from to the mouse (see set_pick_anchor)."""
         self.cancel_drawing()
         self.picking = True
+        self.viewport().setMouseTracking(True)
         self.viewport().setCursor(Qt.PointingHandCursor)
+        self.set_pick_anchor(anchor)
         self.setFocus()
+
+    def set_pick_anchor(self, key):
+        """While picking: a dashed line from this device (the last picked) to the mouse. None takes it away."""
+        self.pick_anchor = key if self.picking and key in self.items_by_key else None
+        self.update_pick_rubber()
+
+    def update_pick_rubber(self):
+        if self.pick_anchor is None or self.pick_mouse is None:
+            self.remove_pick_rubber()
+            return
+        if self.pick_rubber is None:
+            self.pick_rubber = QGraphicsLineItem()
+            self.pick_rubber.setPen(QPen(QColor(COLORS["accent"]), 2, Qt.DashLine))
+            self.pick_rubber.setZValue(5)
+            self.scene().addItem(self.pick_rubber)
+        self.pick_rubber.setLine(QLineF(self.representative(self.pick_anchor).center(), self.pick_mouse))
+
+    def remove_pick_rubber(self):
+        rubber, self.pick_rubber = self.pick_rubber, None
+        if rubber is not None:
+            try:
+                self.scene().removeItem(rubber)
+            except RuntimeError:  # Scene being torn down
+                pass
 
     def stop_picking(self):
         if not self.picking:
             return
         self.picking = False
+        self.pick_anchor, self.pick_mouse = None, None
+        self.remove_pick_rubber()
         self.viewport().unsetCursor()
         self.picking_stopped.emit()
 
@@ -1365,8 +1495,8 @@ class MapView(QGraphicsView):
     def device_at(self, pos):
         """The device drawn at a point in the view (or whose hosts' box is there), or None. The line being drawn
         by hand ends under the mouse, on top of everything: look beneath it."""
-        rubber = self.drawing[1] if self.drawing is not None else None
-        item = next((item for item in self.items(pos) if item is not rubber), None)
+        rubbers = (self.drawing[1] if self.drawing is not None else None, self.pick_rubber)
+        item = next((item for item in self.items(pos) if item not in rubbers and not isinstance(item, GapItem)), None)
         while item is not None and not isinstance(item, DeviceItem):
             item = item.parentItem()
         return item
@@ -1409,6 +1539,10 @@ class MapView(QGraphicsView):
             line.setLine(QLineF(start.pos(), self.mapToScene(event.pos())))
             event.accept()
             return
+        if self.picking:
+            self.pick_mouse = self.mapToScene(event.pos())
+            if self.pick_anchor is not None:
+                self.update_pick_rubber()
         if self.pan_from is not None:
             delta = event.pos() - self.pan_from
             self.pan_from = event.pos()

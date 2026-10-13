@@ -1,11 +1,17 @@
 """Sending configuration to Cisco IOS / IOS-XE switches over SSH with no one watching (Port Mirroring's Set Up and
-Take Away): log in (the switch's saved SSH session, else the login chosen), go to the enable (#) prompt, type the
-lines one at a time, and stop at the first one the switch refuses.
+Take Away, Carry VLAN, ACLs): log in (the switch's saved SSH session, else the login chosen), go to the enable (#)
+prompt, type the lines one at a time, and stop at the first one the switch refuses.
 
-Nothing is ever saved (no write memory): a switch that reloads comes back without what was sent.
+Nothing is saved (no write memory) unless asked for (the ACLs page's Save to Startup Config): a switch that reloads
+comes back without what was sent.
+
+ACL changes go in guarded (set_up_guarded): `configure terminal revert timer N` first, so the device puts its old
+configuration back by itself after N minutes unless told `configure confirm`, which NOMAD only says from a new login
+made after the change (proof it can still get in). A line refused, or no new login, has NOMAD revert right away.
 
 Qt-free: the Port Mirroring page runs it on a worker thread.
 """
+import datetime
 import logging
 import re
 import threading
@@ -14,7 +20,7 @@ from dataclasses import dataclass, field
 import paramiko
 
 from ..terminal.transports import Cancelled, ConnectionFailed
-from . import macssh, mirror
+from . import acl, macssh, mirror
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +28,10 @@ LINE_TIMEOUT = 30  # Seconds for one configuration line (creating a VLAN can tak
 ENABLE_TIMEOUT = 15
 PASSWORD_PROMPT = re.compile(r"(?:password|secret)\s*:\s*$", re.IGNORECASE)
 CONFIRM_PROMPT = re.compile(r"\[(?:confirm|yes/no|y/n)\]\s*:?\s*$", re.IGNORECASE)
+ROLLBACK_NOTE = re.compile(r"rollback|backing up|archive|confirmed change", re.IGNORECASE)
+FILE_SYSTEMS = ("bootflash:", "flash:", "unix:", "disk0:", "flash0:", "nvram:")
+ARCHIVE_NAME = "nomad-revert"
+SAVE_TIMEOUT = 90
 
 
 class ConfigShell(macssh.SshShell):
@@ -117,6 +127,12 @@ class Outcome:
     refused: list = field(default_factory=list)  # [(line, [error lines])]
     applet_ok: object = None  # True, False (refused), None (none sent)
     problem: str = ""  # Couldn't log in, or what was refused, in a sentence
+    confirmed: object = None  # Guarded: True (configure confirm said from a new login), False, None (not guarded)
+    reverted: bool = False  # Guarded: put back right away (a line refused, or no new login)
+    reverts_at: str = ""  # Guarded, not confirmed and not put back: when the device puts it back itself (HH:MM)
+    archive_added: str = ""  # The archive path NOMAD set up for the revert timer
+    waiting: bool = False  # Guarded, in and a new login works, but left for the user to confirm (by reverts_by)
+    reverts_by: object = None  # Guarded: when the device puts it back unless confirmed (datetime), roughly
 
     @property
     def first_error(self):
@@ -143,10 +159,15 @@ class Pusher:
         """The switch's command line at the # prompt, or None (and why in problems[address])."""
         if address in self.shells:
             return self.shells[address]
+        shell = self.new_shell(address, names)
+        self.shells[address] = shell
+        return shell
+
+    def new_shell(self, address, names=()):
+        """A login of its own (not the one kept), or None (and why in problems[address])."""
         session, self.login_labels[address] = self.logins.login_for(address, names)
         if session is None:
             self.problems[address] = "no saved SSH session or login to log in with."
-            self.shells[address] = None
             return None
         shell = self.shell_factory(session, self.vault, self.known_hosts, self.trust_new, self.logins.password,
                                    self.should_stop, enable_secret=self.enable_secret)
@@ -164,7 +185,6 @@ class Pusher:
             shell.close()
             shell = None
             self.problems[address] = f"SSH failed: {error}"
-        self.shells[address] = shell
         return shell
 
     def forget(self, address):
@@ -245,6 +265,197 @@ class Pusher:
         if outcome.refused:
             outcome.problem = f"It refused {outcome.first_error}"
         return outcome
+
+    # ----------------------------------------------------------------- ACLs
+
+    def read_acls(self, address, names=(), pc_ip=""):
+        """acl.DeviceAcls read from the device (problem set when it couldn't be)."""
+        shell = self.shell(address, names)
+        if shell is None:
+            return acl.DeviceAcls(problem=self.problems.get(address, ""))
+        try:
+            running = shell.run("show running-config", timeout=macssh.TABLE_TIMEOUT)
+            if macssh.INVALID.search(running) or ("interface" not in running and "access-list" not in running):
+                return acl.DeviceAcls(problem="it wouldn't show its running-config (not enabled, or not allowed).")
+            shown = shell.run("show ip access-lists", timeout=macssh.TABLE_TIMEOUT)
+            shown6 = shell.run("show ipv6 access-list", timeout=macssh.TABLE_TIMEOUT)
+            if macssh.INVALID.search(shown6):
+                shown6 = ""
+            toward = ""
+            if pc_ip and ":" not in pc_ip:
+                toward = shell.run(f"show ip cef {pc_ip}")
+                if macssh.INVALID.search(toward):
+                    toward = shell.run(f"show ip route {pc_ip}")
+        except Cancelled:
+            return acl.DeviceAcls(problem="stopped.")
+        except (ConnectionFailed, paramiko.SSHException, OSError, EOFError) as error:
+            self.forget(address)
+            return acl.DeviceAcls(problem=str(error))
+        device = acl.parse_running(running)
+        acl.merge_show(device, acl.parse_show(f"{shown}\n{shown6}"))
+        device.toward_pc = acl.parse_toward(toward) if toward and not macssh.INVALID.search(toward) else ""
+        device.when = acl.now_text()
+        return device
+
+    def archive_ready(self, shell):
+        """The archive path the revert timer needs: the one set, else one NOMAD sets on the device's default file
+        system. (path, whether NOMAD added it), or ("", False) when it couldn't."""
+        text = shell.run("show running-config | section archive")
+        found = re.search(r"^\s+path\s+(\S+)", text, re.MULTILINE)
+        if found:
+            return found.group(1), False
+        systems = shell.run("show file systems")
+        chosen = ""
+        for line in systems.splitlines():
+            prefixes = re.findall(r"(\S+:)", line)
+            words = line.split()
+            if line.lstrip().startswith("*") and prefixes and "disk" in words and "rw" in words:
+                chosen = prefixes[0]
+                break
+        if not chosen:
+            chosen = next((name for name in FILE_SYSTEMS if name in systems), "")
+        if not chosen:
+            return "", False
+        path = f"{chosen}{ARCHIVE_NAME}"
+        _, refused = shell.configure(f"configure terminal\narchive\n path {path}\n maximum 3\nend",
+                                     stop_on_error=False)
+        if any(line.startswith("path") for line, _ in refused):
+            return "", False
+        return path, True
+
+    def set_up_guarded(self, address, text, minutes, names=(), confirm=True):
+        """Send ACL changes with the revert timer (text's first line is configure terminal revert timer N), then
+        confirm them from a new login (or, confirm False, only check a new login works and leave the confirming to
+        the user: Outcome.waiting). A line refused, or no new login, puts the old configuration back right away
+        (configure revert now); if even that can't be said, the device does it itself after minutes."""
+        outcome = Outcome()
+        shell = self.shell(address, names)
+        if shell is None:
+            outcome.problem = f"Couldn't log in: {self.problems.get(address, 'no reason given')}"
+            return outcome
+        reverts = (datetime.datetime.now() + datetime.timedelta(minutes=minutes)).strftime("%H:%M")
+        try:
+            path, added = self.archive_ready(shell)
+            if not path:
+                outcome.problem = ("It has no archive path for the revert timer, and NOMAD couldn't find a file "
+                                   "system to set one on. Send without the revert timer, or set archive / path on "
+                                   "it first.")
+                return outcome
+            outcome.archive_added = path if added else ""
+            outcome.reverts_by = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
+            outcome.transcript, outcome.refused = self.configure_past_notes(shell, text)
+            if outcome.refused:
+                outcome.reverted = self.revert_now(shell)
+                outcome.reverts_at = "" if outcome.reverted else reverts
+                outcome.problem = f"It refused {outcome.first_error}"
+                return outcome
+        except Cancelled:
+            outcome.problem = "Stopped."
+            outcome.reverts_at = reverts
+            return outcome
+        except (ConnectionFailed, paramiko.SSHException, OSError, EOFError) as error:
+            self.forget(address)
+            outcome.problem = f"The connection failed partway: {error}"
+            outcome.reverts_at = reverts
+            return outcome
+        fresh = self.new_shell(address, names)  # Prove a new login still gets in, and confirm from it
+        if fresh is None:
+            why = self.problems.get(address, "no reason given")
+            outcome.confirmed = False
+            outcome.reverted = self.revert_now(shell)
+            outcome.reverts_at = "" if outcome.reverted else reverts
+            outcome.problem = f"A new login failed after the change ({why})" + \
+                (", so it was put back." if outcome.reverted else f"; the device puts it back at {reverts}.")
+            return outcome
+        if not confirm:
+            fresh.close()
+            outcome.transcript += "\n(a new login works; left for you to confirm)"
+            outcome.ok, outcome.confirmed, outcome.waiting, outcome.reverts_at = True, False, True, reverts
+            return outcome
+        try:
+            answer = fresh.run("configure confirm")
+            outcome.transcript += "\n(new login) configure confirm\n" + answer
+            outcome.confirmed = not macssh.INVALID.search(answer)
+            if not outcome.confirmed:
+                outcome.problem = f"configure confirm was refused: {answer.strip()[:200]}"
+                outcome.reverts_at = reverts
+        except (Cancelled, ConnectionFailed, paramiko.SSHException, OSError, EOFError) as error:
+            outcome.confirmed = False
+            outcome.problem = f"configure confirm failed: {error}"
+            outcome.reverts_at = reverts
+        finally:
+            fresh.close()
+        outcome.ok = bool(outcome.confirmed)
+        return outcome
+
+    @staticmethod
+    def configure_past_notes(shell, text):
+        """shell.configure(text), carrying on past lines whose only "errors" are the revert timer's own notes."""
+        lines = [line for line in text.splitlines() if line.strip()]
+        transcript, refused = [], []
+        while lines:
+            part, said = shell.configure("\n".join(lines))
+            transcript.append(part)
+            if not said:
+                break
+            line, errors = said[0]
+            real = [error for error in errors if not ROLLBACK_NOTE.search(error)]
+            if real:
+                refused = [(line, real)]
+                break
+            at = next((index for index, item in enumerate(lines) if item.strip() == line), None)
+            if at is None or at + 1 >= len(lines):
+                break
+            rest = lines[at + 1:]
+            if rest[0].startswith(" "):  # Inside a mode: go back into it
+                mode = next((item for item in reversed(lines[:at + 1]) if not item.startswith(" ") and
+                             not item.startswith("conf")), None)
+                rest = ([mode] if mode else []) + rest
+            lines = (["configure terminal"] if rest[0].strip() != "end" else []) + rest
+        return "\n".join(transcript), refused
+
+    def confirm(self, address, names=()):
+        """configure confirm from a new login (so it shows logins still work): (ok, what it said)."""
+        fresh = self.new_shell(address, names)
+        if fresh is None:
+            return False, f"A new login failed: {self.problems.get(address, 'no reason given')}"
+        try:
+            answer = fresh.run("configure confirm")
+        except (Cancelled, ConnectionFailed, paramiko.SSHException, OSError, EOFError) as error:
+            return False, str(error)
+        finally:
+            fresh.close()
+        refused = macssh.INVALID.search(answer) or mirror.errors_in(answer)
+        return not refused, answer.strip()
+
+    def revert(self, address, names=()):
+        """configure revert now: (ok, what went wrong)."""
+        shell = self.shell(address, names)
+        if shell is None:
+            return False, f"Couldn't log in: {self.problems.get(address, 'no reason given')}"
+        if self.revert_now(shell):
+            return True, ""
+        return False, "configure revert now wasn't taken (nothing waiting to be put back?)"
+
+    def revert_now(self, shell):
+        """configure revert now on a login still open: whether it was taken."""
+        try:
+            answer = shell.line("configure revert now", timeout=LINE_TIMEOUT * 2)
+        except (Cancelled, ConnectionFailed, paramiko.SSHException, OSError, EOFError):
+            return False
+        return not macssh.INVALID.search(answer) and not mirror.errors_in(answer)
+
+    def save_config(self, address, names=()):
+        """write memory: (ok, what it said)."""
+        shell = self.shell(address, names)
+        if shell is None:
+            return False, self.problems.get(address, "")
+        try:
+            answer = shell.line("write memory", timeout=SAVE_TIMEOUT)
+        except (Cancelled, ConnectionFailed, paramiko.SSHException, OSError, EOFError) as error:
+            self.forget(address)
+            return False, str(error)
+        return "[OK]" in answer or not mirror.errors_in(answer), answer.strip()
 
     def close(self):
         shells, self.shells = list(self.shells.values()), {}
