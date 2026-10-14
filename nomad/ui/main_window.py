@@ -48,6 +48,7 @@ from .switch_tab import SwitchTab
 from .mac_finder_tab import MacFinderTab
 from .mirror_tab import MirrorTab
 from .acl_tab import AclTab
+from .vpn_tab import VpnTab
 from .syslog_tab import SyslogTab
 from .tftp_tab import TftpTab
 from .theme import COLORS, DEFAULT_TEXT_SCALE, TEXT_SCALES, set_text_scale
@@ -175,6 +176,7 @@ class MainWindow(QMainWindow):
         self.subnet_tab = SubnetTab(self)
         self.snmp_config_tab = SnmpConfigTab(self)
         self.acl_tab = AclTab(self)  # The Network Map's switches and routers, saved sessions' SSH logins
+        self.vpn_tab = VpnTab(self)  # The same, and the IP Addresses page (for tunnel subnets)
         self.inventory_tab = InventoryTab(self)  # The Network Map's devices and the saved sessions
         self.wake_tab = WakeTab(self)
         terminal_store = SessionFolderStore(self.session_store, TERMINAL_PROTOCOLS)
@@ -202,7 +204,7 @@ class MainWindow(QMainWindow):
                                       (self.web_check_tab, "Web Check")]),
             ("Network Management", [(self.netmap_tab, "Network Map"), (self.ipam_tab, "IP Addresses"),
                 (self.vlan_tab, "VLANs"), (self.placement_tab, "Subnet Placement"),
-                (self.snmp_config_tab, "SNMP Config"), (self.acl_tab, "ACLs & Route Maps"),
+                (self.snmp_config_tab, "SNMP Config"), (self.acl_tab, "ACLs & Route Maps"), (self.vpn_tab, "VPNs"),
                 (self.inventory_tab, "Ansible Inventory")]),
             ("Capture & Logs", [(self.capture_tab, "Packet Capture"), (self.mirror_tab, "Port Mirroring"),
                                 (self.syslog_tab, "Syslog")]),
@@ -368,6 +370,12 @@ class MainWindow(QMainWindow):
         port."""
         self.navigator.setCurrentWidget(self.acl_tab)
         self.acl_tab.prefill(device or "", acl, port)
+
+    def show_vpns(self, devices=(), new=False):
+        """The VPNs page with Network Map routers chosen and read (their VPNs shown), or (new) a new VPN between
+        them."""
+        self.navigator.setCurrentWidget(self.vpn_tab)
+        self.vpn_tab.prefill(list(devices), new)
 
     def show_mirror(self, source=None, ports=(), vlan=0, dest=None, dest_port="", host=""):
         """The Port Mirroring page, filled in from the Network Map: mirror ports (or a VLAN, or a host's port) of

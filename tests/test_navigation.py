@@ -225,3 +225,61 @@ def test_escape_closes_the_drawer_without_taking_the_pages_escape(nav):
     nav.open_search()
     QTest.keyClick(nav.search, Qt.Key_Escape)
     assert not nav.drawer_open and not nav.panel.isVisible()
+
+
+def rail(nav):
+    """(title, pinned) for each rail entry, with None for the line between favorites and recent tools."""
+    from nomad.ui.navigation import RAIL_PINNED_ROLE
+    return [(item.data(Qt.UserRole), item.data(RAIL_PINNED_ROLE)) if item.data(Qt.UserRole) is not None else None
+            for item in (nav.favorite_list.item(row) for row in range(nav.favorite_list.count()))]
+
+
+def test_recent_tools_sit_on_the_rail_below_the_favorites(nav):
+    nav.favorites = ["Interfaces"]
+    nav.activate_title("iperf")
+    nav.activate_title("Interfaces")
+    assert rail(nav) == [("Interfaces", True), None, ("iperf", False)]
+    assert nav.favorite_list.currentItem().data(Qt.UserRole) == "Interfaces"
+    nav.activate_title("Ping")
+    assert rail(nav) == [("Interfaces", True), None, ("Ping", False), ("iperf", False)]
+    assert nav.favorite_list.currentItem().data(Qt.UserRole) == "Ping"  # Lit like the taskbar's open app
+    nav.toggle_favorite("Ping")  # Pinned: moves up, the line stays only while there are recent tools
+    assert rail(nav) == [("Interfaces", True), ("Ping", True), None, ("iperf", False)]
+    nav.forget_recent("iperf")
+    assert rail(nav) == [("Interfaces", True), ("Ping", True)]
+
+
+def test_recent_tools_without_favorites_have_no_line(nav):
+    nav.favorites = []
+    nav.activate_title("Ping")
+    assert rail(nav) == [("Ping", False), ("Interfaces", False)]
+
+
+def test_dragging_a_recent_tool_above_the_line_pins_it(nav):
+    from PyQt5.QtCore import QModelIndex
+    nav.favorites = ["Interfaces"]
+    nav.activate_title("Ping")
+    nav.activate_title("iperf")
+    assert rail(nav) == [("Interfaces", True), None, ("iperf", False), ("Ping", False)]
+    model = nav.favorite_list.model()
+    assert model.moveRows(QModelIndex(), 3, 1, QModelIndex(), 0)  # Ping to the top
+    assert nav.favorites == ["Ping", "Interfaces"]
+    QApplication.processEvents()
+    assert rail(nav) == [("Ping", True), ("Interfaces", True), None, ("iperf", False)]
+    assert model.moveRows(QModelIndex(), 0, 1, QModelIndex(), 4)  # A favorite dropped below the line stays pinned
+    assert nav.favorites == ["Interfaces", "Ping"]
+    QApplication.processEvents()
+    assert rail(nav) == [("Interfaces", True), ("Ping", True), None, ("iperf", False)]
+
+
+def test_recent_tools_on_the_rail_can_be_turned_off(nav, tmp_path):
+    nav.favorites = ["Interfaces"]
+    nav.activate_title("Ping")
+    nav.toggle_recent_on_rail()
+    assert rail(nav) == [("Interfaces", True)]
+    settings = QSettings(str(tmp_path / "rail.ini"), QSettings.IniFormat)
+    nav.save_settings(settings)
+    nav.recent_on_rail = True
+    nav.restore_settings(settings)
+    assert not nav.recent_on_rail and rail(nav) == [("Interfaces", True)]
+    assert nav.recent[0] == "Ping"  # Still in the drawer's Recent

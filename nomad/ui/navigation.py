@@ -1,5 +1,5 @@
 """Tool navigation: favorites rail, searchable drawer, and persistent page stack."""
-from PyQt5.QtCore import QEvent, QRect, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPen
 from PyQt5.QtWidgets import QAbstractItemView, QHBoxLayout, QListWidget, QListWidgetItem, QMenu, QShortcut, \
     QStackedWidget, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QToolButton, QVBoxLayout, QWidget
@@ -13,6 +13,7 @@ ITEM_PADDING = 22 + 18 + 3 + 8  # Left and right padding and the selection bar (
 HEADER_PADDING = 12  # Left indent of a heading's text
 HEADER_GAP = 10  # Space above each heading after the first, separating the sections
 HEADER_MARGIN = 6  # Space above and below a heading's text inside its band
+RAIL_PINNED_ROLE = Qt.UserRole + 2  # On the rail: True for a pinned favorite, False for a recently used tool
 
 
 def header_font(base):
@@ -73,6 +74,13 @@ class FavoriteIconDelegate(QStyledItemDelegate):
     """Center rail icons independently of text layout and platform list styling."""
 
     def paint(self, painter, option, index):
+        if index.data(Qt.UserRole) is None:  # The line between pinned favorites and recently used tools
+            painter.save()
+            painter.setPen(QPen(QColor(COLORS["border"]), 1))
+            y = option.rect.center().y()
+            painter.drawLine(option.rect.left() + 12, y, option.rect.right() - 12, y)
+            painter.restore()
+            return
         styled = QStyleOptionViewItem(option)
         self.initStyleOption(styled, index)
         icon = QIcon(styled.icon)
@@ -294,6 +302,7 @@ class Navigator(SidebarNavigator):
         super().__init__(parent)
         self.favorites = ["Interfaces", "Terminal", "Network Map", "IP Addresses", "Ping"]
         self.recent = []
+        self.recent_on_rail = True  # Recently used tools sit below the favorites until they age out
         self.drawer_open = False
         self.sidebar_shown = False
         self.sections = {}
@@ -536,24 +545,55 @@ class Navigator(SidebarNavigator):
                 self.drawer_list.addItem(QListWidgetItem(source))
         self.position_drawer()
 
+    def rail_recent(self):
+        """Recently used tools that aren't pinned, shown below the favorites like unpinned apps on the Windows
+        taskbar: they come and go as tools are used."""
+        if not self.recent_on_rail:
+            return []
+        return [title for title in self.recent if title not in self.favorites and title in self.sections]
+
     def rebuild_rail(self):
         self.favorite_list.clear()
-        for title in self.favorites:
-            if title not in self.sections:
-                continue
-            item = QListWidgetItem(tool_icon(title), "")
-            item.setData(Qt.UserRole, title)
-            item.setData(Qt.AccessibleTextRole, title)
-            item.setToolTip(title + " — drag to reorder; right-click to unpin")
-            item.setTextAlignment(Qt.AlignCenter)
-            item.setSizeHint(QSize(48, max(44, self.fontMetrics().height() + 16)))
-            self.favorite_list.addItem(item)
-            if title == self.title(self.currentWidget()):
-                self.favorite_list.setCurrentItem(item)
+        pinned = [title for title in self.favorites if title in self.sections]
+        recent = self.rail_recent()
+        for title in pinned:
+            self.add_rail_item(title, True)
+        if pinned and recent:
+            separator = QListWidgetItem()
+            separator.setFlags(Qt.NoItemFlags)
+            separator.setSizeHint(QSize(48, 9))
+            self.favorite_list.addItem(separator)
+        for title in recent:
+            self.add_rail_item(title, False)
+
+    def add_rail_item(self, title, pinned):
+        item = QListWidgetItem(tool_icon(title), "")
+        item.setData(Qt.UserRole, title)
+        item.setData(RAIL_PINNED_ROLE, pinned)
+        item.setData(Qt.AccessibleTextRole, title)
+        item.setToolTip(title + (" — drag to reorder; right-click to unpin" if pinned else
+                                 " — recently used; drag up or right-click to pin"))
+        item.setTextAlignment(Qt.AlignCenter)
+        item.setSizeHint(QSize(48, max(44, self.fontMetrics().height() + 16)))
+        if not pinned:
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled)
+        self.favorite_list.addItem(item)
+        if title == self.title(self.currentWidget()):
+            self.favorite_list.setCurrentItem(item)
 
     def favorites_moved(self, *args):
-        self.favorites = [self.favorite_list.item(i).data(Qt.UserRole) for i in range(self.favorite_list.count())]
+        """Dragging reorders the favorites; a recent tool dragged up among them is pinned where it was dropped."""
+        items = [self.favorite_list.item(row) for row in range(self.favorite_list.count())]
+        above = any(item.data(Qt.UserRole) is None for item in items)  # Recent tools only pin above the line
+        favorites = []
+        for item in items:
+            if item.data(Qt.UserRole) is None:
+                above = False
+            elif item.data(RAIL_PINNED_ROLE) or above:
+                favorites.append(item.data(Qt.UserRole))
+        self.favorites = favorites
         self.fill_drawer()
+        QTimer.singleShot(0, self.rebuild_rail)  # Put the line and the recent tools back in place, once the move ends
 
     def toggle_favorite(self, title):
         if title in self.favorites:
@@ -575,11 +615,28 @@ class Navigator(SidebarNavigator):
 
     def rail_menu(self, pos):
         item = self.favorite_list.itemAt(pos)
-        if item is not None:
-            title = item.data(Qt.UserRole)
-            menu = QMenu(self)
+        title = item.data(Qt.UserRole) if item is not None else None
+        menu = QMenu(self)
+        if title is not None and item.data(RAIL_PINNED_ROLE):
             menu.addAction("Unpin " + title, lambda: self.toggle_favorite(title))
-            menu.exec_(self.favorite_list.mapToGlobal(pos))
+        elif title is not None:
+            menu.addAction("Pin " + title + " to Favorites", lambda: self.toggle_favorite(title))
+            menu.addAction("Remove from Recent", lambda: self.forget_recent(title))
+        if not menu.isEmpty():
+            menu.addSeparator()
+        shown = menu.addAction("Show Recent Tools Here", self.toggle_recent_on_rail)
+        shown.setCheckable(True)
+        shown.setChecked(self.recent_on_rail)
+        menu.exec_(self.favorite_list.mapToGlobal(pos))
+
+    def forget_recent(self, title):
+        self.recent = [name for name in self.recent if name != title]
+        self.rebuild_rail()
+        self.fill_drawer()
+
+    def toggle_recent_on_rail(self):
+        self.recent_on_rail = not self.recent_on_rail
+        self.rebuild_rail()
 
     def restore_settings(self, settings):
         favorites = settings.value("navigation/favorites", self.favorites)
@@ -590,12 +647,14 @@ class Navigator(SidebarNavigator):
         if isinstance(recent, str):
             recent = [recent]
         self.recent = [title for title in recent if title in self.sections][:5]
+        self.recent_on_rail = settings.value("navigation/recent_on_rail", True, bool)
         self.rebuild_rail()
         self.set_sidebar_visible(settings.value("navigation/keep_open", False, bool))
 
     def save_settings(self, settings):
         settings.setValue("navigation/favorites", self.favorites)
         settings.setValue("navigation/recent", self.recent)
+        settings.setValue("navigation/recent_on_rail", self.recent_on_rail)
         settings.setValue("navigation/keep_open", self.sidebar_visible())
 
     def _on_row_changed(self, row):

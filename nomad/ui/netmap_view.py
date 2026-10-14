@@ -185,7 +185,7 @@ class NodeItem(QGraphicsItem):
                 link.update_position()
             if self.group_item is not None and not self.view.groups_suspended:
                 self.group_item.update_rect()
-            for gap in self.view.gap_items:
+            for gap in self.view.gap_items + self.view.tunnel_items:
                 if self in (gap.a_item, gap.b_item):
                     gap.update_position()
         elif change == QGraphicsItem.ItemSelectedHasChanged:
@@ -896,6 +896,42 @@ class GapItem(QGraphicsItem):
         painter.drawText(box, Qt.AlignCenter, text)
 
 
+class TunnelItem(GapItem):
+    """A VPN tunnel between two routers (an overlay's extra line): dashed, bowed a little so it isn't hidden by a link
+    between the same two, in the overlay mark's color."""
+
+    def __init__(self, a_item, b_item, mark):
+        self.mark = mark
+        super().__init__(a_item, b_item, mark.note)
+        self.setZValue(1.5)
+
+    def path(self):
+        line = self.line
+        middle = line.center()
+        length = max(1.0, line.length())
+        bend = min(40.0, length / 5)
+        normal = QPointF(-line.dy() / length * bend, line.dx() / length * bend)
+        path = QPainterPath(line.p1())
+        path.quadTo(middle + normal, line.p2())
+        return path
+
+    def boundingRect(self):
+        return self.path().boundingRect().adjusted(-12, -12, 12, 12)
+
+    def shape(self):
+        stroker = QPainterPathStroker()
+        stroker.setWidth(10)
+        return stroker.createStroke(self.path())
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(mark_color(self.mark.color), self.mark.width or 2.5)
+        pen.setStyle(OVERLAY_LINE_STYLES.get(self.mark.style, Qt.DashLine))
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(self.path())
+
+
 class MapView(QGraphicsView):
     selection_changed = pyqtSignal(object)  # ("device", key), ("node", key), ("port", key, port) or None
     positions_changed = pyqtSignal()
@@ -939,6 +975,7 @@ class MapView(QGraphicsView):
         self.overlay = None  # The netmap.overlays.Overlay showing (one at a time, instead of a VLAN), or None
         self.path_overlay = None  # Carry VLAN's planned path (see set_path_overlay), or None
         self.gap_items = []  # Its GapItems
+        self.tunnel_items = []  # The overlay's extra lines (VPN tunnels): TunnelItems
         self.pick_anchor = None  # While picking: the device a rubber line goes from to the mouse (the last picked)
         self.pick_rubber = None  # That line
         self.pick_mouse = None  # Where the mouse is (scene)
@@ -951,7 +988,7 @@ class MapView(QGraphicsView):
         self.vlan_focus = None  # Its links are new: the page highlights the VLAN again
         self.overlay = None  # Or shows its overlay again
         self.path_overlay = None  # And Carry VLAN draws its path again
-        self.gap_items, self.pick_rubber = [], None  # Gone with the scene
+        self.gap_items, self.tunnel_items, self.pick_rubber = [], [], None  # Gone with the scene
         self.network_map, self.links = network_map, network_map.links
         self.groups_suspended = True
         for key, device in network_map.devices.items():
@@ -971,7 +1008,7 @@ class MapView(QGraphicsView):
         self.vlan_focus = None  # Its links are new: the page highlights the VLAN again
         self.overlay = None  # Or shows its overlay again
         self.path_overlay = None  # And Carry VLAN draws its path again
-        self.gap_items, self.pick_rubber = [], None  # Gone with the scene
+        self.gap_items, self.tunnel_items, self.pick_rubber = [], [], None  # Gone with the scene
         self.network_map, self.links, self.last_found = None, [], None
         self.update_scene_rect()
 
@@ -983,7 +1020,7 @@ class MapView(QGraphicsView):
         self.vlan_focus = None  # Its links are new: the page highlights the VLAN again
         self.overlay = None  # Or shows its overlay again
         self.path_overlay = None  # And Carry VLAN draws its path again
-        self.gap_items, self.pick_rubber = [], None  # Gone with the scene
+        self.gap_items, self.tunnel_items, self.pick_rubber = [], [], None  # Gone with the scene
         self.network_map, self.links = None, links
         for key, node in nodes.items():
             item = DeviceItem(node.device, {}, self) if node.device is not None else SimpleNodeItem(node, self)
@@ -1330,7 +1367,23 @@ class MapView(QGraphicsView):
         for item in self.group_items.values():
             members = item.all_members()
             item.setOpacity(1.0 if not members or any(member.opacity() == 1.0 for member in members) else FADED)
+        self.draw_extra_lines()
         self.apply_path_overlay()
+
+    def draw_extra_lines(self):
+        """The overlay's lines that aren't links (VPN tunnels), between the devices drawn now."""
+        for item in self.tunnel_items:
+            if item.scene() is not None:
+                item.scene().removeItem(item)
+        self.tunnel_items = []
+        overlay = self.overlay
+        for a, b, mark in (overlay.extra_lines if overlay is not None else []):
+            a_item, b_item = self.items_by_key.get(a), self.items_by_key.get(b)
+            if a_item is None or b_item is None or not a_item.isVisible() or not b_item.isVisible():
+                continue
+            item = TunnelItem(a_item, b_item, mark)
+            self.scene().addItem(item)
+            self.tunnel_items.append(item)
 
     def set_path_overlay(self, overlay):
         """Draw Carry VLAN's path over the links: {"vlan": number (or None), "devices": keys kept bright, "links":

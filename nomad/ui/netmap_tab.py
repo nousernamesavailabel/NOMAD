@@ -1493,8 +1493,12 @@ class NetworkMapTab(QWidget):
         """Highlight the VLAN chosen, or show the overlay chosen (again, after the map was drawn again), or show
         everything."""
         network_map = self.network_map
-        overlay = overlays.build(network_map, *self.overlay_shown, rates=self.counters.rates,
-                                 monitoring=self.monitor.running) if self.overlay_shown is not None else None
+        shown = self.overlay_shown
+        if shown is not None and shown[0] == overlays.VPNS:  # The VPNs page's tunnels, as they are now
+            page = getattr(self.window, "vpn_tab", None)
+            shown = (overlays.VPNS, page.map_tunnels() if page is not None else [])
+        overlay = overlays.build(network_map, *shown, rates=self.counters.rates,
+                                 monitoring=self.monitor.running) if shown is not None else None
         if overlay is None:
             self.overlay_shown = None  # Of a VRF or device that's gone
         if (self.vlan_shown is None and overlay is None) or network_map is None:
@@ -1691,6 +1695,13 @@ class NetworkMapTab(QWidget):
             action.setToolTip(tip)
             action.setCheckable(True)
             action.setChecked(shown is not None and shown[0] == kind)
+            action.setEnabled(usable)
+        if hasattr(self.window, "vpn_tab"):
+            action = menu.addAction("VPN Tunnels", lambda: self.show_overlay(overlays.VPNS))
+            action.setToolTip("The VPNs read on the VPNs page between this map's routers, colored by whether "
+                              "they're up.")
+            action.setCheckable(True)
+            action.setChecked(shown is not None and shown[0] == overlays.VPNS)
             action.setEnabled(usable)
         menu.addMenu(stp_menu)
         if usable:
@@ -2414,6 +2425,15 @@ class NetworkMapTab(QWidget):
         here = self.tabs.currentWidget()
         selected = here.selected_keys() if here in (self.view, self.l3_view) else []
         keys = selected if key in selected else [key]
+        if device.kind in (SWITCH, ROUTER) and hasattr(self.window, "show_vpns"):  # In Tools, after ACLs
+            tools = next((action.menu() for action in menu.actions() if action.menu() is not None
+                          and action.text() == "Tools"), menu)
+            routers = [item for item in keys if shown.devices.get(item) is not None and
+                       shown.devices[item].kind == ROUTER]
+            actions[tools.addAction("VPNs...")] = lambda: self.window.show_vpns(devices=[key])
+            if len(routers) >= 2 and key in routers:
+                label = "Build VPN Between..." if len(routers) == 2 else f"Build DMVPN of {len(routers)} Routers..."
+                actions[tools.addAction(label)] = lambda: self.window.show_vpns(devices=routers, new=True)
         news = self.news_of_devices(keys)
         if news and self.worker is None:
             actions[menu.addAction("Mark as Seen")] = lambda: self.mark_seen(news)

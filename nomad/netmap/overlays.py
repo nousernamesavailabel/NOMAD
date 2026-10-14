@@ -16,6 +16,7 @@ from .model import AP, FIREWALL, KIND_NAMES, NETWORK_KINDS, ROUTER, SOURCE_NAMES
 # Kinds of overlay
 IMPACT, SPOF, TRUNKS, VRF, SUBNET, COLOR = "impact", "spof", "trunks", "vrf", "subnet", "color"
 SPEED, STP, UTIL = "speed", "stp", "util"  # From what's read over SNMP: ports' status, a VLAN's tree, counters
+VPNS = "vpns"  # The VPNs page's tunnels between the map's routers
 # How a link's drawn
 SOLID, DASH, DOT = "solid", "dash", "dot"
 # Color By: what devices can be colored by, and what each is called
@@ -61,6 +62,7 @@ class Overlay:
     summary: list = field(default_factory=list)  # Parts of what the bar says after the title
     legend: list = field(default_factory=list)  # [(color, what it means)]
     tone: str = ""  # "warning" or "error" when the overlay found something wrong ("" otherwise)
+    extra_lines: list = field(default_factory=list)  # [(device key, device key, Mark)]: lines that aren't links
 
 
 def count_text(count, noun):
@@ -718,6 +720,39 @@ def utilization(network_map, rates, monitoring=True):
     return overlay
 
 
+# ----------------------------------------------------------------- VPN tunnels
+
+TUNNEL_COLORS = {"up": "success", "negotiating": "warning", "down": "error", "unknown": "muted"}
+TUNNEL_ORDER = ["down", "negotiating", "unknown", "up"]
+
+
+def vpn_tunnels(network_map, lines):
+    """The VPNs page's tunnels between the map's routers as dashed lines, colored by whether they're up: lines
+    [(device key, device key, state (vpnstatus UP...), what to say)]."""
+    overlay = Overlay(VPNS, "VPN tunnels")
+    states = {}
+    for a, b, state, text in lines:
+        if a not in network_map.devices or b not in network_map.devices or a == b:
+            continue
+        overlay.extra_lines.append((a, b, Mark(TUNNEL_COLORS.get(state, "muted"), text, DASH, 2.5)))
+        for key in (a, b):
+            states.setdefault(key, []).append((state, text))
+    for key, items in states.items():
+        worst = min((state for state, _ in items), key=lambda state: TUNNEL_ORDER.index(state)
+                    if state in TUNNEL_ORDER else 9)
+        overlay.devices[key] = Mark(TUNNEL_COLORS.get(worst, "muted"),
+                                    "\n".join(dict.fromkeys(text for _, text in items)))
+    count = len(overlay.extra_lines)
+    down = sum(1 for _, _, mark in overlay.extra_lines if mark.color == "error")
+    if count:
+        overlay.summary = [count_text(count, "tunnel")] + ([f"{down} down"] if down else [])
+    else:
+        overlay.summary = ["none between routers on this map (read them on the VPNs page)"]
+    overlay.tone = "error" if down else ""
+    overlay.legend = [("success", "up"), ("warning", "partly up"), ("error", "down"), ("muted", "not read")]
+    return overlay
+
+
 # ----------------------------------------------------------------- What a menu offers
 
 def build(network_map, kind, argument=None, rates=None, monitoring=False):
@@ -729,6 +764,8 @@ def build(network_map, kind, argument=None, rates=None, monitoring=False):
     try:
         if kind == SPEED:
             return link_speed(network_map)
+        if kind == VPNS:
+            return vpn_tunnels(network_map, argument or [])
         if kind == STP:
             vlan, views, unread = argument
             return spanning_tree(network_map, vlan, views, unread)

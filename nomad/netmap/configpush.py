@@ -5,7 +5,7 @@ prompt, type the lines one at a time, and stop at the first one the switch refus
 Nothing is saved (no write memory) unless asked for (the ACLs page's Save to Startup Config): a switch that reloads
 comes back without what was sent.
 
-ACL changes go in guarded (set_up_guarded): `configure terminal revert timer N` first, so the device puts its old
+ACL and VPN changes go in guarded (set_up_guarded): `configure terminal revert timer N` first, so the device puts its old
 configuration back by itself after N minutes unless told `configure confirm`, which NOMAD only says from a new login
 made after the change (proof it can still get in). A line refused, or no new login, has NOMAD revert right away.
 
@@ -15,12 +15,13 @@ import datetime
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 
 import paramiko
 
 from ..terminal.transports import Cancelled, ConnectionFailed
-from . import acl, macssh, mirror, routepolicy
+from . import acl, macssh, mirror, routepolicy, vpn, vpnstatus
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,8 @@ ENABLE_TIMEOUT = 15
 PASSWORD_PROMPT = re.compile(r"(?:password|secret)\s*:\s*$", re.IGNORECASE)
 CONFIRM_PROMPT = re.compile(r"\[(?:confirm|yes/no|y/n)\]\s*:?\s*$", re.IGNORECASE)
 ROLLBACK_NOTE = re.compile(r"rollback|backing up|archive|confirmed change", re.IGNORECASE)
+ROLLED_BACK = re.compile(r"rolling to|rollback done", re.IGNORECASE)  # What configure revert now says when it does
+NOTHING_PENDING = re.compile(r"no rollback confirmed change pending", re.IGNORECASE)
 FILE_SYSTEMS = ("bootflash:", "flash:", "unix:", "disk0:", "flash0:", "nvram:")
 ARCHIVE_NAME = "nomad-revert"
 SAVE_TIMEOUT = 90
@@ -36,6 +39,7 @@ SAVE_TIMEOUT = 90
 
 class ConfigShell(macssh.SshShell):
     """A switch's command line that can go to enable and configure."""
+    errors_in = staticmethod(mirror.errors_in)  # The lines of an answer that say a line was refused
 
     def __init__(self, session, vault=None, known_hosts=None, trust_new=False, password=None,
                  should_stop=lambda: False, enable_secret=""):
@@ -104,7 +108,7 @@ class ConfigShell(macssh.SshShell):
                 in_config = True
             elif word == "end":
                 in_config = False
-            errors = mirror.errors_in(answer)
+            errors = self.errors_in(answer)
             if errors:
                 refused.append((word, errors))
                 if stop_on_error:
@@ -454,7 +458,11 @@ class Pusher:
             answer = shell.line("configure revert now", timeout=LINE_TIMEOUT * 2)
         except (Cancelled, ConnectionFailed, paramiko.SSHException, OSError, EOFError):
             return False
-        return not macssh.INVALID.search(answer) and not mirror.errors_in(answer)
+        if macssh.INVALID.search(answer) or NOTHING_PENDING.search(answer):
+            return False
+        # Notes IOS prints while it puts the old configuration back (%EIGRP: Deleting base topology is not allowed)
+        # don't mean it didn't
+        return bool(ROLLED_BACK.search(answer)) or not mirror.errors_in(answer)
 
     def run_commands(self, address, commands, names=()):
         """Exec commands (BGP soft clears): [(command, what it said, whether it took)]."""
@@ -487,11 +495,147 @@ class Pusher:
             return False, str(error)
         return "[OK]" in answer or not mirror.errors_in(answer), answer.strip()
 
+    # ----------------------------------------------------------------- VPNs
+
+    def read_vpns(self, address, names=(), pc_ip=""):
+        """vpn.DeviceVpns read from the router: running-config, routes, version, and what its show commands say about
+        the VPNs up now (raw, for vpnstatus). problem set when it couldn't be read."""
+        shell = self.shell(address, names)
+        if shell is None:
+            return vpn.DeviceVpns(problem=self.problems.get(address, ""))
+        try:
+            running = shell.run("show running-config", timeout=macssh.TABLE_TIMEOUT)
+            if macssh.INVALID.search(running) or "interface" not in running:
+                return vpn.DeviceVpns(problem="it wouldn't show its running-config (not enabled, or not allowed).")
+            routes = shell.run("show ip route", timeout=macssh.TABLE_TIMEOUT)
+            version = shell.run("show version | include IOS|Version")
+            raw = {}
+            for command in vpnstatus.SHOW_COMMANDS:
+                if command.startswith("show crypto pki") and "crypto pki trustpoint" not in running:
+                    continue
+                if (command.startswith("show dmvpn") or command.startswith("show ip nhrp")) and \
+                        " nhrp " not in running:
+                    continue
+                answer = shell.run(command, timeout=macssh.TABLE_TIMEOUT)
+                raw[command] = "" if macssh.INVALID.search(answer) else answer
+            toward = ""
+            if pc_ip and ":" not in pc_ip:
+                toward = shell.run(f"show ip cef {pc_ip}")
+                if macssh.INVALID.search(toward):
+                    toward = ""
+        except Cancelled:
+            return vpn.DeviceVpns(problem="stopped.")
+        except (ConnectionFailed, paramiko.SSHException, OSError, EOFError) as error:
+            self.forget(address)
+            return vpn.DeviceVpns(problem=str(error))
+        device = vpn.parse_device(running, routes if not macssh.INVALID.search(routes) else "", version)
+        device.status = vpnstatus.parse(raw)
+        device.toward_pc = acl.parse_toward(toward) if toward else ""
+        device.pc_ip = pc_ip
+        device.when = acl.now_text()
+        return device
+
+    def verify(self, address, checks, names=(), wait=90, should_stop=None):
+        """Run a VPN's checks on a router until each passes (or wait seconds go by: a tunnel takes a few to come up,
+        a routing neighbor longer): [(command, passed, what it said, what it means)]."""
+        shell = self.shell(address, names)
+        if shell is None:
+            return [(command, False, f"Couldn't log in: {self.problems.get(address, 'no reason given')}", meaning)
+                    for command, _, meaning in checks]
+        results = []
+        deadline = time.monotonic() + wait
+        for command, wanted, meaning in checks:
+            answer, passed = "", False
+            while True:
+                if (should_stop or self.should_stop)():
+                    raise Cancelled()
+                try:
+                    answer = shell.run(command, timeout=LINE_TIMEOUT * 2)
+                except (ConnectionFailed, paramiko.SSHException, OSError, EOFError) as error:
+                    self.forget(address)
+                    answer = str(error)
+                    break
+                passed = bool(re.search(wanted, answer))
+                if passed or time.monotonic() > deadline:
+                    break
+                time.sleep(3)
+            results.append((command, passed, answer.strip(), meaning))
+        return results
+
+    def dialog(self, address, steps, names=(), timeout=120):
+        """Exec or configuration lines that ask questions (crypto pki authenticate / enroll, crypto pki server no
+        shutdown...). steps: [(line, [(regex of a question, answer)])]; a question no rule answers stops it.
+        Returns (ok, transcript, problem)."""
+        shell = self.shell(address, names)
+        if shell is None:
+            return False, "", f"Couldn't log in: {self.problems.get(address, 'no reason given')}"
+        transcript = []
+        try:
+            for line, answers in steps:
+                ok, said, problem = shell.dialog(line, answers, timeout)
+                transcript.append(said)
+                if not ok:
+                    return False, "\n".join(transcript), problem
+        except Cancelled:
+            return False, "\n".join(transcript), "Stopped."
+        except (ConnectionFailed, paramiko.SSHException, OSError, EOFError) as error:
+            self.forget(address)
+            return False, "\n".join(transcript), f"The connection failed partway: {error}"
+        return True, "\n".join(transcript), ""
+
     def close(self):
         shells, self.shells = list(self.shells.values()), {}
         for shell in shells:
             if shell is not None:
                 shell.close()
+
+
+QUESTION = re.compile(r"(?:\[(?:yes/no|confirm|y/n|no|yes)\]\s*:?|password\s*:|passphrase\s*:|\?\s*\[[^\]]*\]\s*:?|"
+                      r"Re-enter password\s*:|\?)\s*$", re.IGNORECASE)
+
+
+class VpnShell(ConfigShell):
+    """A router's command line for VPN changes: crypto refusals don't always start with %, and some % lines are only
+    notes; and some commands ask questions (dialog)."""
+    errors_in = staticmethod(vpn.refusals)
+
+    def dialog(self, line, answers, timeout=120):
+        """Type a line and answer what it asks: (ok, transcript, problem)."""
+        self.channel.send(line + "\n")
+        transcript = [line]
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = max(5, deadline - time.monotonic())
+            text = self.read(remaining, done=lambda tail: bool(
+                macssh.PROMPT.match(tail) or QUESTION.search(tail) or
+                any(re.search(pattern, tail, re.IGNORECASE) for pattern, _ in answers)))
+            lines = text.rstrip().splitlines()
+            tail = lines[-1].strip() if lines else ""
+            body = "\n".join(item for item in lines if item.strip() != line.strip())
+            transcript.append(body)
+            refused = vpn.refusals(body)
+            if macssh.PROMPT.match(tail) and not QUESTION.search(tail):
+                if refused:
+                    return False, "\n".join(transcript), refused[0]
+                return True, "\n".join(transcript), ""
+            reply = next((answer for pattern, answer in answers if re.search(pattern, tail, re.IGNORECASE)), None)
+            if reply is None:
+                reply = next((answer for pattern, answer in answers if re.search(pattern, body, re.IGNORECASE)), None)
+            if callable(reply):  # An answer that depends on what it said (a CA's fingerprint checked)
+                reply = reply("\n".join(transcript))
+                if reply is None:
+                    self.channel.send("no\n")
+                    self.read(30)
+                    return False, "\n".join(transcript), "NOMAD said no (what it showed wasn't what was expected)."
+            if reply is None:
+                self.channel.send("\x03")  # Nothing says what to answer: give up on it
+                self.read(15)
+                return False, "\n".join(transcript), f"It asked something NOMAD has no answer for: {tail}"
+            self.channel.send(reply + "\n")
+            transcript.append(vpn.mask(f"(answered) {reply}") if "assword" not in tail and "passphrase" not in tail
+                              else "(answered)")
+            if time.monotonic() > deadline:
+                return False, "\n".join(transcript), "It took too long."
 
 
 def harmless_undo(line, errors):

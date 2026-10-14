@@ -4,6 +4,11 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.30.0] - 2026-10-14
+
+- **New:** VPNs builds and edits VPNs between Cisco routers: IPsec VTI, GRE over IPsec, GRE, crypto maps and DMVPN (phases 1-3, one or two hubs), with keys or certificates (it can set up a CA on one of the routers). It writes every router's side, checks the design, sends it with a revert timer and keeps it only once the VPN works from each end. Status says why a VPN is down. On the map: Build VPN Between, and a VPN Tunnels overlay.
+- **New:** tools you used lately sit on the favorites rail below your favorites, like the Windows taskbar. Right-click one to pin it, or drag it up among the favorites.
+
 ## [1.29.0] - 2026-10-13
 
 - **New:** the ACLs page is now ACLs & Route Maps: it reads, edits and tests prefix lists and route maps, puts them on BGP neighbors, redistributions, policy routing and distribute lists, and sends the changes entry by entry with the revert timer. After a change to a BGP neighbor's policy, it offers a soft clear.

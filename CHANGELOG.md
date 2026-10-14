@@ -6,6 +6,13 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.30.0] - 2026-10-14
+
+### Added
+
+- **VPNs** (under Network Management) builds and edits VPNs between Cisco IOS / IOS-XE routers: **IPsec VTI**, **GRE over IPsec**, **GRE**, **crypto maps** (IKEv1 or IKEv2) and **DMVPN** phases 1, 2 and 3 with one or two hubs (a second cloud is a second DMVPN, with tunnel keys where spokes need them), authenticated by pre-shared keys or **certificates**. Every router's side is written from one design, with routing across it (static, EIGRP classic or named, OSPF or BGP, set up the way each DMVPN phase needs; with BGP, the VPN's LANs are kept from the routers' ISP neighbors by prefix list). **Read** finds the VPNs already on the routers (built by hand or by NOMAD) so they can be edited: only what changed is sent, in an order IOS takes, keeping each router's names and lines NOMAD doesn't know. **Checks** catch recursive routing, better routes elsewhere, routes leaking to an ISP, NAT catching the traffic, WAN ACLs dropping IKE or ESP, overlaps, weak keys and crypto, MTU, clocks and certificates. **Send over SSH** puts the change on every router with the revert timer, checks the VPN works from each end (tunnels answer, LANs reach each other), and only then confirms it everywhere; a refusal or a failed check puts every router back. **Get Certificates** sets up NTP and an IOS certificate server on one of the routers (or uses a CA's SCEP URL, or enrolls by hand), and enrolls each router, trusting the CA only by its fingerprint. **Status** shows each VPN as the routers say it is now and why one is down, in words. The Network Map gets **Tools** > **VPNs...** and **Build VPN Between...**, and **Overlay** > **VPN Tunnels**. Keys are hidden in what's shown and kept protected for this Windows account. Tested on IOS XE 17.4 (C8000V) through an ISP of IOS routers.
+- **Recent tools on the favorites rail**, like unpinned apps on the Windows taskbar: the last few tools used that aren't favorites sit below the favorites, under a thin line, and drop off as other tools are used. Right-click one to **Pin** it or **Remove from Recent**, or drag it up among the favorites to pin it there. Right-click the rail > **Show Recent Tools Here** turns them off (saved).
+
 ## [1.29.0] - 2026-10-13
 
 ### Added
