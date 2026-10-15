@@ -63,6 +63,19 @@ OPER_STATES = {1: "up", 2: "down", 3: "testing", 4: "unknown", 5: "dormant", 6: 
                7: "lower layer down"}
 DUPLEXES = {2: "half", 3: "full"}
 # VRFs: which interfaces are in which, and each VRF's routing table (ipCidrRouteTable has only the global one)
+# TUNNEL-MIB tunnelIfTable (index ifIndex): 1, 2 local and remote IPv4 address (the old columns), 5 security (2:
+# IPsec), 9, 10 local and remote InetAddress (empty remote: multipoint)
+TUNNEL_IF_ENTRY = "1.3.6.1.2.1.10.131.1.1.1.1"
+TUNNEL_IF_COLUMNS = (1, 2, 5, 9, 10)
+TUNNEL_IPSEC = 2
+# CISCO-IPSEC-FLOW-MONITOR-MIB cikeTunnelTable (index cikeTunIndex): 4 local and 8 remote address of each IKE
+# session, 35 its status (1: active). The status is asked for by GET: walking past the table's last column takes IOS
+# XE seconds
+IKE_TUNNEL_ENTRY = "1.3.6.1.4.1.9.9.171.1.2.3.1"
+IKE_TUNNEL_COLUMNS = (4, 8)
+IKE_STATUS = 35
+IKE_ACTIVE = 1
+IKE_ACTIVE_COUNT = "1.3.6.1.4.1.9.9.171.1.2.1.1"  # cikeGlobalActiveTunnels: there (even 0) when the MIB is
 CV_VRF_NAME = "1.3.6.1.4.1.9.9.711.1.1.1.1.2"  # CISCO-VRF-MIB cvVrfName (index cvVrfIndex)
 CV_VRF_INTERFACE_ENTRY = "1.3.6.1.4.1.9.9.711.1.2.1.1"  # cvVrfInterfaceTable (index cvVrfIndex, ifIndex)
 L3VPN_IF_CLASSIFICATION = "1.3.6.1.2.1.10.166.11.1.2.1.1.2"  # MPLS-L3VPN-STD-MIB (index VRF name, ifIndex)
@@ -149,6 +162,9 @@ class DeviceTables:
     stp_root: object = None  # With that read: whether it's the root bridge of the VLAN's tree (None: unknown)
     port_status: dict = field(default_factory=dict)  # ifIndex -> {"oper", "speed" (Mb/s), "duplex"}: not shut down
     status_read: bool = False  # Its interfaces' status was read
+    tunnels: dict = field(default_factory=dict)  # ifIndex -> (local address, remote address or "", IPsec): TUNNEL-MIB
+    ike_sessions: list = field(default_factory=list)  # [(local address, remote address)] of its IKE sessions up
+    ike_read: bool = False  # Its IKE sessions were read (none up is then known, not just unread)
 
 
 @dataclass
@@ -569,6 +585,46 @@ def ip_addresses(rows):
         mask = row[3].value if 3 in row and row[3].tag == IP_ADDRESS else ""
         found.append((address, row[2].value if 2 in row else 0, mask))
     return sorted(found, key=lambda item: ipaddress.ip_address(item[0]))
+
+
+def inet_text(value):
+    """An IpAddress, or an address as 4 or 16 bytes (InetAddress, IPSIpAddress), as text ("" for none)."""
+    raw = value.value
+    if isinstance(raw, bytes):
+        if len(raw) in (4, 16):
+            address = ipaddress.ip_address(raw)
+            return "" if address.is_unspecified else str(address)
+        return ""
+    return "" if not raw or raw in ("0.0.0.0", "::") else str(raw)
+
+
+def tunnels(rows):
+    """TUNNEL-MIB's tunnelIfTable as {ifIndex: (local address, remote address or "" (multipoint), IPsec)}."""
+    found = {}
+    for index, row in columns(rows, TUNNEL_IF_ENTRY).items():
+        if len(index) != 1:
+            continue
+        local = inet_text(row[9]) if 9 in row else ""
+        remote = inet_text(row[10]) if 10 in row else ""
+        if not local and not remote:  # Only the old IPv4 columns
+            local = inet_text(row[1]) if 1 in row else ""
+            remote = inet_text(row[2]) if 2 in row else ""
+        security = row[5].value if 5 in row else 0
+        found[index[0]] = (local, remote, security == TUNNEL_IPSEC)
+    return found
+
+
+def ike_sessions(rows):
+    """CISCO-IPSEC-FLOW-MONITOR-MIB's IKE sessions that are up, as [(local address, remote address)]."""
+    found = []
+    for row in columns(rows, IKE_TUNNEL_ENTRY).values():
+        if IKE_STATUS in row and row[IKE_STATUS].value != IKE_ACTIVE:
+            continue
+        local = inet_text(row[4]) if 4 in row else ""
+        remote = inet_text(row[8]) if 8 in row else ""
+        if local and remote and (local, remote) not in found:
+            found.append((local, remote))
+    return sorted(found)
 
 
 def lag_parents(stack_rows, lag_rows):

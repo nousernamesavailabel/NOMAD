@@ -103,17 +103,52 @@ def is_admin():
         return False
 
 
-def relaunch_as_admin():
-    """Start a new elevated copy of the app. Returns False if the user declined the UAC prompt."""
+RESTARTED_FLAG = "--restarted"  # Started by a copy that's closing: don't hand over to it as to a copy left open
+ELEVATED_FOR_FLAG = "--elevated-for="  # Started as administrator by Always Start as Administrator, for this account
+RELAUNCH_FLAGS = (RESTARTED_FLAG, ELEVATED_FOR_FLAG)
+VK_SHIFT = 0x10
+
+
+def account_name():
+    """This Windows account, as DOMAIN\\user (the administrator's, when elevated with another account's login)."""
+    domain, user = os.environ.get("USERDOMAIN", ""), os.environ.get("USERNAME", "")
+    return f"{domain}\\{user}" if domain else user
+
+
+def shift_held():
+    """Whether Shift is held down now (to start without administrator rights for once)."""
+    try:
+        return bool(ctypes.windll.user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
+    except (AttributeError, OSError):
+        return False
+
+
+def relaunch_arguments(arguments, extra=()):
+    """The arguments for a relaunched copy: these, less the flags one copy passes the next, then extra."""
+    kept = [argument for argument in arguments if not argument.startswith(RELAUNCH_FLAGS)]
+    return kept + list(extra)
+
+
+def elevated_for(arguments):
+    """The account Always Start as Administrator started this copy for, or None."""
+    for argument in arguments:
+        if argument.startswith(ELEVATED_FOR_FLAG):
+            return argument[len(ELEVATED_FOR_FLAG):]
+    return None
+
+
+def relaunch_as_admin(extra_arguments=()):
+    """Start a new elevated copy of the app, with extra_arguments. Returns False if the user declined the UAC prompt
+    (Windows waits for the answer before returning)."""
     if getattr(sys, "frozen", False):
-        executable, arguments = sys.executable, sys.argv[1:]
+        executable, arguments = sys.executable, relaunch_arguments(sys.argv[1:], extra_arguments)
     else:
         executable = sys.executable
         # Prefer pythonw so the elevated copy doesn't open a console window
         pythonw = Path(executable).with_name("pythonw.exe")
         if pythonw.exists():
             executable = str(pythonw)
-        arguments = [os.path.abspath(sys.argv[0])] + sys.argv[1:]
+        arguments = [os.path.abspath(sys.argv[0])] + relaunch_arguments(sys.argv[1:], extra_arguments)
     result = ctypes.windll.shell32.ShellExecuteW(None, "runas", executable, subprocess.list2cmdline(arguments),
                                                  os.getcwd(), 1)
     log.info("Relaunch as administrator returned %s", result)

@@ -171,8 +171,17 @@ DEFAULT_TEXT_SCALE = 1.0
 TABLE_ROW_PADDING = 8
 
 
+def closest_text_scale(scale):
+    """The Text Size choice nearest scale: settings may hold an old or edited value."""
+    return min((choice for choice, _ in TEXT_SCALES), key=lambda choice: abs(choice - scale))
+
+
 def set_text_scale(app, scale):
-    """Make all text scale times Windows' normal size, updating windows that are already open."""
+    """Make all text scale times Windows' normal size, updating windows that are already open. Restyling every widget
+    takes seconds once the main window is built, so it's set before that and does nothing when the size is the same."""
+    if app.property("text_scale") == scale:
+        return
+    app.setProperty("text_scale", scale)
     base = app.property("base_point_size") or app.font().pointSizeF()
     font = QFont(app.font())
     font.setPointSizeF(base * scale)

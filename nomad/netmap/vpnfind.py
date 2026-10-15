@@ -282,8 +282,25 @@ def matching_preset(crypto):
     return V.CUSTOM
 
 
+def key_lines(lines):
+    """(local key, remote key) of an IKEv2 keyring peer's lines: pre-shared-key KEY is both, pre-shared-key local
+    KEY and pre-shared-key remote KEY one each (an encryption type before the key stays with it: "6 ...")."""
+    local = remote = ""
+    for line in lines:
+        words = line.split(" ", 2)
+        if words[0] != "pre-shared-key" or len(words) < 2:
+            continue
+        if words[1] == "local" and len(words) > 2:
+            local = words[2]
+        elif words[1] == "remote" and len(words) > 2:
+            remote = words[2]
+        else:
+            local = remote = line[len("pre-shared-key "):]
+    return local, remote
+
+
 def ikev2_psk(device, keyring, address=None):
-    """(the key for a peer address (None: the 0.0.0.0 one), the keyring peer's name)."""
+    """(the local key for a peer address (None: the 0.0.0.0 one), its remote key, the keyring peer's name)."""
     block = block_of(device, f"crypto ikev2 keyring {keyring}") if keyring else None
     for peer in block.children if block is not None else []:
         lines = children(peer)
@@ -292,9 +309,9 @@ def ikev2_psk(device, keyring, address=None):
             continue
         if (address is None and found[0] == "0.0.0.0") or found[0] == address or \
                 (address and len(found) > 1 and address_in(address, found[0], found[1])):
-            key = value(lines, "pre-shared-key")
-            return key, peer.line.split(" ", 1)[1] if " " in peer.line else ""
-    return "", ""
+            local, remote = key_lines(lines)
+            return local, remote, peer.line.split(" ", 1)[1] if " " in peer.line else ""
+    return "", "", ""
 
 
 def ikev1_psk(device, keyring, address):
@@ -480,23 +497,31 @@ def find(reads):
     vpns = []
     used = set()
     # DMVPN clouds
-    clouds = {}
-    for key, tunnels in infos.items():
-        for info in tunnels:
-            if info.mode == "mgre" or info.nhrp:
-                clouds.setdefault((info.network_id or info.number, info.subnet), []).append(info)
-    for (network_id, subnet), members in clouds.items():
-        vpns.append(dmvpn_vpn(network_id, subnet, members, by_key))
+    nhrp = [info for tunnels in infos.values() for info in tunnels if info.mode == "mgre" or info.nhrp]
+    clouds = clouds_of(nhrp)
+    ids = [(members[0].network_id or members[0].number, members[0].subnet) for members in clouds]
+    for members in clouds:
+        first = members[0]
+        network_id, subnet = first.network_id or first.number, first.subnet
+        anchors = sorted({info.local_ip for info in members if not info.nhs} |
+                         {nbma or address for info in members for address, nbma in info.nhs}) \
+            if ids.count((network_id, subnet)) > 1 else []  # Clouds alike in all but their hubs: told apart by them
+        vpns.append(dmvpn_vpn(network_id, subnet, members, by_key, anchors))
         used |= {(info.key, info.number) for info in members}
     # Point-to-point tunnels, paired by address
     singles = [info for tunnels in infos.values() for info in tunnels
                if (info.key, info.number) not in used and info.mode in ("gre", "ipsec") and info.destination]
+    addresses = set()
+    for read in reads:
+        if read.device is not None and read.device.read:
+            addresses |= {address for interface in read.device.interfaces().values()
+                          for address, _ in interface.addresses}
     paired = set()
     for info in singles:
         if (info.key, info.number) in paired:
             continue
-        partner = next((other for other in singles if other.key != info.key and info.subnet and
-                        (other.key, other.number) not in paired and other.subnet == info.subnet), None)
+        partner = partner_of(info, [other for other in singles if (other.key, other.number) not in paired],
+                             addresses)
         paired.add((info.key, info.number))
         if partner is not None:
             paired.add((partner.key, partner.number))
@@ -517,7 +542,96 @@ def find(reads):
             taken.add(id(partner))
         vpns.append(map_vpn(entry, partner, by_key))
     mark_shared(vpns)
+    tell_apart(vpns)
     return vpns
+
+
+def partner_of(info, singles, addresses):
+    """The tunnel at the far end of a point-to-point tunnel, among the others read: one whose address is this one's
+    destination and whose destination is this one's address (best), or one way so with the same tunnel subnet; or,
+    when its destination is no router read (NAT between them), the one in the same tunnel subnet whose destination
+    isn't one either. Tunnels numbered alike on many routers are only paired when their addresses say so."""
+    best, best_score = None, 0
+    for other in singles:
+        if other.key == info.key:
+            continue
+        there = info.destination == other.local_ip
+        back = other.destination == info.local_ip
+        same_subnet = bool(info.subnet) and other.subnet == info.subnet
+        if there and back:
+            score = 4 if same_subnet or not (info.subnet and other.subnet) else 3
+        elif (there or back) and same_subnet and \
+                (there or info.destination not in addresses) and (back or other.destination not in addresses):
+            score = 2
+        elif same_subnet and info.destination not in addresses and other.destination not in addresses and \
+                info.destination != other.destination:  # (Both to the same far end: not each other's)
+            score = 1
+        else:
+            continue
+        if score > best_score:
+            best, best_score = other, score
+    return best
+
+
+def clouds_of(tunnels):
+    """[[TunnelInfo]]: DMVPN tunnels grouped into clouds. A spoke is in its hubs' cloud: the tunnels at its NHS
+    addresses in its tunnel subnet (at the NBMA address it names, when one there was read); spokes naming a hub that
+    wasn't read are in one cloud with each other. A tunnel nothing ties to another (a hub no spoke read names) joins
+    the one cloud with its network ID and tunnel subnet, else is a cloud of its own."""
+    parent = {}
+
+    def root(node):
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def join(a, b):
+        parent[root(a)] = root(b)
+
+    def node(info):
+        return "tunnel", info.key, info.number
+
+    tied = set()
+    for info in tunnels:
+        root(node(info))
+        for address, nbma in info.nhs:
+            hubs = [other for other in tunnels if other is not info and other.ip == address and
+                    other.subnet == info.subnet]
+            if nbma:
+                hubs = [other for other in hubs if other.local_ip == nbma] or hubs  # Else NAT: named by another
+            for hub in hubs:
+                join(node(info), node(hub))
+                tied |= {node(info), node(hub)}
+            if not hubs:
+                join(node(info), ("hub", info.subnet, address, nbma))
+                tied.add(node(info))
+    groups = {}
+    for info in tunnels:
+        if node(info) in tied:
+            groups.setdefault(root(node(info)), []).append(info)
+    for info in tunnels:
+        if node(info) in tied:
+            continue
+        alike = [members for members in groups.values()
+                 if (members[0].network_id or members[0].number, members[0].subnet) ==
+                 (info.network_id or info.number, info.subnet)]
+        if len(alike) == 1:
+            alike[0].append(info)
+        else:
+            groups.setdefault(("alone", info.network_id or info.number, info.subnet), []).append(info)
+    return list(groups.values())
+
+
+def tell_apart(vpns):
+    """VPNs found with the same name (Tunnel1 on many routers, say): each named for its routers too."""
+    names = [vpn.name for vpn in vpns]
+    for vpn in vpns:
+        if names.count(vpn.name) > 1:
+            routers = [member.title().split(" (")[0] for member in vpn.members
+                       if not member.key.startswith("peer:")] or [member.title() for member in vpn.members]
+            vpn.name = f"{vpn.name} ({', '.join(routers[:3])}{', ...' if len(routers) > 3 else ''})"
 
 
 def stable_id(*parts):
@@ -559,14 +673,15 @@ def p2p_vpn(info, partner, by_key):
         other = next(iter(vpn.others(member)))
         if item.destination and item.destination != other.local_ip and other.key.startswith("peer:") is False:
             other.public_ip = item.destination  # The far end is reached at an address it doesn't have (NAT)
+    note_tunnels(vpn, members)
     fill_crypto(vpn, members, by_key)
     fill_routing(vpn, members, by_key)
     return vpn
 
 
-def dmvpn_vpn(network_id, subnet, infos, by_key):
+def dmvpn_vpn(network_id, subnet, infos, by_key, anchors=()):
     first = infos[0]
-    vpn = V.Vpn(id=stable_id("dmvpn", network_id, subnet), kind=V.DMVPN, found=True)
+    vpn = V.Vpn(id=stable_id("dmvpn", network_id, subnet, *anchors), kind=V.DMVPN, found=True)
     named_hubs = {address for info in infos for address, _ in info.nhs}
     for info in infos:  # A hub takes registrations: the others name it as their NHS (IOS XE hides "map multicast
         # dynamic"), or it names none itself
@@ -610,6 +725,7 @@ def dmvpn_vpn(network_id, subnet, infos, by_key):
             for address, nbma in info.nhs:
                 if address == member.tunnel_ip and nbma and nbma != member.local_ip:
                     member.public_ip = nbma
+    note_tunnels(vpn, members)
     fill_crypto(vpn, members, by_key)
     fill_routing(vpn, members, by_key)
     return vpn
@@ -617,43 +733,124 @@ def dmvpn_vpn(network_id, subnet, infos, by_key):
 
 def fill_crypto(vpn, members, by_key):
     """Crypto, auth and each member's names, from the tunnels' IPsec profiles."""
-    first = True
+    first, keys = None, {}
     for info, read in members:
         member = vpn.member(read.key)
         if not info.protection:
             continue
         crypto, auth, names = read_crypto(read.device, ipsec_profile=info.protection, local_ip=info.local_ip)
-        if first:
+        if first is None:
             vpn.crypto, vpn.auth = crypto, auth
-            first = False
+            first = member
+        else:
+            note_crypto(vpn, member, crypto, auth, first)
         if auth.method == V.PSK:
-            psk, peer_names = find_psks(vpn, member, read.device, crypto.ike, names.get("keyring", ""))
-            if psk and not vpn.auth.psk:
-                vpn.auth.psk = psk
+            local, remote, peer_names = find_psks(vpn, member, read.device, crypto.ike, names.get("keyring", ""))
+            if local or remote:
+                keys[member.key] = (local, remote)
             names.update(peer_names)
         member.names.update(names)
+    settle_keys(vpn, keys)
 
 
 def find_psks(vpn, member, device, ike, keyring):
-    """(the key this member has for the others, {"peer:<key>": keyring peer name})."""
-    found, peer_names = "", {}
+    """(the key this member sends, the key it expects back, {"peer:<key>": keyring peer name}). IKEv1 keys are one
+    key both ways."""
+    local, remote, peer_names = "", "", {}
     if vpn.kind == V.DMVPN:
         if ike == V.IKEV2:
-            found, name = ikev2_psk(device, keyring, None)
+            local, remote, name = ikev2_psk(device, keyring, None)
             if name:
                 peer_names["peer:*"] = name
         else:
-            found = ikev1_psk(device, keyring, None)
-        return found, peer_names
+            local = remote = ikev1_psk(device, keyring, None)
+        return local, remote, peer_names
     for other in vpn.others(member):
         if ike == V.IKEV2:
-            key, name = ikev2_psk(device, keyring, other.reached_at)
+            mine, theirs, name = ikev2_psk(device, keyring, other.reached_at)
             if name:
                 peer_names[f"peer:{other.key}"] = name
         else:
-            key = ikev1_psk(device, keyring, other.reached_at)
-        found = found or key
-    return found, peer_names
+            mine = theirs = ikev1_psk(device, keyring, other.reached_at)
+        local, remote = local or mine, remote or theirs
+    return local, remote, peer_names
+
+
+def encrypted(key):
+    """Whether a key was read encrypted (type 6 or 7): each router encrypts its own way, so it can't be compared."""
+    return key[:2] in ("6 ", "7 ")
+
+
+def peers_of(vpn, member):
+    """The members a member makes IPsec with: on a DMVPN cloud a spoke's hubs, a hub's spokes."""
+    if vpn.kind == V.DMVPN:
+        return [item for item in (vpn.spokes() if member.role == V.HUB else vpn.hubs()) if item.key != member.key]
+    return vpn.others(member)
+
+
+def settle_keys(vpn, keys):
+    """The VPN's key and each member's own ones, from {member key: (local, remote)} as read on each router: the VPN's
+    is the one most of them send; one that sends another, or expects back another than the far end sends, keeps its
+    own (pre-shared-key local/remote). Ends that don't agree go in the VPN's differences."""
+    if not keys:
+        return
+    vpn.auth.psk = V.most_common([local for local, _ in keys.values()]) or \
+        V.most_common([remote for _, remote in keys.values()]) or vpn.auth.psk
+    for key, (local, _) in keys.items():
+        vpn.member(key).psk = local if local and local != vpn.auth.psk else ""
+    for member in vpn.members:  # One that wasn't read: it sends what the read ones expect from it
+        if member.key not in keys:
+            expected = V.most_common([remote for key, (_, remote) in keys.items()
+                                      if member in peers_of(vpn, vpn.member(key))])
+            member.psk = expected if expected and expected != vpn.auth.psk else ""
+    for key, (_, remote) in keys.items():
+        member = vpn.member(key)
+        member.psk_remote = remote if remote and remote != V.remote_key(vpn, member) else ""
+        if not member.psk_remote or encrypted(remote):
+            continue
+        for other in peers_of(vpn, member):
+            theirs = V.own_key(vpn, other)
+            if other.key in keys and not encrypted(theirs) and theirs != remote:
+                vpn.differences.append(f"{member.title()} expects another pre-shared key from {other.title()} than "
+                                       f"{other.title()} sends: IKE can't come up between them until they match "
+                                       f"(a key typed here puts one key on every router).")
+
+
+def method_text(method):
+    return "certificates" if method == V.CERT else "a pre-shared key"
+
+
+CRYPTO_PARTS = [("IKE version", lambda crypto: crypto.ike), ("IKE encryption", lambda crypto: crypto.encryption),
+                ("IKE integrity", lambda crypto: crypto.integrity), ("IKE PRF", lambda crypto: crypto.prf),
+                ("DH groups", lambda crypto: crypto.groups), ("IPsec transforms", lambda crypto: crypto.esp),
+                ("PFS group", lambda crypto: crypto.pfs), ("dead peer detection", lambda crypto: crypto.dpd)]
+
+
+def note_crypto(vpn, member, crypto, auth, first):
+    """Where a member's crypto, as read, isn't the first member's (the VPN's): in the VPN's differences."""
+    if auth.method != vpn.auth.method:
+        vpn.differences.append(f"{member.title()} authenticates with {method_text(auth.method)}, {first.title()} "
+                               f"with {method_text(vpn.auth.method)}.")
+    for label, part in CRYPTO_PARTS:
+        if part(crypto) != part(vpn.crypto):
+            vpn.differences.append(f"{member.title()}'s {label} ({shown(part(crypto))}) isn't {first.title()}'s "
+                                   f"({shown(part(vpn.crypto))}): sending this VPN makes it {first.title()}'s.")
+
+
+def shown(setting):
+    if isinstance(setting, list):
+        return " ".join(str(item) for item in setting) or "none"
+    return str(setting) if setting not in ("", 0) else "none"
+
+
+def note_tunnels(vpn, members):
+    """Where a member's tunnel MTU or MSS, as read, isn't the VPN's: in the VPN's differences."""
+    for info, read in members:
+        member = vpn.member(read.key)
+        for label, mine, usual in (("IP MTU", info.mtu, vpn.mtu), ("TCP MSS", info.mss, vpn.mss)):
+            if mine != usual:
+                vpn.differences.append(f"{member.title()}'s Tunnel{info.number} {label} is {mine or 'not set'}, "
+                                       f"not {usual or 'not set'}: sending this VPN sets it to {usual or 'nothing'}.")
 
 
 def fill_routing(vpn, members, by_key):
@@ -782,7 +979,7 @@ def map_vpn(entry, partner, by_key):
         far = V.Member(f"peer:{peer}", peer, peer, local_ip=peer)
         far.lans = list(dict.fromkeys(target for _, target in pairs))
         vpn.members.append(far)
-    first = True
+    first, keys = None, {}
     for side, side_read in sides:
         member = vpn.member(side_read.key)
         crypto, auth, names = read_crypto(side_read.device, transform=side["transform"],
@@ -791,12 +988,15 @@ def map_vpn(entry, partner, by_key):
         pfs = side["pfs"]
         crypto.pfs = int(pfs[5:]) if pfs.startswith("group") and pfs[5:].isdigit() else 0
         crypto.sa_lifetime = int(side["lifetime"]) if side["lifetime"].isdigit() else 3600
-        if first:
+        if first is None:
             vpn.crypto, vpn.auth = crypto, auth
-            first = False
+            first = member
+        else:
+            note_crypto(vpn, member, crypto, auth, first)
         if auth.method == V.PSK:
-            psk, peer_names = find_psks(vpn, member, side_read.device, crypto.ike, names.get("keyring", ""))
-            vpn.auth.psk = vpn.auth.psk or psk
+            local, remote, peer_names = find_psks(vpn, member, side_read.device, crypto.ike, names.get("keyring", ""))
+            if local or remote:
+                keys[member.key] = (local, remote)
             names.update(peer_names)
         member.names.update(names)
         # Routes to the far LANs out of the WAN interface (kept as they are)
@@ -808,6 +1008,7 @@ def map_vpn(entry, partner, by_key):
         if statics:
             vpn.routing.kind = V.STATIC
             member.names["routing_lines"] = statics
+    settle_keys(vpn, keys)
     if vpn.routing.kind != V.STATIC:
         vpn.routing.kind = V.NO_ROUTING
     for member in vpn.members:

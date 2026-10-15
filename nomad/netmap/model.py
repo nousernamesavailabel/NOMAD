@@ -109,6 +109,11 @@ class Device:
     # VRF -> [[destination, next hop, port, protocol]], like routes (which are the global table's). Only VRFs whose
     # routes could be read are here
     vrf_routes: dict = field(default_factory=dict)
+    # Tunnel interface (short name) -> {"local": address, "remote": address ("" when multipoint), "ipsec": bool}, and
+    # the IKE sessions up ([[local, remote]]; ike_read when they could be read), as last read: its tunnels on the map
+    tunnels: dict = field(default_factory=dict)
+    ike_sessions: list = field(default_factory=list)
+    ike_read: bool = False
 
     @property
     def label(self):

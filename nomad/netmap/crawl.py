@@ -386,6 +386,7 @@ class Crawler:
             tables.neighbors += collect.lldp_neighbors(lldp_rows, local_ports, tables.interfaces, addresses)
         tables.arp = collect.arp(self.walk(client, collect.ARP_PHYS_ADDRESS, tables, "ARP", timing="ARP table"))
         self.read_port_status(client, tables)
+        self.read_tunnels(client, tables)
         self.read_routes(client, tables)
         self.read_vlans(client, tables)
         tables.lag_parents = collect.lag_parents(
@@ -414,6 +415,36 @@ class Crawler:
         duplex = self.walk(client, collect.DOT3_DUPLEX, tables, "Duplex", timing="Port status")
         tables.port_status = collect.port_status(admin, oper, high, low, duplex)
         tables.status_read = True
+
+    def read_tunnels(self, client, tables):
+        """Its tunnel interfaces' ends (TUNNEL-MIB) and, on Cisco, its IKE sessions up (CISCO-IPSEC-FLOW-MONITOR-
+        MIB): what the map's tunnels are drawn from. Only asked of a device with tunnel interfaces."""
+        if not any(name.lower().startswith("tu") for name in tables.interfaces.values()):
+            return
+        rows = []
+        for number in collect.TUNNEL_IF_COLUMNS:
+            rows += self.walk(client, f"{collect.TUNNEL_IF_ENTRY}.{number}", tables, "Tunnels")
+        tables.tunnels = collect.tunnels(rows)
+        if not tables.info.object_id.startswith(collect.CISCO + "."):
+            return
+        if not self.walk(client, collect.IKE_ACTIVE_COUNT, tables, "IKE sessions", timing="Tunnels"):
+            return  # No CISCO-IPSEC-FLOW-MONITOR-MIB: whether IPsec is up isn't known
+        rows = []
+        for number in collect.IKE_TUNNEL_COLUMNS:
+            rows += self.walk(client, f"{collect.IKE_TUNNEL_ENTRY}.{number}", tables, "IKE sessions",
+                              timing="Tunnels")
+        entry = parse_oid(collect.IKE_TUNNEL_ENTRY)
+        indexes = sorted({oid[len(entry) + 1:] for oid, _ in rows if oid[:len(entry)] == entry})
+        started = time.monotonic()
+        for at in range(0, len(indexes), 20):  # Each session's status
+            try:
+                rows += client.get([entry + (collect.IKE_STATUS,) + index for index in indexes[at:at + 20]])
+            except (SnmpError, OSError) as problem:
+                tables.warnings.append(f"IKE sessions: {problem}")
+                break
+        tables.timings["Tunnels"] = tables.timings.get("Tunnels", 0) + time.monotonic() - started
+        tables.ike_sessions = collect.ike_sessions(rows)
+        tables.ike_read = not any(warning.startswith("IKE sessions") for warning in tables.warnings)
 
     def read_routes(self, client, tables):
         """The global routing table, then which interfaces are in VRFs and each VRF's routing table."""
@@ -818,6 +849,7 @@ class Crawler:
         device.stp_mode = tables.stp_mode
         device.port_status = port_status_of(tables)
         apply_vrfs(device, tables)
+        apply_tunnels(device, tables)
         for ip in device.addresses:
             self.aliases.setdefault(ip, key)
         device.kind = collect.classify(info.object_id, info.descr, frozenset(self.capabilities.get(key, ())),
@@ -1025,6 +1057,7 @@ def read_vlans_of(settings, address, client_factory=SnmpClient, routes=False, st
         crawler.read_stp(client, tables, community, stp_vlan)
     if routes:
         crawler.read_routes(client, tables)
+        crawler.read_tunnels(client, tables)
         tables.routes_read = True
     return tables, community
 
@@ -1051,6 +1084,7 @@ def apply_vlans(device, tables):
         device.routes = routes[:MAX_ROUTES]
         device.routes_truncated = len(routes) > MAX_ROUTES or tables.routes_truncated
         apply_vrfs(device, tables)
+        apply_tunnels(device, tables)
 
 
 def port_status_of(tables):
@@ -1068,6 +1102,15 @@ def apply_vrfs(device, tables):
     device.vrf_routes = {vrf: [[destination, next_hop, short_port(tables.interfaces.get(if_index, "")), protocol]
                                for destination, next_hop, if_index, protocol in routes[:MAX_ROUTES]]
                          for vrf, routes in sorted(tables.vrf_routes.items())}
+
+
+def apply_tunnels(device, tables):
+    """A device's tunnel interfaces' ends and its IKE sessions up, as read (netmap.tunnels draws them)."""
+    device.tunnels = {short_port(tables.interfaces.get(if_index, str(if_index))):
+                      {"local": local, "remote": remote, "ipsec": ipsec}
+                      for if_index, (local, remote, ipsec) in sorted(tables.tunnels.items())}
+    device.ike_sessions = [[local, remote] for local, remote in tables.ike_sessions]
+    device.ike_read = tables.ike_read
 
 
 def identity(tables):

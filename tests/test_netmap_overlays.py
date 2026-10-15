@@ -453,3 +453,33 @@ def test_utilization_overlay_follows_monitoring(tab):
     assert link.mark is not None and "busy" in link.mark.note
     tab.monitor_check.setChecked(False)
     assert not tab.counters.rates and "turn Monitor on" in tab.vlan_label.text()
+
+
+def test_monitoring_refreshes_the_tunnels(tab):
+    from test_netmap_tunnels import crawl_lab, fake_lab, set_sessions
+    network = fake_lab()
+    network_map = crawl_lab(network)
+    tab.show_map(network_map)
+    assert sorted(item.mark.color for item in tab.view.tunnel_items) == ["success"] * 3
+    tab.counters.client_factory = network.client
+    tab.monitor.pinger = lambda address: 1
+    tab.monitor.timer.setInterval(3_600_000)
+    tab.monitor_check.setChecked(True)
+
+    def poll():
+        if tab.counters.thread is None:
+            tab.counters.poll_now()
+        tab.counters.thread.wait(5000)
+        QApplication.processEvents()
+    poll()
+    assert set(tab.counters.live) == {"r5", "r6", "r7"} and not any("Tunnel" in line for line in tab.monitor.lines)
+    r7 = network.devices["10.8.0.26"]
+    r7.set(collect.IF_OPER_STATUS, 17, Value(INTEGER, 2))  # Its VTI goes down
+    set_sessions(r7, [("10.8.0.26", "10.8.0.18")])
+    poll()
+    assert sorted(item.mark.color for item in tab.view.tunnel_items) == ["error", "success", "success"]
+    assert any("Tunnel10 to R7 Tunnel10: point-to-point over IPsec, down" in line for line in tab.monitor.lines)
+    tab.show_overlay(overlays.VPNS)
+    assert "1 down" in tab.vlan_label.text()
+    tab.monitor_check.setChecked(False)  # Back to what the crawl found
+    assert not tab.counters.live and "1 down" not in tab.vlan_label.text()

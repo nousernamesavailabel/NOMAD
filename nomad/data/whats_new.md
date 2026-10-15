@@ -4,6 +4,17 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.31.0] - 2026-10-14
+
+- **New:** the Network Map can monitor devices this computer can't reach (behind a VRF, or with no route back) from a router that can: right-click > Tools > Monitor from a Router adds an IP SLA ping on the router, and Monitor reads its result over SNMP. Everyone monitoring the map uses the same probes.
+- **New:** the Network Map shows tunnels (GRE, IPsec VTI, DMVPN) between routers, found by the crawl over SNMP: dashed lines, green up, amber not encrypted, red down. With Monitor on, they stay up to date and the Monitor log says when one goes down or comes back. Untick Show Tunnels to hide them; Overlay > VPN Tunnels shows just them.
+- **New:** VPNs can build just one side: tick one router (or only spokes, or only a hub) and type the far end's address. NOMAD sends only to your router and shows the far end's lines to copy.
+- **New:** VPN templates: New VPN > Template makes any kind of VPN with no routers, each side's lines with placeholders such as `<SPOKE-WAN-IP>` to fill in, and a legend saying what each one is.
+- **New:** NOMAD starts about 3.5 seconds faster, shows a splash saying what it's loading as soon as it's opened, and opening it again brings the open one to the front instead of starting another.
+- **New:** File > Always Start as Administrator: NOMAD asks for administrator rights as it starts, instead of starting twice. Hold Shift while it starts to start without them for once.
+- **Fixed:** VPNs reads IKEv2 keys written as `pre-shared-key local` and `remote` (the word "local" was taken as part of the key, and the remote key was missed), and keeps each router's keys when you edit.
+- **Fixed:** VPNs no longer treats every Tunnel1 as one VPN: tunnels are paired by their addresses and DMVPN routers by the hub they register with. Checks say where a router's settings, as read, differ from the others'.
+
 ## [1.30.0] - 2026-10-14
 
 - **New:** VPNs builds and edits VPNs between Cisco routers: IPsec VTI, GRE over IPsec, GRE, crypto maps and DMVPN (phases 1-3, one or two hubs), with keys or certificates (it can set up a CA on one of the routers). It writes every router's side, checks the design, sends it with a revert timer and keeps it only once the VPN works from each end. Status says why a VPN is down. On the map: Build VPN Between, and a VPN Tunnels overlay.

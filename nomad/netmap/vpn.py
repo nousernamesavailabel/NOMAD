@@ -380,6 +380,9 @@ class Member:
     bgp_as: str = ""  # Its BGP AS (BGP routing; read from the router when it has BGP)
     hub_order: int = 0  # Dual hub: 1 (preferred) or 2
     names: dict = field(default_factory=dict)  # The names of its objects when they aren't the VPN's usual ones
+    psk: str = ""  # The key it sends (IKEv2 pre-shared-key local) when it isn't the VPN's ("" = auth.psk)
+    psk_remote: str = ""  # The key it expects back, as read, when it isn't the others' own ("" = theirs)
+    by_hand: bool = False  # A far end typed in (key "peer:..."): nothing is sent to it, its lines are shown to copy
 
     @property
     def reached_at(self):
@@ -405,6 +408,8 @@ class Vpn:
     keepalive: int = 0  # GRE keepalive seconds (plain GRE only)
     description: str = ""
     found: bool = False  # Read from routers (not built in NOMAD)
+    differences: list = field(default_factory=list)  # As read: where one router's side isn't like the others'
+    template: bool = False  # No routers: each member is a slot ("slot:...") whose details are <PLACEHOLDERS>
 
     @property
     def protected(self):
@@ -443,7 +448,20 @@ class Vpn:
         if not with_secrets:
             data["auth"]["psk"] = ""
             data["dmvpn"]["auth"] = ""
+            for member in data["members"]:
+                member["psk"] = member["psk_remote"] = ""
         return data
+
+    def own_keys(self):
+        """Whether any member has keys of its own (asymmetric keys, as read)."""
+        return any(member.psk or member.psk_remote for member in self.members)
+
+    def one_key(self, psk):
+        """The same key on every router (the members' own ones dropped)."""
+        self.auth.psk = psk
+        for member in self.members:
+            member.psk = member.psk_remote = ""
+        self.differences = [text for text in self.differences if "pre-shared key" not in text]
 
     @classmethod
     def from_dict(cls, data):
@@ -455,6 +473,36 @@ class Vpn:
         data["dmvpn"] = Dmvpn(**data.get("dmvpn", {}))
         known = set(cls.__dataclass_fields__)
         return cls(**{key: value for key, value in data.items() if key in known})
+
+
+def most_common(values):
+    """The value given most often (the first of those tied), or "" for none."""
+    values = [value for value in values if value]
+    return max(values, key=values.count) if values else ""
+
+
+def own_key(vpn, member):
+    """The pre-shared key a member sends (its local key)."""
+    return member.psk or vpn.auth.psk
+
+
+def remote_key(vpn, member):
+    """The pre-shared key a member expects from the others (its remote key): as read, else the one they send (on a
+    DMVPN cloud the hubs', or for a hub the spokes')."""
+    if member.psk_remote:
+        return member.psk_remote
+    peers = vpn.others(member)
+    if vpn.kind == DMVPN:
+        peers = [item for item in (vpn.spokes() if member.role == HUB else vpn.hubs())
+                 if item.key != member.key] or peers
+    return most_common([own_key(vpn, item) for item in peers]) or vpn.auth.psk
+
+
+def ikev2_key_lines(local, remote):
+    """An IKEv2 keyring peer's key lines: one key, or a local and a remote one when they differ."""
+    if not remote or local == remote:
+        return [f"pre-shared-key {local}"]
+    return [f"pre-shared-key local {local}", f"pre-shared-key remote {remote}"]
 
 
 def kind_text(vpn):
@@ -824,9 +872,19 @@ def wildcard_of(length):
 
 
 def network_words(prefix):
-    """("10.1.1.0", "255.255.255.0") of a prefix."""
+    """("10.1.1.0", "255.255.255.0") of a prefix (of a placeholder "<A-LAN>": "<A-LAN-NETWORK>", "<A-LAN-MASK>")."""
+    if is_placeholder(prefix):
+        return derived(prefix, "NETWORK"), derived(prefix, "MASK")
     network = ipaddress.IPv4Network(prefix, strict=False)
     return str(network.network_address), str(network.netmask)
+
+
+def network_wildcard(prefix):
+    """("10.1.1.0", "0.0.0.255") of a prefix (of a placeholder: its -NETWORK and -WILDCARD)."""
+    if is_placeholder(prefix):
+        return derived(prefix, "NETWORK"), derived(prefix, "WILDCARD")
+    network = ipaddress.IPv4Network(prefix, strict=False)
+    return str(network.network_address), str(network.hostmask)
 
 
 def esp_mode(vpn):
@@ -967,13 +1025,19 @@ def routing_for(vpn, member, device):
         return blocks, tunnel_lines
     if kind in (EIGRP, OSPF) and vpn.kind == CRYPTO_MAP:
         return blocks, tunnel_lines  # Routing protocols don't cross a crypto map (no tunnel interface)
-    own = [ip for ip in [member.tunnel_ip] + [device.interface_in(prefix)[1] if device is not None else ""
-                                              for prefix in member.lans] if ip]
+    own = [f"{member.tunnel_ip} 0.0.0.0"] if member.tunnel_ip else []  # "address wildcard" network statements
+    for prefix in member.lans:
+        if device is not None:
+            address = device.interface_in(prefix)[1]
+            if address:
+                own.append(f"{address} 0.0.0.0")
+        else:  # A router NOMAD doesn't read (lines to copy): the LAN itself
+            own.append(" ".join(network_wildcard(prefix)))
     if kind == EIGRP:
         number = vpn.routing.process or "100"
         if vpn.routing.eigrp_name:
             af = Block(f"address-family ipv4 unicast autonomous-system {number}", partial=True)
-            af.children += [Block(f"network {ip} 0.0.0.0") for ip in own]
+            af.children += [Block(f"network {item}") for item in own]
             if vpn.kind == DMVPN and member.role == HUB:
                 af_if = Block(f"af-interface {tunnel_name}")
                 af_if.children.append(Block("no split-horizon"))
@@ -982,7 +1046,7 @@ def routing_for(vpn, member, device):
                 af.children.append(af_if)
             blocks.append(Block(f"router eigrp {vpn.routing.eigrp_name}", [af], partial=True))
         else:
-            blocks.append(Block(f"router eigrp {number}", [Block(f"network {ip} 0.0.0.0") for ip in own],
+            blocks.append(Block(f"router eigrp {number}", [Block(f"network {item}") for item in own],
                                 partial=True))
             if vpn.kind == DMVPN and member.role == HUB:
                 tunnel_lines.append(f"no ip split-horizon eigrp {number}")
@@ -991,7 +1055,7 @@ def routing_for(vpn, member, device):
     elif kind == OSPF:
         number = vpn.routing.process or "100"
         area = vpn.routing.area or "0"
-        blocks.append(Block(f"router ospf {number}", [Block(f"network {ip} 0.0.0.0 area {area}") for ip in own],
+        blocks.append(Block(f"router ospf {number}", [Block(f"network {item} area {area}") for item in own],
                             partial=True))
         if vpn.kind == DMVPN:
             if vpn.dmvpn.phase == 2:
@@ -1192,11 +1256,13 @@ def bgp_blocks(vpn, member, device):
     return blocks + [process]
 
 
-def footprint(vpn, member, device, siblings=()):
+def footprint(vpn, member, device, siblings=(), xe=None):
     """[Block]: everything a member needs for the VPN (partial and sticky set on what's shared). siblings: tunnel
-    interface blocks of other VPNs being made on the same router (for the tunnel key a shared source needs)."""
+    interface blocks of other VPNs being made on the same router (for the tunnel key a shared source needs). xe:
+    whether it runs IOS XE (None: as read; True without a router)."""
     name = names(vpn, member)
-    xe = device.xe if device is not None else True
+    if xe is None:
+        xe = device.xe if device is not None else True
     blocks = []
     crypto = vpn.crypto
     certificates = vpn.auth.method == CERT
@@ -1216,14 +1282,17 @@ def footprint(vpn, member, device, siblings=()):
                                     [Block(f"issuer-name co cn = {vpn.auth.ca_name.lower()}")]))
             else:
                 keyring = Block(f"crypto ikev2 keyring {name['keyring']}")
+                local = own_key(vpn, member)
                 if vpn.kind == DMVPN:
                     keyring.children.append(Block(f"peer {name.get('peer:*') or 'ANY'}", [
-                        Block("address 0.0.0.0 0.0.0.0"),
-                                                               Block(f"pre-shared-key {vpn.auth.psk}")]))
+                        Block("address 0.0.0.0 0.0.0.0")] + [
+                        Block(line) for line in ikev2_key_lines(local, remote_key(vpn, member))]))
                 else:
                     for other in others:
+                        remote = member.psk_remote or own_key(vpn, other)
                         keyring.children.append(Block(f"peer {name.get('peer:' + other.key) or peer_name(other)}", [
-                            Block(f"address {other.reached_at}"), Block(f"pre-shared-key {vpn.auth.psk}")]))
+                            Block(f"address {other.reached_at}")] + [
+                            Block(line) for line in ikev2_key_lines(local, remote)]))
                 blocks.append(keyring)
             profile = Block(f"crypto ikev2 profile {name['ike_profile']}")
             if not vpn.found:  # Only on what NOMAD builds (one found keeps its own, if any)
@@ -1264,15 +1333,16 @@ def footprint(vpn, member, device, siblings=()):
                                     [Block(f"issuer-name co cn = {vpn.auth.ca_name.lower()}")]))
             elif name["ike_profile"] == "-":  # Found with global keys and no ISAKMP profile: kept that way
                 targets = ["0.0.0.0"] if vpn.kind == DMVPN else [other.reached_at for other in others]
-                blocks += [Block(f"crypto isakmp key {vpn.auth.psk} address {target}") for target in targets]
+                blocks += [Block(f"crypto isakmp key {own_key(vpn, member)} address {target}") for target in targets]
             else:
                 keyring = Block(f"crypto keyring {name['keyring']}")
                 if vpn.kind == DMVPN:
-                    keyring.children.append(Block(f"pre-shared-key address 0.0.0.0 0.0.0.0 key {vpn.auth.psk}"))
+                    keyring.children.append(Block(f"pre-shared-key address 0.0.0.0 0.0.0.0 key "
+                                                  f"{own_key(vpn, member)}"))
                 else:
                     for other in others:
                         keyring.children.append(Block(f"pre-shared-key address {other.reached_at} key "
-                                                      f"{vpn.auth.psk}"))
+                                                      f"{own_key(vpn, member)}"))
                 blocks.append(keyring)
             profile = Block(f"crypto isakmp profile {name['ike_profile']}")
             if name["ike_profile"] == "-":
@@ -1318,10 +1388,10 @@ def footprint(vpn, member, device, siblings=()):
         for prefix in member.lans:
             for other in others:
                 for far in other.lans:
-                    source, source_length = prefix_parts(prefix)
-                    target, target_length = prefix_parts(far)
-                    acl.children.append(Block(f"{number} permit ip {source} {wildcard_of(source_length)} {target} "
-                                              f"{wildcard_of(target_length)}"))
+                    source, source_wildcard = network_wildcard(prefix)
+                    target, target_wildcard = network_wildcard(far)
+                    acl.children.append(Block(f"{number} permit ip {source} {source_wildcard} {target} "
+                                              f"{target_wildcard}"))
                     number += 10
         blocks.append(acl)
         entry = Block(f"crypto map {name['map']} {name['map_seq']} ipsec-isakmp")
@@ -1372,11 +1442,6 @@ def footprint(vpn, member, device, siblings=()):
             elif key_of(block.line) in partial:
                 block.partial = True
     return blocks
-
-
-def prefix_parts(prefix):
-    network = ipaddress.IPv4Network(prefix, strict=False)
-    return str(network.network_address), network.prefixlen
 
 
 def tunnel_block(vpn, member, device, xe, name, siblings=()):
@@ -1812,6 +1877,155 @@ def verify_commands(vpn, member, devices):
     return checks
 
 
+# ----------------------------------------------------------------- Templates, and far ends set up by hand
+
+PLACEHOLDER = re.compile(r"^<[A-Z0-9][A-Z0-9-]*>$")
+SLOT_WORDS = {"A": "side A", "B": "side B", "HUB": "the hub", "HUB2": "the second hub", "SPOKE": "each spoke"}
+PLACEHOLDER_MEANINGS = [  # (ending, what it stands for: {who} is whose)
+    ("-WAN-INTERFACE", "{who}'s WAN interface (the tunnel source, GigabitEthernet1)"),
+    ("-WAN-IP", "{who}'s WAN address (where the others reach it)"),
+    ("-TUNNEL-IP", "{who}'s address on the tunnel"),
+    ("-AS", "{who}'s BGP AS"),
+    ("-IP", "{who}'s address"),
+]
+
+
+def is_placeholder(text):
+    return bool(PLACEHOLDER.match(text or ""))
+
+
+def derived(token, what):
+    """"<A-LAN>", "MASK" -> "<A-LAN-MASK>"."""
+    return f"{token[:-1]}-{what}>"
+
+
+def placeholders(text):
+    """The <PLACEHOLDERS> in some lines, in the order they first come."""
+    return list(dict.fromkeys(re.findall(r"<[A-Z0-9][A-Z0-9-]*>", text or "")))
+
+
+def placeholder_meaning(token):
+    """What a placeholder stands for ("<SPOKE-LAN>" -> "a LAN behind each spoke (10.1.1.0/24)")."""
+    words = token.strip("<>").split("-")
+    who = SLOT_WORDS.get(words[0], "this router") if len(words) > 1 and words[0] in SLOT_WORDS else "this router"
+    body = "-" + "-".join(words[1:] if words[0] in SLOT_WORDS else words)
+    if re.search(r"-LAN\d*$", body):
+        return f"a LAN behind {who} (a prefix, 10.1.1.0/24)"
+    part = re.search(r"-LAN\d*-(NETWORK|MASK|WILDCARD)$", body)
+    if part:
+        return {"NETWORK": f"a LAN behind {who}: its network address (10.1.1.0)",
+                "MASK": f"a LAN behind {who}: its mask (255.255.255.0)",
+                "WILDCARD": f"a LAN behind {who}: its wildcard mask (0.0.0.255)"}[part.group(1)]
+    for ending, meaning in PLACEHOLDER_MEANINGS:
+        if body.endswith(ending):
+            return meaning.format(who=who)
+    return "fill in"
+
+
+def legend(text):
+    """"!" comment lines saying what each placeholder in text stands for (IOS ignores them when pasted)."""
+    found = placeholders(text)
+    if not found:
+        return []
+    width = max(len(token) for token in found)
+    return ["! Replace before pasting:"] + [f"!   {token.ljust(width)}  {placeholder_meaning(token)}"
+                                            for token in found]
+
+
+def filled(vpn, member):
+    """A copy of a member NOMAD doesn't read, with placeholders where something its lines need is unknown."""
+    item = copy.deepcopy(member)
+    item.wan = item.wan or "<WAN-INTERFACE>"
+    item.local_ip = item.local_ip or "<WAN-IP>"
+    if vpn.kind != CRYPTO_MAP:
+        item.tunnel_ip = item.tunnel_ip or "<TUNNEL-IP>"
+    if vpn.routing.kind == BGP:
+        item.bgp_as = item.bgp_as or "<BGP-AS>"
+    return item
+
+
+def removal_lines(blocks, parent_line="", depth=0):
+    """Lines taking a footprint away from a router NOMAD hasn't read: its own objects go, shared (partial) blocks lose
+    only the VPN's lines in them, sticky ones stay."""
+    pad = " " * depth
+    lines = []
+    ordered = sorted(blocks, key=lambda block: -rank(block.line)) if not depth else list(reversed(blocks))
+    for block in ordered:
+        if block.sticky:
+            continue
+        left = Block(block.line, [child for child in block.children if child.sticky])
+        if block.partial and block.children and not (block.line.startswith("crypto ikev2 policy") and
+                                                     goes_when_empty(left)):
+            inner = removal_lines(block.children, block.line, depth + 1)
+            if inner:
+                lines += [pad + block.line] + inner
+        else:
+            lines.append(pad + no_form(block.line, parent_line))
+    return lines
+
+
+def side_change(vpn, member, xe=False):
+    """MemberChange with all of a router's lines for a VPN, for a router NOMAD doesn't read (a template's slot, a
+    far end set up by hand): to copy and paste. xe False keeps the lines IOS XE takes as defaults (they're harmless
+    there, and classic IOS needs them)."""
+    item = member if vpn.template else filled(vpn, member)
+    blocks = prune_hidden(footprint(vpn, item, None, xe=xe), xe)
+    after = {}
+    for block in blocks:
+        after.setdefault(key_of(block.line), strip_flags(block))
+    change = MemberChange(member.key, member.title())
+    change.lines = plan({}, after)
+    change.undo = removal_lines(blocks)
+    return change
+
+
+def side_text(change, undo=False):
+    """A side's lines to paste, with a legend of its placeholders first."""
+    text = change.undo_text() if undo else change.text()
+    return "\n".join(legend(text) + [text])
+
+
+TEMPLATE_SUBNETS = {True: "172.31.0.0/30", False: "172.31.0.0/24"}
+
+
+def slot(kind, word, role, tunnel, hub_order=0):
+    """A template's member: its details are placeholders named for it (<A-WAN-IP>, <SPOKE-LAN>...)."""
+    label = {"A": "Side A", "B": "Side B", "HUB": "Hub", "HUB2": "Hub 2", "SPOKE": "Spoke"}.get(word, word.title())
+    member = Member(f"slot:{word.lower()}", label, "", role, f"<{word}-WAN-INTERFACE>", f"<{word}-WAN-IP>",
+                    tunnel=tunnel, lans=[f"<{word}-LAN>"], bgp_as=f"<{word}-AS>", hub_order=hub_order)
+    if role == SPOKE:
+        member.tunnel_ip = f"<{word}-TUNNEL-IP>"  # Every spoke has its own
+    return member
+
+
+def make_template(name, kind, hubs=1, base=None):
+    """A VPN with no routers: slots (two sides, or hubs and a spoke) whose lines have placeholders. base: a VPN whose
+    settings it takes (a library entry)."""
+    design = base.copy() if base is not None else Vpn(name=name, kind=kind)
+    design.id = Vpn().id
+    design.name, design.kind, design.found, design.template = name, kind, False, True
+    design.differences = []
+    tunnel = 100 if kind == DMVPN else 10
+    if kind == DMVPN:
+        design.members = [slot(kind, "HUB" if number == 1 else f"HUB{number}", HUB, tunnel, number)
+                          for number in range(1, max(1, min(hubs, 2)) + 1)]
+        design.members.append(slot(kind, "SPOKE", SPOKE, tunnel))
+    else:
+        design.members = [slot(kind, "A", PEER, tunnel), slot(kind, "B", PEER, tunnel)]
+    if kind == CRYPTO_MAP:
+        design.subnet = ""
+        if base is None:
+            design.crypto = preset(COMPATIBLE)
+        design.routing.kind = STATIC
+    else:
+        design.subnet = TEMPLATE_SUBNETS[kind in POINT_TO_POINT]
+        assign_addresses(design)
+    design.auth.psk = design.auth.psk or new_key()
+    if kind == DMVPN and not design.dmvpn.auth:
+        design.dmvpn.auth = new_key(8)
+    return design
+
+
 # ----------------------------------------------------------------- Kept on this PC
 
 @dataclass
@@ -1889,7 +2103,9 @@ class VpnStore:
     def remember(self, vpn):
         """Keep a VPN's design and keys (protected)."""
         self.designs[vpn.id] = vpn.to_dict()
-        secrets_kept = {"psk": vpn.auth.psk, "nhrp": vpn.dmvpn.auth}
+        secrets_kept = {"psk": vpn.auth.psk, "nhrp": vpn.dmvpn.auth,
+                        "members": {member.key: [member.psk, member.psk_remote] for member in vpn.members
+                                    if member.psk or member.psk_remote}}
         if any(secrets_kept.values()):
             try:
                 self.keys[vpn.id] = self.protect(json.dumps(secrets_kept))
@@ -1920,6 +2136,10 @@ class VpnStore:
         kept = self.secrets_of(vpn_id)
         vpn.auth.psk = kept.get("psk", "") or vpn.auth.psk
         vpn.dmvpn.auth = kept.get("nhrp", "") or vpn.dmvpn.auth
+        for key, (psk, psk_remote) in (kept.get("members") or {}).items():
+            member = vpn.member(key)
+            if member is not None:
+                member.psk, member.psk_remote = psk, psk_remote
         return vpn
 
     def add_to_library(self, vpn, notes=""):

@@ -21,6 +21,10 @@ if ($LASTEXITCODE -ne 0) { throw "Tests failed; not building. The failures are l
 & $python -m nomad.ui.icon build\nomad.ico
 if ($LASTEXITCODE -ne 0) { throw "Couldn't create the icon." }
 
+# The splash the exe shows from the moment it's opened, while it unpacks (NOMAD then shows the same picture itself)
+& $python -m nomad.ui.splash build\splash.png
+if ($LASTEXITCODE -ne 0) { throw "Couldn't create the splash picture." }
+
 & $python -m nomad.version resource build\version.txt
 if ($LASTEXITCODE -ne 0) { throw "Couldn't create the version resource." }
 
@@ -29,6 +33,6 @@ if ($LASTEXITCODE -ne 0) { throw "Couldn't read the version." }
 
 # nomad\data holds the MAC vendor list, bundled so vendor lookups work offline. win32timezone and servicemanager
 # are loaded by pywin32 when the exe runs as the IPAM server service, where PyInstaller can't see them
-& $python -m PyInstaller --noconfirm --clean --onefile --noconsole --name $exeName --icon build\nomad.ico --version-file build\version.txt --add-data "nomad\data;nomad\data" --hidden-import win32timezone --hidden-import servicemanager Main.py
+& $python -m PyInstaller --noconfirm --clean --onefile --noconsole --name $exeName --icon build\nomad.ico --splash build\splash.png --version-file build\version.txt --add-data "nomad\data;nomad\data" --hidden-import win32timezone --hidden-import servicemanager Main.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed." }
 Write-Host "Built dist\$exeName.exe"

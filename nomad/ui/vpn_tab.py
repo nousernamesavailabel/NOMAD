@@ -449,7 +449,7 @@ class VpnTab(QWidget):
         self.clear_offer = {}  # VPN id -> [(key, peer)] sessions offered a clear after a crypto change
         self.filling = False
         self.paste_dialog = None
-        self.pending_new = None  # (name, kind, [(key, role)]) to make once its routers are read
+        self.pending_new = None  # (name, kind, [(key, role)], template, far end) to make once its routers are read
         self.session_sender = SessionSender(self, window, None)
         self.tick = QTimer(self)
         self.tick.setInterval(1000)
@@ -646,6 +646,11 @@ class VpnTab(QWidget):
         self.add_member_button.setToolTip("Add a read router (a spoke, or a second hub)")
         self.add_member_button.clicked.connect(self.add_member)
         member_row.addWidget(self.add_member_button)
+        self.add_far_button = QPushButton("Add Far End...")
+        self.add_far_button.setToolTip("A router NOMAD doesn't send to (set up by hand): its address and details go "
+                                       "into the others' lines, and its own lines are shown to copy")
+        self.add_far_button.clicked.connect(self.add_far_end)
+        member_row.addWidget(self.add_far_button)
         self.edit_member_button = QPushButton("Edit...")
         self.edit_member_button.clicked.connect(self.edit_member)
         member_row.addWidget(self.edit_member_button)
@@ -1291,6 +1296,10 @@ class VpnTab(QWidget):
             kept = self.store.design(item.id)
             if kept is not None and not item.auth.psk:
                 item.auth.psk = kept.auth.psk
+            for member in item.members if kept is not None else []:  # A far end set up by hand stays so
+                mine = kept.member(member.key) if member.key.startswith("peer:") else None
+                if mine is not None and mine.by_hand:
+                    member.by_hand, member.label = True, mine.label or member.label
         known = {item.id for item in self.found}
         for vpn_id in list(self.originals):
             if self.originals[vpn_id] is not None and vpn_id not in known and self.drafts.get(vpn_id) is not None:
@@ -1306,6 +1315,9 @@ class VpnTab(QWidget):
             self.originals[vpn_id] = next(item for item in self.found if item.id == vpn_id)
         self.fill_vpns()
         self.fill_status()
+        page = self.map_page()
+        if page is not None and hasattr(page, "tunnels_changed"):
+            page.tunnels_changed()  # The map's tunnels as this page now has them
 
     def known_id(self, item):
         """A found VPN's id: that of the design it was built from (a draft sent from here, or one kept in the store),
@@ -1400,6 +1412,8 @@ class VpnTab(QWidget):
             name = item_vpn.name
             if vpn_id in self.drafts and self.drafts[vpn_id] is None:
                 name += "   [to take away]"
+            elif original is None and item_vpn.template:
+                name += "   [template]"
             elif original is None:
                 name += "   [new]"
             elif self.changes_for(vpn_id):
@@ -1408,7 +1422,8 @@ class VpnTab(QWidget):
                 name += f"   [to confirm by {self.waiting[vpn_id].at}]"
             routers = ", ".join(member.title() for member in item_vpn.members)
             item = QTreeWidgetItem([name, vpn.kind_text(item_vpn), routers,
-                                    STATE_TEXT[state] if original is not None else "Not sent"])
+                                    STATE_TEXT[state] if original is not None else
+                                    "Template" if item_vpn.template else "Not sent"])
             item.setData(0, Qt.UserRole, vpn_id)
             item.setForeground(3, QColor(COLORS[STATE_COLOR[state]] if original is not None else COLORS["muted"]))
             if vpn_id in self.drafts:
@@ -1487,6 +1502,7 @@ class VpnTab(QWidget):
         for widget in (self.subnet_input, self.subnet_label, self.suggest_button, self.ipam_button, self.mtu_spin,
                        self.mss_spin, self.sizes_label):
             widget.setVisible(tunnelled)
+        self.ipam_button.setEnabled(not design.template)  # Nothing to record a block for
         self.keepalive_spin.setVisible(design.kind == vpn.GRE)
         self.keepalive_label.setVisible(design.kind == vpn.GRE)
         self.fill_members(design)
@@ -1495,6 +1511,10 @@ class VpnTab(QWidget):
         self.psk_radio.setChecked(design.auth.method == vpn.PSK)
         self.cert_radio.setChecked(design.auth.method == vpn.CERT)
         self.psk_input.setText(design.auth.psk)
+        self.psk_input.setToolTip(
+            "Routers here have keys of their own (pre-shared-key local and remote), kept as they are: the key shown "
+            "is the one most of them send. A key typed here puts one key on every router." if design.own_keys()
+            else "")
         self.ca_combo.setCurrentIndex(max(0, self.ca_combo.findData(design.auth.ca_kind or "router")))
         self.ca_device_combo.clear()
         for member in design.members:
@@ -1552,7 +1572,10 @@ class VpnTab(QWidget):
             for column, text in enumerate(cells):
                 cell = QTableWidgetItem(text)
                 cell.setData(Qt.UserRole, member.key)
-                if member.key.startswith("peer:"):
+                if member.by_hand:
+                    cell.setForeground(QColor(COLORS["muted"]))
+                    cell.setToolTip("Set up by hand: nothing is sent to it (pick it under Changes for its lines)")
+                elif member.key.startswith("peer:"):
                     cell.setForeground(QColor(COLORS["muted"]))
                     cell.setToolTip("Not read: only its address is known (nothing is sent to it)")
                 self.member_table.setItem(row, column, cell)
@@ -1570,7 +1593,8 @@ class VpnTab(QWidget):
             self.keepalive_spin.value()
         auth = design.auth
         auth.method = vpn.CERT if self.cert_radio.isChecked() else vpn.PSK
-        auth.psk = self.psk_input.text()
+        if self.psk_input.text() != auth.psk:  # A key typed: the one key on every router
+            design.one_key(self.psk_input.text())
         auth.ca_kind = self.ca_combo.currentData() if auth.method == vpn.CERT else auth.ca_kind
         auth.ca_device = self.ca_device_combo.currentData() or ""
         auth.ca_name = self.ca_name_input.text().strip()
@@ -1630,6 +1654,8 @@ class VpnTab(QWidget):
         name = design.name if design is not None else (original.name if original else "")
         if design is None:
             name += "   [to take away]"
+        elif original is None and design.template:
+            name += "   [template]"
         elif original is None:
             name += "   [new]"
         elif self.changes_for(self.current_id):
@@ -1646,6 +1672,12 @@ class VpnTab(QWidget):
             return
         kind = self.kind_combo.currentData()
         if kind == design.kind:
+            return
+        if design.template:  # Its slots are named for the kind (sides A and B, or hubs and a spoke)
+            remade = vpn.make_template(design.name, kind, max(1, len(design.hubs())), base=design)
+            remade.id = design.id
+            self.drafts[design.id] = remade
+            self.show_design()
             return
         design.kind = kind
         if kind in vpn.POINT_TO_POINT and len(design.members) > 2:
@@ -1669,7 +1701,8 @@ class VpnTab(QWidget):
             return
         design.subnet = subnet
         for member in design.members:
-            if member.tunnel_ip and not vpn.in_subnet(member.tunnel_ip, subnet):
+            if member.tunnel_ip and not vpn.in_subnet(member.tunnel_ip, subnet) and \
+                    not vpn.is_placeholder(member.tunnel_ip):
                 member.tunnel_ip = ""
         vpn.assign_addresses(design)
         self.show_design()
@@ -1684,7 +1717,8 @@ class VpnTab(QWidget):
                   draft.subnet]
         design.subnet = vpn.suggest_subnet(design, devices, taken)
         for member in design.members:
-            member.tunnel_ip = ""
+            if not vpn.is_placeholder(member.tunnel_ip):
+                member.tunnel_ip = ""
         vpn.assign_addresses(design)
         self.show_design()
 
@@ -1768,18 +1802,21 @@ class VpnTab(QWidget):
         member = self.selected_member()
         if design is None or member is None:
             return
-        if member.key.startswith("peer:"):
-            set_hint(self.status_label, f"{member.title()} wasn't read: add it as a router (Add Address...) and read "
-                                        "it to change its side.", "warning")
-            return
         dialog = MemberDialog(self, design, member, self.read.get(member.key))
         if dialog.exec_():
             dialog.apply(member)
+            if member.by_hand and not member.key.split("#")[0] == f"peer:{member.reached_at}":
+                member.key = ""  # Keyed by the address it's reached at (as it's found once sent)
+                member.key = self.far_key(design, member.reached_at)
             self.show_design()
 
     def add_member(self):
         design = self.editable()
         if design is None:
+            return
+        if design.template:
+            set_hint(self.status_label, "A template has no routers: make a VPN from it (Save to Library, then Use) "
+                                        "to pick them.", "warning")
             return
         if design.kind in vpn.POINT_TO_POINT + (vpn.CRYPTO_MAP,) and len(design.members) >= 2:
             set_hint(self.status_label, "This kind joins two routers: make a DMVPN for more.", "warning")
@@ -1797,6 +1834,47 @@ class VpnTab(QWidget):
         vpn.assign_addresses(design)
         self.show_design()
 
+    def add_far_end(self):
+        """A router NOMAD doesn't send to, typed in (a template: its second hub)."""
+        design = self.editable()
+        if design is None:
+            return
+        if design.kind in vpn.POINT_TO_POINT + (vpn.CRYPTO_MAP,) and len(design.members) >= 2:
+            set_hint(self.status_label, "This kind joins two routers: edit the far end (or remove a router first).",
+                     "warning")
+            return
+        if design.template:
+            if design.kind != vpn.DMVPN or len(design.hubs()) >= 2:
+                set_hint(self.status_label, "A template's spoke stands for every spoke: one is enough.", "info")
+                return
+            member = vpn.slot(design.kind, "HUB2", vpn.HUB, design.members[0].tunnel if design.members else 100, 2)
+            design.members.insert(len(design.hubs()), member)
+            vpn.assign_addresses(design)
+            self.show_design()
+            return
+        role = vpn.PEER if design.kind != vpn.DMVPN else vpn.SPOKE if design.hubs() else vpn.HUB
+        member = vpn.Member("peer:", "", "", role, tunnel=design.members[0].tunnel if design.members else 10,
+                            hub_order=1 if role == vpn.HUB else 0, by_hand=True)
+        dialog = MemberDialog(self, design, member, None)
+        if not dialog.exec_():
+            return
+        dialog.apply(member)
+        member.key = self.far_key(design, member.reached_at)
+        member.label = member.label or member.reached_at
+        if member.role == vpn.HUB and not member.hub_order:
+            member.hub_order = len(design.hubs()) + 1
+        design.members.append(member)
+        vpn.assign_addresses(design)
+        self.show_design()
+
+    @staticmethod
+    def far_key(design, address):
+        """A far end's member key: peer:ADDRESS (as one found on the routers would be), made unique."""
+        key, number = f"peer:{address}", 2
+        while design.member(key) is not None:
+            key, number = f"peer:{address}#{number}", number + 1
+        return key
+
     def remove_member(self):
         design = self.editable()
         member = self.selected_member()
@@ -1805,9 +1883,10 @@ class VpnTab(QWidget):
         design.members = [item for item in design.members if item.key != member.key]
         self.show_design()
 
-    def new_member(self, design, key, role, peers=()):
+    def new_member(self, design, key, role, peers=(), far=""):
         """A router's part in a VPN, filled in from what was read: its WAN toward the others (peers: the keys of
-        every router going in, when they're all added at once), its tunnel number."""
+        every router going in, when they're all added at once; far: a far end's address, set up by hand), its tunnel
+        number."""
         device = self.read.get(key)
         target = self.targets.get(key)
         member = vpn.Member(key, target.label.split(" (")[0] if target else key, target.address if target else "",
@@ -1815,7 +1894,10 @@ class VpnTab(QWidget):
         member.bgp_as = device.bgp_as() if device is not None else ""
         toward = set(peers) | {item.key for item in design.members}
         others = [self.read.get(other) for other in sorted(toward) if other != key]
-        toward = vpn.wan_between(device, others)
+        toward = vpn.wan_toward(device, far) if far else ""
+        if toward.lower().startswith(("loopback", "tunnel", "null")):
+            toward = ""
+        toward = toward or vpn.wan_between(device, others)
         wans = vpn.wan_choices(device)
         if not toward and wans:
             default = device.route_to("0.0.0.0")
@@ -1840,15 +1922,29 @@ class VpnTab(QWidget):
         dialog = NewVpnDialog(self, routers, chosen, name, kind)
         if not dialog.exec_():
             return
+        if dialog.template():
+            self.make_template(dialog.name(), dialog.kind(), dialog.hubs())
+            return
         picks = dialog.chosen()
         unread = [key for key, _ in picks if key not in self.read or not self.read[key].read]
         if unread:
-            self.pending_new = (dialog.name(), dialog.kind(), picks)
+            self.pending_new = (dialog.name(), dialog.kind(), picks, None, dialog.far_end())
             self.start_read(unread)
             return
-        self.make_new(dialog.name(), dialog.kind(), picks)
+        self.make_new(dialog.name(), dialog.kind(), picks, far=dialog.far_end())
 
-    def make_new(self, name, kind, picks, template=None):
+    def make_template(self, name, kind, hubs=1, base=None):
+        """A template (no routers): its slots' lines have placeholders to fill in."""
+        design = vpn.make_template(name, kind, hubs, base)
+        self.drafts[design.id] = design
+        self.originals[design.id] = None
+        self.current_id = design.id
+        self.tabs.setCurrentIndex(0)
+        self.fill_vpns()
+        set_hint(self.status_label, f"{design.name}: a template. Check the settings, pick a side under Changes, then "
+                                    f"Copy or Export its lines.", "info")
+
+    def make_new(self, name, kind, picks, template=None, far=""):
         missing = [key for key, _ in picks if key not in self.read or not self.read[key].read]
         if missing:
             set_hint(self.status_label, f"Couldn't read {', '.join(self.title(key) for key in missing)}: the VPN "
@@ -1857,8 +1953,10 @@ class VpnTab(QWidget):
         design = template.copy() if template is not None else vpn.Vpn(name=name, kind=kind)
         if template is not None:
             design.id = vpn.Vpn().id
-            design.name, design.kind, design.found = name, kind, False
-            design.members = []
+            design.name, design.kind, design.found, design.template = name, kind, False, False
+            design.members, design.differences = [], []
+            if not vpn.ipaddress_like(design.subnet.split("/")[0]):
+                design.subnet = ""
         if kind == vpn.CRYPTO_MAP:
             design.crypto = vpn.preset(vpn.COMPATIBLE) if template is None else design.crypto
         keys = {key for key, _ in picks}
@@ -1872,8 +1970,13 @@ class VpnTab(QWidget):
         if kind == vpn.DMVPN and not design.dmvpn.auth:
             design.dmvpn.auth = vpn.new_key(8)
         hub_number = 1
+        if far:  # The far end (the hub, for DMVPN spokes) is set up by hand: only its address is known
+            role = vpn.HUB if kind == vpn.DMVPN else vpn.PEER
+            design.members.append(vpn.Member(self.far_key(design, far), far, "", role, local_ip=far,
+                                             hub_order=1 if role == vpn.HUB else 0, by_hand=True))
+            hub_number += role == vpn.HUB
         for key, role in sorted(picks, key=lambda pick: pick[1] != vpn.HUB):
-            member = self.new_member(design, key, role, peers=keys)
+            member = self.new_member(design, key, role, peers=keys, far=far)
             if role == vpn.HUB:
                 member.hub_order = hub_number
                 hub_number += 1
@@ -1893,7 +1996,8 @@ class VpnTab(QWidget):
         self.tabs.setCurrentIndex(0)
         self.fill_vpns()
         set_hint(self.status_label, f"{design.name}: add each router's LANs (Edit...), check the settings, then "
-                                    f"Send.", "info")
+                                    f"Send." + (f" {far} is set up by hand: give it its LANs and tunnel details too "
+                                                f"(Edit...), and copy its lines from Changes." if far else ""), "info")
 
     def take_away_vpn(self):
         vpn_id = self.current_id
@@ -1950,10 +2054,18 @@ class VpnTab(QWidget):
         self.preview_combo.blockSignals(True)
         current = self.preview_combo.currentData()
         self.preview_combo.clear()
-        if len(changes) > 1:
-            self.preview_combo.addItem("Every router", "")
-        for key in changes:
-            self.preview_combo.addItem(self.title(key), key)
+        if design is not None and design.template:
+            self.preview_combo.addItem("Every side", "")
+            for member in design.members:
+                self.preview_combo.addItem(member.title(), f"side:{member.key}")
+        else:
+            if len(changes) > 1:
+                self.preview_combo.addItem("Every router", "")
+            for key in changes:
+                self.preview_combo.addItem(self.title(key), key)
+            for member in design.members if design is not None else []:
+                if member.by_hand:
+                    self.preview_combo.addItem(f"{member.title()} (by hand)", f"side:{member.key}")
         at = self.preview_combo.findData(current)
         self.preview_combo.setCurrentIndex(max(0, at))
         self.preview_combo.blockSignals(False)
@@ -1961,11 +2073,30 @@ class VpnTab(QWidget):
         self.show_waiting()
         self.update_buttons()
 
+    def side_text(self, key, undo=False):
+        """The lines for a router NOMAD doesn't send to (a template's side, a far end set up by hand)."""
+        design = self.design()
+        member = design.member(key) if design is not None else None
+        if member is None:
+            return ""
+        try:
+            return vpn.side_text(vpn.side_change(design, member), undo)
+        except Exception:
+            log.exception("Making a VPN side's lines failed")
+            return ""
+
     def preview_text(self, undo=None, reveal=None):
         changes = self.changes_for(self.current_id)
         key = self.preview_combo.currentData()
         undo = self.undo_radio.isChecked() if undo is None else undo
         reveal = self.show_keys_check.isChecked() if reveal is None else reveal
+        design = self.design()
+        if key and key.startswith("side:") or design is not None and design.template:
+            keys = [key[5:]] if key else [member.key for member in design.members]
+            parts = [(f"! {design.member(item).title()}\n" if len(keys) > 1 else "") + self.side_text(item, undo)
+                     for item in keys]
+            text = "\n\n".join(part for part in parts if part)
+            return text if reveal else vpn.mask(text)
         parts = []
         for item_key, change in changes.items():
             if key and item_key != key:
@@ -2003,6 +2134,9 @@ class VpnTab(QWidget):
 
     def blocked(self, vpn_id):
         """Why the VPN can't be sent now ("" if it can)."""
+        design = self.design(vpn_id)
+        if design is not None and design.template:
+            return "A template has no routers: Copy or Export its lines."
         changes = self.changes_for(vpn_id)
         if not changes:
             return "Nothing to send."
@@ -2061,6 +2195,9 @@ class VpnTab(QWidget):
         how = (f"each with a {minutes}-minute revert timer, " if minutes else "without a revert timer, ") + \
             ("checked from each end, then confirmed" if self.verify_check.isChecked() else "then confirmed")
         design = self.design(vpn_id) or self.original(vpn_id)
+        by_hand = [member.title() for member in design.members if member.by_hand]
+        if by_hand and self.verify_check.isChecked():
+            how += f" (the checks need {', '.join(by_hand)}'s side in already, or everything is put back)"
         if QMessageBox.question(self, "Send", f"Send {design.name} to {names}, {how}?") != QMessageBox.Yes:
             return
         self.sending = (vpn_id, jobs, minutes)
@@ -2136,7 +2273,9 @@ class VpnTab(QWidget):
         after = self.design(vpn_id)
         if before is None or after is None or not before.protected:
             return
-        if (before.crypto, before.auth.psk) == (after.crypto, after.auth.psk):
+        def keys(design):
+            return design.auth.psk, [(member.psk, member.psk_remote) for member in design.members]
+        if (before.crypto, keys(before)) == (after.crypto, keys(after)):
             return
         offers = []
         for member in after.members:
@@ -2312,13 +2451,20 @@ class VpnTab(QWidget):
     def fill_session_menu(self):
         self.session_menu.clear()
         changes = self.changes_for(self.current_id)
-        if not changes:
+        design = self.design()
+        sides = [member for member in (design.members if design is not None and not design.template else [])
+                 if member.by_hand and not vpn.placeholders(self.side_text(member.key))]
+        if not changes and not sides:
             self.session_menu.addAction("No changes to send").setEnabled(False)
             return
         for key in changes:
             submenu = self.session_menu.addMenu(self.title(key))
             self.session_sender.fill_menu(submenu, lambda key=key: self.session_text(key),
                                           device=self.device_hints(key), tag=("changes", self.current_id, key))
+        for member in sides:  # Typed into a session to it; not recorded (NOMAD doesn't follow that router)
+            submenu = self.session_menu.addMenu(f"{member.title()} (by hand)")
+            self.session_sender.fill_menu(submenu, lambda key=member.key: self.side_text(key),
+                                          device={"address": member.reached_at, "name": member.title()})
 
     def session_text(self, key):
         change = self.changes_for(self.current_id).get(key)
@@ -2639,15 +2785,20 @@ class VpnTab(QWidget):
         routers = [(key, self.title(key)) for key in sorted(self.targets, key=lambda key: self.title(key).lower())]
         chosen = [member.key for member in template.members if member.key in self.targets]
         dialog = NewVpnDialog(self, routers, chosen, f"{template.name}2", template.kind)
+        dialog.template_check.setChecked(template.template)
+        dialog.hubs_spin.setValue(max(1, len(template.hubs())))
         if not dialog.exec_():
             return
-        picks = dialog.chosen()
-        unread = [key for key, _ in picks if key not in self.read or not self.read[key].read]
         template.auth.psk = ""
-        if unread:
-            self.start_read(unread, then=lambda: self.make_new(dialog.name(), dialog.kind(), picks, template))
+        if dialog.template():
+            self.make_template(dialog.name(), dialog.kind(), dialog.hubs(), base=template)
             return
-        self.make_new(dialog.name(), dialog.kind(), picks, template)
+        picks, far = dialog.chosen(), dialog.far_end()
+        unread = [key for key, _ in picks if key not in self.read or not self.read[key].read]
+        if unread:
+            self.start_read(unread, then=lambda: self.make_new(dialog.name(), dialog.kind(), picks, template, far))
+            return
+        self.make_new(dialog.name(), dialog.kind(), picks, template, far)
 
     def edit_library_notes(self):
         entry = self.library_entry()
@@ -2836,7 +2987,10 @@ class VpnTab(QWidget):
         member = self.selected_member() if design is not None else None
         self.edit_member_button.setEnabled(member is not None)
         self.remove_member_button.setEnabled(member is not None and len(design.members) > 2)
-        self.add_member_button.setEnabled(design is not None)
+        self.add_member_button.setEnabled(design is not None and not design.template)
+        self.add_far_button.setEnabled(design is not None)
+        self.add_far_button.setText("Add Second Hub" if design is not None and design.template else
+                                    "Add Far End...")
         self.send_button.setEnabled(not busy and bool(changes) and waiting is None and not self.blocked(vpn_id))
         self.send_button.setToolTip(self.blocked(vpn_id) or "Every router's change in with the revert timer, the VPN "
                                                             "checked from each end, then confirmed on all (or all put "
@@ -2850,7 +3004,8 @@ class VpnTab(QWidget):
         text = self.preview.toPlainText()
         self.copy_button.setEnabled(bool(text))
         self.export_button.setEnabled(bool(text))
-        self.certs_button.setEnabled(design is not None and design.auth.method == vpn.CERT and not busy)
+        self.certs_button.setEnabled(design is not None and design.auth.method == vpn.CERT and not busy and
+                                     not design.template)
         if design is not None and design.auth.method == vpn.CERT:
             have = [member.title() for member in design.members if member.key in self.read and
                     vpnpki.has_certificate(design, member, self.read[member.key])]

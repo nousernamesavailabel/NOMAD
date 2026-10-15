@@ -29,9 +29,19 @@ def check(vpn, devices, others=(), pc_ip=""):
     """[Finding] for a VPN design. devices: {member key: DeviceVpns}; others: the other VPNs found on the routers."""
     found = []
     say = lambda severity, text, member="": found.append(Finding(severity, text, member))  # noqa: E731
+    order = {ERROR: 0, WARNING: 1, INFO: 2}
+    if vpn.template:  # No routers: only what the settings themselves say
+        shape(vpn, say)
+        secrets(vpn, say)
+        crypto(vpn, say)
+        say(INFO, "A template: no routers, so nothing to send. Pick a side under Changes, copy or export its lines, "
+                  "and replace the <PLACEHOLDERS> with each router's details.")
+        return sorted(found, key=lambda item: order.get(item.severity, 3))
+    shape(vpn, say)
     members(vpn, devices, say)
     addresses(vpn, devices, say, others)
     secrets(vpn, say)
+    as_read(vpn, say)
     crypto(vpn, say)
     routing(vpn, devices, say)
     reach(vpn, devices, say)
@@ -41,11 +51,11 @@ def check(vpn, devices, others=(), pc_ip=""):
     lockout(vpn, devices, say, pc_ip)
     other_clouds(vpn, devices, say, others)
     shared(vpn, say, others)
-    order = {ERROR: 0, WARNING: 1, INFO: 2}
     return sorted(found, key=lambda item: order.get(item.severity, 3))
 
 
-def members(vpn, devices, say):
+def shape(vpn, say):
+    """How many routers, in which roles."""
     if vpn.kind in V.POINT_TO_POINT + (V.CRYPTO_MAP,) and len(vpn.members) != 2:
         say(ERROR, f"A {V.KIND_NAMES[vpn.kind]} VPN joins exactly two routers ({len(vpn.members)} chosen).")
     if vpn.kind == V.DMVPN:
@@ -56,12 +66,24 @@ def members(vpn, devices, say):
         if vpn.dmvpn.phase == 1 and len(vpn.hubs()) > 1:
             say(ERROR, "DMVPN phase 1 spokes have a point-to-point tunnel to one hub: use phase 2 or 3 for two hubs.")
         if not vpn.spokes():
-            say(WARNING, "The DMVPN has no spokes yet.")
+            say(INFO, "No spokes yet: the hub takes any spoke that registers with the key (add spokes later, or set "
+                      "them up by hand from a template).")
+            if vpn.routing.kind == V.BGP:
+                say(ERROR, "BGP on the hub needs the spokes' AS (its peer group's remote-as): add a spoke with its "
+                           "BGP AS (Add Far End... if NOMAD doesn't reach it).")
     keys = [member.key for member in vpn.members]
     if len(set(keys)) != len(keys):
         say(ERROR, "A router is in the VPN twice.")
+
+
+def members(vpn, devices, say):
     for member in vpn.members:
         device = devices.get(member.key)
+        if member.by_hand:
+            say(INFO, f"{member.title()} is set up by hand: NOMAD sends nothing to it (pick it under Changes for its "
+                      f"lines). Until its side is in, Check it works first fails and puts the rest back: untick it "
+                      f"to send only NOMAD's side.", member.key)
+            continue
         if member.key.startswith("peer:"):
             say(INFO, f"{member.title()} wasn't read (only its address is known): nothing is sent to it, so its side "
                       f"has to match by hand.", member.key)
@@ -98,7 +120,7 @@ def addresses(vpn, devices, say, others):
         say(INFO, f"{vpn.subnet} is bigger than a point-to-point tunnel needs (/30 or /31).")
     seen = {}
     for member in vpn.members:
-        if member.key.startswith("peer:"):
+        if member.key.startswith("peer:") and not member.by_hand:
             continue
         if not member.tunnel:
             say(ERROR, f"{member.title()} has no tunnel number.", member.key)
@@ -140,15 +162,49 @@ def secrets(vpn, say):
         key = vpn.auth.psk
         if not key:
             say(ERROR, "There's no pre-shared key.")
-        elif any(character in key for character in " ?\"'\t"):
-            say(ERROR, "The pre-shared key has a space, quote or ? in it (IOS takes ? as help): use letters and "
-                       "digits.")
-        elif len(key) < 16 and not key.startswith(("6 ", "7 ", "0 ")):
-            say(WARNING, f"The pre-shared key is short ({len(key)} characters): use 16 or more (Generate makes 24).")
+        keys = [key] + [item for member in vpn.members for item in (member.psk, member.psk_remote) if item]
+        for item in dict.fromkeys(keys):
+            plain = item[2:] if item[:2] in ("0 ", "6 ", "7 ") else item  # A type before an encrypted key
+            if any(character in plain for character in " ?\"'\t"):
+                say(ERROR, "A pre-shared key has a space, quote or ? in it (IOS takes ? as help): use letters and "
+                           "digits.")
+                break
+            if item and len(plain) < 16 and plain == item:
+                say(WARNING, f"A pre-shared key is short ({len(item)} characters): use 16 or more (Generate makes "
+                             f"24).")
+                break
+        own_keys(vpn, say)
     if vpn.kind == V.DMVPN and vpn.dmvpn.auth and len(vpn.dmvpn.auth) > 8:
         say(ERROR, "NHRP authentication takes at most 8 characters.")
     if vpn.kind == V.DMVPN and vpn.protected and vpn.auth.method == V.PSK:
         say(INFO, "Every DMVPN router uses the same key for any peer (spokes talk to each other directly).")
+
+
+def own_keys(vpn, say):
+    """Routers with keys of their own (IKEv2 pre-shared-key local/remote, as read): only where IOS can do it."""
+    if not vpn.own_keys():
+        return
+    sent = {member.key: V.own_key(vpn, member) for member in vpn.members}
+    if vpn.crypto.ike == V.IKEV1:
+        if len(set(sent.values())) > 1:
+            say(ERROR, "IKEv1 has one key for both ends, and these routers send different ones: type one key (it "
+                       "goes on every router).")
+        return
+    if vpn.kind == V.DMVPN:
+        for group, word, other in ((vpn.spokes(), "spokes", "hub"), (vpn.hubs(), "hubs", "spoke")):
+            if len({sent[member.key] for member in group}) > 1:
+                say(ERROR, f"The {word} send different pre-shared keys, but each {other} has one key for all of "
+                           f"them: type one key (it goes on every router).")
+                return
+    titles = ", ".join(member.title() for member in vpn.members if member.psk or member.psk_remote)
+    say(INFO, f"Keys of their own (pre-shared-key local and remote, as read) kept on {titles}. A key typed here puts "
+              f"one key on every router.")
+
+
+def as_read(vpn, say):
+    """Where one router's side was read unlike the others' (the design has one setting for them all)."""
+    for text in vpn.differences:
+        say(WARNING, f"As read: {text}")
 
 
 def crypto(vpn, say):
@@ -497,8 +553,8 @@ def other_clouds(vpn, devices, say, others):
             mine = other.member(member.key)
             if mine is None or not member.local_ip or mine.local_ip != member.local_ip:
                 continue
-            if vpn.auth.method == V.PSK and other.auth.method == V.PSK and other.auth.psk and \
-                    other.auth.psk != vpn.auth.psk:
+            if vpn.auth.method == V.PSK and other.auth.method == V.PSK and V.own_key(other, mine) and \
+                    V.own_key(other, mine) != V.own_key(vpn, member):
                 say(ERROR, f"{member.title()} is in {other.name} on the same address ({member.local_ip}): IOS can't "
                            f"tell which cloud a peer connecting there is for, so the two need the same key (use "
                            f"{other.name}'s).", member.key)

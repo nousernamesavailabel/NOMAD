@@ -4,14 +4,14 @@ import os
 import time
 
 from PyQt5.QtCore import QSettings, Qt, QTimer, pyqtSignal
-from PyQt5.QtWidgets import QAction, QActionGroup, QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, \
+from PyQt5.QtWidgets import QAction, QActionGroup, QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, \
     QProgressBar, QPushButton, QVBoxLayout, QWidget
 
 from .. import __version__
 from ..ipconfig import flush_dns
 from ..profiles import ProfileStore
 from ..snapshot import NetworkSnapshot, load_snapshot
-from ..system import APP_FULL_NAME, APP_NAME, is_admin, relaunch_as_admin
+from ..system import APP_FULL_NAME, APP_NAME, RESTARTED_FLAG, account_name, is_admin, relaunch_as_admin
 from ..terminal.sessions import SessionFolderStore, SessionStore, TERMINAL_PROTOCOLS
 from .adapter_tab import AdapterTab
 from .capture_tab import CaptureTab
@@ -51,7 +51,7 @@ from .acl_tab import AclTab
 from .vpn_tab import VpnTab
 from .syslog_tab import SyslogTab
 from .tftp_tab import TftpTab
-from .theme import COLORS, DEFAULT_TEXT_SCALE, TEXT_SCALES, set_text_scale
+from .theme import COLORS, DEFAULT_TEXT_SCALE, TEXT_SCALES, closest_text_scale, set_text_scale
 from .traceroute_tab import TracerouteTab
 from .terminal_tab import TerminalTab
 from .rdp_tab import RdpTab
@@ -69,16 +69,23 @@ DHCP_SETTLE_SECONDS = 60
 DHCP_RECHECK_MILLISECONDS = 3000
 
 AUTO_REFRESH_AFTER_SECONDS = 3  # Refresh when switching to a tab if the data is older than this
+START_AS_ADMIN_SETTING = "startup/as_administrator"  # Read by main() before the window is built
 
 
 class MainWindow(QMainWindow):
     snapshot_changed = pyqtSignal(object)  # NetworkSnapshot
     adapter_changed = pyqtSignal(object)  # Adapter or None
 
-    def __init__(self, memory_log_handler):
+    def __init__(self, memory_log_handler, splash=None, elevated_for=None):
+        """splash: the StartupSplash to say what's loading on. elevated_for: the account Always Start as
+        Administrator started this copy for (another account's login having been given for the rights)."""
         super().__init__()
         self.memory_log_handler = memory_log_handler
+        self.splash = splash
         self.admin = is_admin()
+        self.elevated_for_other = elevated_for if elevated_for and elevated_for.lower() != account_name().lower() \
+            else None
+        self.instance_server = None  # Set by main(): closed when this copy restarts as administrator
         self.settings = QSettings()
         self.profile_store = ProfileStore()
         self.snapshot = NetworkSnapshot()
@@ -93,10 +100,14 @@ class MainWindow(QMainWindow):
         self.log_dialog = None
         self.text_scale = DEFAULT_TEXT_SCALE
         self.focus_mode = False  # Everything but the current page hidden (F11)
+        # The text size, before the pages are built: setting it once they are restyles them all, which took seconds
+        self.text_scale = closest_text_scale(self.settings.value("view/text_scale", DEFAULT_TEXT_SCALE, float))
+        set_text_scale(QApplication.instance(), self.text_scale)
 
         self.setWindowTitle(f"{APP_NAME} {__version__} - {APP_FULL_NAME}" + (" (Administrator)" if self.admin else ""))
         self.resize(1180, 800)
         self.init_ui()
+        self.startup_step("Restoring your settings...", 0.94)
         self.ip_context_menus = IpContextMenus(self)
         self.init_menus()
         self.restore_settings()
@@ -123,6 +134,11 @@ class MainWindow(QMainWindow):
                               "scan ports and look up names, but changing settings needs administrator rights.")
         banner_label.setWordWrap(True)
         banner_layout.addWidget(banner_label, 1)
+        self.start_as_admin_check = QCheckBox("Always start as administrator")
+        self.start_as_admin_check.setToolTip("Start NOMAD with administrator rights every time (Windows asks each "
+                                             "time). Hold Shift while it starts to start without them for once.")
+        self.start_as_admin_check.clicked.connect(self.set_start_as_admin)
+        banner_layout.addWidget(self.start_as_admin_check)
         restart_button = QPushButton("Restart as Administrator")
         restart_button.clicked.connect(self.restart_as_admin)
         banner_layout.addWidget(restart_button)
@@ -148,11 +164,13 @@ class MainWindow(QMainWindow):
 
         self.normal_margins = layout.getContentsMargins()
         self.navigator = Navigator(central)
+        self.startup_step("Loading This Computer...", 0.2)
         self.adapter_tab = AdapterTab(self)
         self.routing_tab = RoutingTab(self)
         self.neighbors_tab = NeighborsTab(self)
         self.connections_tab = ConnectionsTab(self)
         self.netreset_tab = NetworkResetTab(self)
+        self.startup_step("Loading Diagnostics...", 0.23)
         self.ping_tab = PingTab(self)
         self.latency_tab = LatencyTab(self)
         self.traceroute_tab = TracerouteTab(self)
@@ -160,29 +178,35 @@ class MainWindow(QMainWindow):
         self.ports_tab = PortsTab(self)
         self.iperf_tab = IperfTab(self)
         self.sweep_tab = SweepTab(self)
+        self.startup_step("Loading the Network Map...", 0.27)
         self.netmap_tab = NetworkMapTab(self)
         self.switch_tab = SwitchTab(self)
         self.session_store = SessionStore()  # Shared by Terminal, SCP and RDP (and MAC Finder's SSH logins)
         self.mac_finder_tab = MacFinderTab(self)  # Searches the Network Map's crawls
+        self.startup_step("Loading Discover...", 0.36)
         self.dhcp_tab = DhcpTab(self)
         self.snmp_tab = SnmpTab(self)
         self.lookup_tab = LookupTab(self)
         self.dns_servers_tab = DnsServersTab(self)
         self.web_check_tab = WebCheckTab(self)
+        self.startup_step("Loading Capture & Logs...", 0.4)
         self.capture_tab = CaptureTab(self)
         self.mirror_tab = MirrorTab(self)  # The Network Map's switches, saved sessions' SSH logins, Packet Capture
         self.syslog_tab = SyslogTab(self)
         self.tftp_tab = TftpTab(self)
         self.subnet_tab = SubnetTab(self)
         self.snmp_config_tab = SnmpConfigTab(self)
+        self.startup_step("Loading ACLs & Route Maps and VPNs...", 0.52)
         self.acl_tab = AclTab(self)  # The Network Map's switches and routers, saved sessions' SSH logins
         self.vpn_tab = VpnTab(self)  # The same, and the IP Addresses page (for tunnel subnets)
         self.inventory_tab = InventoryTab(self)  # The Network Map's devices and the saved sessions
         self.wake_tab = WakeTab(self)
+        self.startup_step("Loading Terminal, SCP and RDP...", 0.73)
         terminal_store = SessionFolderStore(self.session_store, TERMINAL_PROTOCOLS)
         self.terminal_tab = TerminalTab(self, terminal_store)
         self.scp_tab = ScpTab(self, terminal_store)
         self.rdp_tab = RdpTab(self, self.session_store)
+        self.startup_step("Loading IP Addresses and VLANs...", 0.79)
         self.integration = Integration(self)  # The Manage pages and the map, as one
         self.ipam_tab = IpamTab(self)
         self.vlan_tab = VlanTab(self)  # Uses the IP Addresses page's databases and sync
@@ -250,6 +274,9 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         if not self.admin:
             file_menu.addAction("Restart as &Administrator", self.restart_as_admin)
+        self.start_as_admin_action = add_action(file_menu, "Always &Start as Administrator", self.set_start_as_admin)
+        self.start_as_admin_action.setCheckable(True)
+        file_menu.addSeparator()
         file_menu.addAction("E&xit", self.close)
 
         edit_menu = self.menuBar().addMenu("&Edit")
@@ -388,12 +415,20 @@ class MainWindow(QMainWindow):
 
     # ----------------------------------------------------------------- Settings
 
+    def startup_step(self, message, progress):
+        """Say on the splash what's loading, while the window is built."""
+        log.debug("Startup: %s", message)
+        if self.splash is not None:
+            self.splash.step(message, progress)
+
     def restore_settings(self):
         geometry = self.settings.value("window/geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
         self.saved_adapter_name = self.settings.value("window/adapter", "", str)
-        self.set_text_scale(self.settings.value("view/text_scale", DEFAULT_TEXT_SCALE, float))
+        self.set_text_scale(self.text_scale)  # Applied before the pages were built: this ticks it in the menu
+        self.show_start_as_admin(self.settings.value(START_AS_ADMIN_SETTING, False, bool)
+                                 or self.elevated_for_other is not None)
         self.navigator.restore_settings(self.settings)
         self.navigator.setCurrentWidget(self.adapter_tab)  # Always start on Interfaces rather than the last tab used
         for tab in self.all_tabs:
@@ -422,8 +457,7 @@ class MainWindow(QMainWindow):
 
     def set_text_scale(self, scale):
         """Change the size of all text (saved for next time)."""
-        scales = [choice for choice, _ in TEXT_SCALES]
-        scale = min(scales, key=lambda choice: abs(choice - scale))  # Settings may hold an old or edited value
+        scale = closest_text_scale(scale)
         self.text_scale = scale
         set_text_scale(QApplication.instance(), scale)
         for action in self.text_scale_group.actions():
@@ -601,9 +635,47 @@ class MainWindow(QMainWindow):
         from .watch_service_dialog import MapWatcherDialog  # Loads pywin32 only when it's needed
         MapWatcherDialog(self).exec_()
 
+    def show_start_as_admin(self, on):
+        self.start_as_admin_action.setChecked(on)
+        self.start_as_admin_check.setChecked(on)
+
+    def set_start_as_admin(self, on):
+        """Always Start as Administrator ticked or unticked (File menu, or the banner): saved for main() to read next
+        time. Ticked without the rights now, it offers to restart with them."""
+        if self.elevated_for_other is not None:
+            self.show_start_as_admin(True)
+            QMessageBox.information(
+                self, "Always Start as Administrator",
+                f"This copy of {APP_NAME} runs as {account_name()}, whose login was given for administrator rights, "
+                f"so it can't change how {APP_NAME} starts for {self.elevated_for_other}.\n\nTo stop starting as "
+                f"administrator, hold Shift while {APP_NAME} starts (or answer No when Windows asks for the rights): "
+                "it then starts without them, and File > Always Start as Administrator can be unticked there.")
+            return
+        self.settings.setValue(START_AS_ADMIN_SETTING, bool(on))
+        self.show_start_as_admin(bool(on))
+        log.info("Always start as administrator: %s", "on" if on else "off")
+        if on and not self.admin:
+            reply = QMessageBox.question(
+                self, "Always Start as Administrator",
+                f"{APP_NAME} will start as administrator from now on (hold Shift while it starts to start without "
+                "administrator rights for once).\n\nRestart as administrator now? Your window layout and inputs will "
+                "be kept.", QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply == QMessageBox.Yes:
+                self.restart_as_admin()
+
+    def bring_to_front(self):
+        """Another copy was opened: show this one instead (restored if minimized, kept maximized if it was)."""
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
     def restart_as_admin(self):
         self.save_settings()
-        if relaunch_as_admin():
+        if relaunch_as_admin([RESTARTED_FLAG]):
+            if self.instance_server is not None:
+                self.instance_server.close()  # Copies opened from now on start on their own, as the new one is
             for tab in self.all_tabs:
                 tab.shutdown()
             self.hide()

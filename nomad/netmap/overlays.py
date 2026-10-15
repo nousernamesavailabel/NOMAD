@@ -16,7 +16,7 @@ from .model import AP, FIREWALL, KIND_NAMES, NETWORK_KINDS, ROUTER, SOURCE_NAMES
 # Kinds of overlay
 IMPACT, SPOF, TRUNKS, VRF, SUBNET, COLOR = "impact", "spof", "trunks", "vrf", "subnet", "color"
 SPEED, STP, UTIL = "speed", "stp", "util"  # From what's read over SNMP: ports' status, a VLAN's tree, counters
-VPNS = "vpns"  # The VPNs page's tunnels between the map's routers
+VPNS = "vpns"  # The tunnels between the map's routers: the crawl's, and the VPNs page's
 # How a link's drawn
 SOLID, DASH, DOT = "solid", "dash", "dot"
 # Color By: what devices can be colored by, and what each is called
@@ -727,8 +727,8 @@ TUNNEL_ORDER = ["down", "negotiating", "unknown", "up"]
 
 
 def vpn_tunnels(network_map, lines):
-    """The VPNs page's tunnels between the map's routers as dashed lines, colored by whether they're up: lines
-    [(device key, device key, state (vpnstatus UP...), what to say)]."""
+    """The tunnels between the map's routers (the crawl's, and the VPNs page's) as dashed lines, colored by whether
+    they're up: lines [(device key, device key, state (vpnstatus UP...), what to say)]."""
     overlay = Overlay(VPNS, "VPN tunnels")
     states = {}
     for a, b, state, text in lines:
@@ -747,7 +747,8 @@ def vpn_tunnels(network_map, lines):
     if count:
         overlay.summary = [count_text(count, "tunnel")] + ([f"{down} down"] if down else [])
     else:
-        overlay.summary = ["none between routers on this map (read them on the VPNs page)"]
+        overlay.summary = ["none found between routers on this map (crawl again, or read them on the VPNs "
+                           "page)"]
     overlay.tone = "error" if down else ""
     overlay.legend = [("success", "up"), ("warning", "partly up"), ("error", "down"), ("muted", "not read")]
     return overlay

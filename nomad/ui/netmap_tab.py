@@ -21,7 +21,7 @@ from ..ipam.client import ADMIN, current_key, is_tribe_server
 from ..ipam.map_compare import DEVICE as DEVICE_ADDRESS, compare_map
 from ..ipam.reconcile import MAC_DIFFERS, NOT_RECORDED
 from ..ipam.store import IpamError
-from ..netmap import diff, export, l3, monitor, overlays, shared, store, watch
+from ..netmap import diff, export, l3, monitor, overlays, shared, store, tunnels, watch
 from ..netmap import vlan_path
 from ..netmap import vlans as vlan_info
 from ..netmap.crawl import MAX_WORKERS, WORKERS, CrawlSettings, Crawler, apply_vlans, check_device, \
@@ -45,6 +45,7 @@ from .integration import link as page_link
 from .netmap_key import MapKeyDialog
 from .netmap_counters import LinkCounters
 from .netmap_monitor import NetworkMonitor
+from .netmap_probes import ProbeDialog
 from .netmap_progress import CrawlProgress
 from .netmap_dialogs import CommunitiesDialog, CompareDialog, DeletedDevicesDialog, DeviceDialog, GroupDialog, \
     HostDialog, LinkDialog, MapChoiceDialog, ScopeDialog, shown_value
@@ -181,7 +182,10 @@ class NetworkMapTab(QWidget):
         self.crawled_map = False
         self.crawl_progress = CrawlProgress(self)
         self.monitor = NetworkMonitor(self)
-        self.counters = LinkCounters(self)  # While monitoring: the links' traffic and errors
+        self.monitor.access = self.probe_access
+        self.probe_dialog = None  # Monitor from a Router (made the first time it's used, then kept)
+        self.counters = LinkCounters(self)  # While monitoring: the links' traffic and errors, and the tunnels
+        self.tunnels_seen = None  # While monitoring: (map, tunnels.by_ends) at the last poll, for the log
         self.stp_reading = None  # While the Spanning Tree overlay's switches are read: {"map", "vlan", "views"...}
         self.tribe_map_id = None  # The tribe map open (None: a map file, or none)
         self.unopened = ""  # The map open last time, when it couldn't be reopened: still the one to try next time
@@ -342,6 +346,12 @@ class NetworkMapTab(QWidget):
         self.overlay_menu.aboutToShow.connect(self.fill_overlay_menu)
         self.overlay_submenus = []
         self.overlay_button.setMenu(self.overlay_menu)
+        self.tunnels_check = QCheckBox("Show Tunnels")
+        self.tunnels_check.setChecked(True)
+        self.tunnels_check.setToolTip("Draw the tunnels between the map's routers (GRE, IPsec VTI, DMVPN) as dashed "
+                                      "lines: green up, amber up but not encrypted, red down, gray not known. Found "
+                                      "by the crawl over SNMP (TUNNEL-MIB and the routers' IKE sessions), and on "
+                                      "the VPNs page when it has read them. Overlay > VPN Tunnels shows just them.")
         self.hosts_check = QCheckBox("Show Hosts")
         self.hosts_check.setToolTip("Show every switch's hosts, a box per port with each host's VLAN. Or double-click "
                                     "one switch to show just its hosts.")
@@ -422,6 +432,7 @@ class NetworkMapTab(QWidget):
         self.table_names[self.vlan_panel] = "VLANs"  # Its find box filters its VLANs
         self.table_filters[self.vlan_panel] = TableFilter(self.vlan_panel.table, self.show_vlan_filter_count)
         self.details = QTextBrowser()
+        self.details_shown = (None, None)  # The selection and HTML showing, so a refresh can keep the scroll
         self.details.setOpenLinks(False)
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.tabs)
@@ -474,6 +485,7 @@ class NetworkMapTab(QWidget):
             self.on_escape)
         self.arrange_button.clicked.connect(lambda: self.rearrange())
         self.hosts_check.toggled.connect(self.view.set_all_hosts_shown)
+        self.tunnels_check.toggled.connect(self.show_map_tunnels)
         self.monitor_check.toggled.connect(self.on_monitor_toggled)
         self.watch_check.toggled.connect(self.on_watch_toggled)
         self.interval_combo.currentIndexChanged.connect(
@@ -482,6 +494,7 @@ class NetworkMapTab(QWidget):
         self.monitor.polled.connect(self.counters.poll_now)
         self.counters.updated.connect(self.on_counters_updated)
         self.monitor.history_added.connect(self.keep_history)
+        self.monitor.probes_button.clicked.connect(self.show_probes)
         for view in (self.view, self.l3_view):
             view.selection_changed.connect(self.show_details)
             view.positions_changed.connect(self.save_timer.start)
@@ -542,7 +555,7 @@ class NetworkMapTab(QWidget):
                         self.compare_button, self.ipam_network_button, self.ipam_record_button, self.tribe_button,
                         self.key_button]
         watching = [self.monitor_check, self.interval_combo, self.monitor_label, self.watch_check, self.watch_label]
-        view_tools = [self.overlay_button, self.hosts_check, self.undo_button, self.redo_button, self.fit_button,
+        view_tools = [self.overlay_button, self.tunnels_check, self.hosts_check, self.undo_button, self.redo_button, self.fit_button,
                       self.arrange_button]
         if self.compact_top:
             unused = file_buttons
@@ -1210,6 +1223,7 @@ class NetworkMapTab(QWidget):
         self.show_statuses()
         self.fill_tables()
         self.vlan_panel.set_map(network_map)
+        self.show_map_tunnels()
         self.apply_vlan_focus()
         self.show_details(None)
         if self.hosts_check.isChecked():
@@ -1481,6 +1495,28 @@ class NetworkMapTab(QWidget):
         self.tabs.setCurrentWidget(self.view)
         self.apply_vlan_focus()
 
+    def tunnel_lines(self):
+        """[(device key, device key, state, what to say)] of the map's tunnels: the VPNs page's where it has read
+        them (it knows more), the crawl's for the rest."""
+        read_by_page = getattr(getattr(self.window, "vpn_tab", None), "map_tunnels", None)
+        read = read_by_page() if callable(read_by_page) else []
+        pairs = {frozenset(line[:2]) for line in read}
+        return read + [line for line in tunnels.lines(self.network_map, self.counters.live)
+                       if frozenset(line[:2]) not in pairs]
+
+    def show_map_tunnels(self, *_):
+        """Show Tunnels: the map's tunnels drawn on it (or not)."""
+        shown = self.tunnels_check.isChecked() and self.network_map is not None
+        self.view.set_map_tunnels(self.tunnel_lines() if shown else [])
+
+    def tunnels_changed(self):
+        """The VPNs page read routers: the map's tunnels (and the VPN Tunnels overlay) as it now has them."""
+        if self.network_map is None:
+            return
+        self.show_map_tunnels()
+        if self.overlay_shown is not None and self.overlay_shown[0] == overlays.VPNS:
+            self.apply_vlan_focus()
+
     def show_overlay(self, kind, argument=None):
         """Show an overlay (netmap.overlays) on the physical view, instead of the VLAN or overlay showing."""
         if self.network_map is None:
@@ -1494,9 +1530,8 @@ class NetworkMapTab(QWidget):
         everything."""
         network_map = self.network_map
         shown = self.overlay_shown
-        if shown is not None and shown[0] == overlays.VPNS:  # The VPNs page's tunnels, as they are now
-            page = getattr(self.window, "vpn_tab", None)
-            shown = (overlays.VPNS, page.map_tunnels() if page is not None else [])
+        if shown is not None and shown[0] == overlays.VPNS:  # The map's tunnels, as they are now
+            shown = (overlays.VPNS, self.tunnel_lines())
         overlay = overlays.build(network_map, *shown, rates=self.counters.rates,
                                  monitoring=self.monitor.running) if shown is not None else None
         if overlay is None:
@@ -1696,13 +1731,12 @@ class NetworkMapTab(QWidget):
             action.setCheckable(True)
             action.setChecked(shown is not None and shown[0] == kind)
             action.setEnabled(usable)
-        if hasattr(self.window, "vpn_tab"):
-            action = menu.addAction("VPN Tunnels", lambda: self.show_overlay(overlays.VPNS))
-            action.setToolTip("The VPNs read on the VPNs page between this map's routers, colored by whether "
-                              "they're up.")
-            action.setCheckable(True)
-            action.setChecked(shown is not None and shown[0] == overlays.VPNS)
-            action.setEnabled(usable)
+        action = menu.addAction("VPN Tunnels", lambda: self.show_overlay(overlays.VPNS))
+        action.setToolTip("The tunnels between this map's routers, colored by whether they're up: found by the crawl "
+                          "over SNMP, and by the VPNs page when it has read them.")
+        action.setCheckable(True)
+        action.setChecked(shown is not None and shown[0] == overlays.VPNS)
+        action.setEnabled(usable)
         menu.addMenu(stp_menu)
         if usable:
             numbers = sorted({item.vlan for item in vlan_info.map_vlans(network_map)})
@@ -2335,26 +2369,41 @@ class NetworkMapTab(QWidget):
                         "say), and a device > Edit > Draw Link from Here to link it.</p>")
             else:
                 text = "<p>Select a device to see its details.</p>"
-            self.details.setHtml(text)
+            self.set_details(text, None)
             return
         if selection[0] == "many":
-            self.details.setHtml(f"<p>{selection[1]} selected. Drag any of them to move them all.</p>"
-                                 "<p>Shift and drag the background to select several, Ctrl+click a device or a "
-                                 "group's title to add or remove it, and Ctrl+A to select every device.</p>"
-                                 "<p>Right-click one of them to put them in a site, building or room (Group), arrange "
-                                 "just them, or line them up (Align). Sites, buildings and rooms selected are "
-                                 "arranged and lined up as whole boxes.</p>")
+            self.set_details(f"<p>{selection[1]} selected. Drag any of them to move them all.</p>"
+                             "<p>Shift and drag the background to select several, Ctrl+click a device or a "
+                             "group's title to add or remove it, and Ctrl+A to select every device.</p>"
+                             "<p>Right-click one of them to put them in a site, building or room (Group), arrange "
+                             "just them, or line them up (Align). Sites, buildings and rooms selected are "
+                             "arranged and lined up as whole boxes.</p>", selection)
         elif selection[0] == "group":
-            self.details.setHtml(group_html(network_map, selection[1], self.monitor.status))
+            self.set_details(group_html(network_map, selection[1], self.monitor.status), selection)
         elif selection[0] == "device":
-            self.details.setHtml(device_html(network_map, selection[1], self.monitor.status(selection[1])))
+            self.set_details(device_html(network_map, selection[1], self.monitor.status(selection[1]),
+                                         self.counters.live), selection)
         elif selection[0] == "node":
             node = self.l3_nodes.get(selection[1])
             if node is not None:
-                self.details.setHtml(subnet_html(network_map, node.label) if node.kind == l3.SUBNET
-                                     else node_html(network_map, node))
+                self.set_details(subnet_html(network_map, node.label) if node.kind == l3.SUBNET
+                                 else node_html(network_map, node), selection)
         else:
-            self.details.setHtml(port_html(network_map, selection[1], selection[2]))
+            self.set_details(port_html(network_map, selection[1], selection[2]), selection)
+
+    def set_details(self, html, selection):
+        """Shows the details, unless they're already showing. A refresh of the same selection (after every monitor
+        poll) keeps where the details were scrolled to: setHtml alone would jump back to the top."""
+        same = selection is not None and selection == self.details_shown[0]
+        if same and html == self.details_shown[1]:
+            return
+        bars = (self.details.verticalScrollBar(), self.details.horizontalScrollBar())
+        positions = [bar.value() for bar in bars]
+        self.details.setHtml(html)
+        self.details_shown = (selection, html)
+        if same:
+            for bar, position in zip(bars, positions):
+                bar.setValue(position)
 
     def session_hints(self, network_map, device):
         """For a device's Open SSH Session: its other addresses and names (a saved session may use any of them), its
@@ -2375,6 +2424,27 @@ class NetworkMapTab(QWidget):
                 candidates = self.credentials()
             community = candidates[0] if candidates else None
         return community, self.version
+
+    def probe_access(self, address):
+        """How the monitor reads a router's IP SLA probes over SNMP: (credential, version, timeout), or None."""
+        credential, version = self.snmp_access(address)
+        return (credential, version, self.timeout) if credential is not None else None
+
+    def show_probes(self, keys=()):
+        """Monitor from a Router: check devices this computer can't reach from a router on the map (IP SLA)."""
+        if self.network_map is None:
+            set_hint(self.status_label, "Open or make a map first: the probes go on its routers.", "warning")
+            return
+        if self.probe_dialog is None:
+            self.probe_dialog = ProbeDialog(self)
+        if keys:
+            self.probe_dialog.add_devices(keys)
+        if self.monitor.discovery is None and not self.monitor.discovering:
+            self.monitor.discover()
+        self.probe_dialog.fill_probes()
+        self.probe_dialog.show()
+        self.probe_dialog.raise_()
+        self.probe_dialog.activateWindow()
 
     def host_session_hints(self, host):
         """session_hints for a host learned on a switch port: its announced name, and the folder of its switch."""
@@ -2434,6 +2504,13 @@ class NetworkMapTab(QWidget):
             if len(routers) >= 2 and key in routers:
                 label = "Build VPN Between..." if len(routers) == 2 else f"Build DMVPN of {len(routers)} Routers..."
                 actions[tools.addAction(label)] = lambda: self.window.show_vpns(devices=routers, new=True)
+        if self.network_map is not None and key in self.network_map.devices and (device.mgmt_ip or device.addresses):
+            probed = self.monitor.via(key)
+            label = f"Monitored from {probed}..." if probed else "Monitor from a Router..."
+            tools = next((action.menu() for action in menu.actions() if action.menu() is not None
+                          and action.text() == "Tools"), menu)
+            actions[tools.addAction(label)] = lambda: self.show_probes(
+                [item for item in keys if item in self.network_map.devices])
         news = self.news_of_devices(keys)
         if news and self.worker is None:
             actions[menu.addAction("Mark as Seen")] = lambda: self.mark_seen(news)
@@ -3448,14 +3525,26 @@ class NetworkMapTab(QWidget):
         else:
             self.monitor.stop()
             self.counters.reset()
+            self.tunnels_seen = None
+            self.show_map_tunnels()  # As the crawl found them
         self.remember_switches()
         self.show_statuses()
-        if self.overlay_shown is not None and self.overlay_shown[0] == overlays.UTIL:
+        if self.overlay_shown is not None and self.overlay_shown[0] in (overlays.UTIL, overlays.VPNS):
             self.apply_vlan_focus()
 
     def on_counters_updated(self):
-        """A poll's counters are in: the Utilization overlay shows them."""
-        if self.overlay_shown is not None and self.overlay_shown[0] == overlays.UTIL:
+        """A poll's counters and tunnels are in: the Utilization overlay shows them, the tunnels drawn on the map
+        (and the VPN Tunnels overlay) are as the routers say now, and tunnels whose state changed go in the log."""
+        if self.network_map is not None:
+            seen_on, before = self.tunnels_seen or (None, None)
+            if seen_on is not self.network_map:  # The first poll of this map: against what the crawl found
+                before = tunnels.by_ends(tunnels.find(self.network_map))
+            after = tunnels.by_ends(tunnels.find(self.network_map, self.counters.live))
+            self.tunnels_seen = (self.network_map, after)
+            for text in tunnels.changes(self.network_map, before, after):
+                self.monitor.log(text)
+            self.show_map_tunnels()
+        if self.overlay_shown is not None and self.overlay_shown[0] in (overlays.UTIL, overlays.VPNS):
             self.apply_vlan_focus()
 
     def show_statuses(self):
@@ -4011,7 +4100,7 @@ class NetworkMapTab(QWidget):
         for widget in (self.open_button, self.recent_button):
             widget.setEnabled(not running)
         self.new_button.setEnabled(has_map and not running)
-        for widget in (self.fit_button, self.hosts_check):
+        for widget in (self.fit_button, self.hosts_check, self.tunnels_check):
             widget.setEnabled(has_map or running)
         self.update_undo_buttons()
         self.monitor_check.setEnabled(has_map or self.monitor_check.isChecked())
@@ -4045,8 +4134,9 @@ def fill_table(table, rows, ip_columns=(), keys=None):
     table.setSortingEnabled(True)
 
 
-def device_html(network_map, key, state=None):
-    """state: the device's monitor.DeviceStatus while it's monitored."""
+def device_html(network_map, key, state=None, live=None):
+    """state: the device's monitor.DeviceStatus while it's monitored; live: the tunnels as monitoring last read
+    them."""
     device = network_map.devices.get(key)
     if device is None:
         return ""
@@ -4073,6 +4163,21 @@ def device_html(network_map, key, state=None):
             parts.append(f"<tr><td>{escape(link.port_on(key))}&nbsp;</td><td>&rarr; {escape(other.label)} "
                          f"{escape(link.port_on(other.key))}" + (f" &middot; {escape(port)}" if port else "")
                          + "</td></tr>")
+        parts.append("</table>")
+    if device.tunnels:
+        found = [tunnel for tunnel in tunnels.find(network_map, live) if key in (tunnel.a, tunnel.b)]
+        parts.append(f"<h4>Tunnels ({len(device.tunnels)})</h4><table>")
+        for port, end in device.tunnels.items():
+            ends = f"{end.get('local') or '?'} to {end.get('remote') or 'any (multipoint)'}"
+            ends += " over IPsec" if end.get("ipsec") else ""
+            parts.append(f"<tr><td>{escape(port)}&nbsp;</td><td>{escape(ends)}</td></tr>")
+            for tunnel in found:
+                mine, other, other_port = (tunnel.a_port, tunnel.b, tunnel.b_port) if tunnel.a == key else \
+                    (tunnel.b_port, tunnel.a, tunnel.a_port)
+                if mine == port:
+                    far = f"{network_map.devices[other].label} {other_port}".strip()
+                    parts.append(f"<tr><td></td><td>&rarr; {escape(far)}: "
+                                 f"{escape(tunnels.STATE_TEXT[tunnel.state])}</td></tr>")
         parts.append("</table>")
     parts.append(device_vlans_html(device))
     ports = network_map.hosts_by_port(key)
@@ -4237,13 +4342,14 @@ def group_html(network_map, key, status_of=lambda key: None):
 def monitor_status_text(state):
     if state is None:
         return ""
+    via = f", pinged from {state.via} (IP SLA)" if state.via else ""
     if state.status == monitor.UNKNOWN:
-        return "Being checked"
+        return f"Can't check: {state.problem}" if state.problem else "Being checked" + via
     since = datetime.datetime.fromtimestamp(state.since).strftime("%H:%M:%S")
     if state.status == monitor.DOWN:
-        return f"Down for {monitor.duration_text(time.time() - state.since)} (since {since})"
+        return f"Down for {monitor.duration_text(time.time() - state.since)} (since {since}){via}"
     rtt = f", {'<1' if state.rtt < 1 else state.rtt} ms" if state.rtt is not None else ""
-    return f"Up{rtt} (since {since})"
+    return f"Up{rtt} (since {since}){via}"
 
 
 def subnet_html(network_map, subnet):

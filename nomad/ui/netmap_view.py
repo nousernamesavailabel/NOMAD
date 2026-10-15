@@ -10,7 +10,7 @@ from PyQt5.QtGui import QColor, QFont, QFontMetrics, QImage, QKeySequence, QPain
 from PyQt5.QtWidgets import QGraphicsItem, QGraphicsLineItem, QGraphicsScene, QGraphicsView, QStyleOptionGraphicsItem
 
 from ..netmap.l3 import HOP, STAR, SUBNET
-from ..netmap.overlays import DASH, DOT
+from ..netmap.overlays import DASH, DOT, TUNNEL_COLORS, Mark
 from ..netmap.layout import GROUP_PAD, GROUP_TITLE, NODE_HEIGHT, NODE_WIDTH
 from ..netmap.monitor import DOWN, UNKNOWN, UP, duration_text
 from ..netmap.vlans import ACCESS, NATIVE, ONE_END, TAGGED
@@ -309,9 +309,13 @@ class DeviceItem(NodeItem):
         address = device.mgmt_ip if device.mgmt_ip != device.label else ""
         if state is not None and state.status == UP and state.rtt is not None:
             address = f"{address}  ·  {'<1' if state.rtt < 1 else state.rtt} ms".strip(" ·")
+        if state is not None and state.via:
+            address = f"{address}  ·  via {state.via}".strip(" ·")
         lines = [(address, COLORS["muted"])]
         if state is not None and state.status == DOWN:
             lines.append((f"Down for {duration_text(time.time() - state.since)}", COLORS["error"]))
+        elif state is not None and state.problem:
+            lines.append((f"Can't check: {state.problem}", COLORS["warning"]))
         elif device.source in (NO_SNMP, UNREACHABLE):
             lines.append((SOURCE_NAMES[device.source], COLORS["warning" if device.source == NO_SNMP else "error"]))
         else:
@@ -975,7 +979,8 @@ class MapView(QGraphicsView):
         self.overlay = None  # The netmap.overlays.Overlay showing (one at a time, instead of a VLAN), or None
         self.path_overlay = None  # Carry VLAN's planned path (see set_path_overlay), or None
         self.gap_items = []  # Its GapItems
-        self.tunnel_items = []  # The overlay's extra lines (VPN tunnels): TunnelItems
+        self.tunnel_items = []  # The overlay's extra lines (VPN tunnels), or the map's tunnels: TunnelItems
+        self.map_tunnels = []  # Show Tunnels: [(device key, device key, state, what to say)] drawn when no overlay is
         self.pick_anchor = None  # While picking: the device a rubber line goes from to the mouse (the last picked)
         self.pick_rubber = None  # That line
         self.pick_mouse = None  # Where the mouse is (scene)
@@ -1370,18 +1375,32 @@ class MapView(QGraphicsView):
         self.draw_extra_lines()
         self.apply_path_overlay()
 
+    def set_map_tunnels(self, lines):
+        """Show Tunnels: the map's tunnels ([(device key, device key, state, what to say)]; [] for none), drawn as
+        thin dashed lines in their state's color while no overlay draws its own."""
+        self.map_tunnels = list(lines)
+        self.draw_extra_lines()
+
     def draw_extra_lines(self):
-        """The overlay's lines that aren't links (VPN tunnels), between the devices drawn now."""
+        """The overlay's lines that aren't links (VPN tunnels), or else the map's tunnels, between the devices drawn
+        now (faded with the rest while a VLAN or an overlay that fades is showing)."""
         for item in self.tunnel_items:
             if item.scene() is not None:
                 item.scene().removeItem(item)
         self.tunnel_items = []
         overlay = self.overlay
-        for a, b, mark in (overlay.extra_lines if overlay is not None else []):
+        lines = overlay.extra_lines if overlay is not None else []
+        faded = False
+        if not lines and self.map_tunnels:
+            lines = [(a, b, Mark(TUNNEL_COLORS.get(state, "muted"), text, DASH, 1.5))
+                     for a, b, state, text in self.map_tunnels]
+            faded = self.vlan_focus is not None or (overlay is not None and overlay.fade)
+        for a, b, mark in lines:
             a_item, b_item = self.items_by_key.get(a), self.items_by_key.get(b)
             if a_item is None or b_item is None or not a_item.isVisible() or not b_item.isVisible():
                 continue
             item = TunnelItem(a_item, b_item, mark)
+            item.setOpacity(FADED if faded else 1.0)
             self.scene().addItem(item)
             self.tunnel_items.append(item)
 

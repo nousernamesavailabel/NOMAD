@@ -13,12 +13,13 @@ from .theme import accent_button, monospace_font
 
 
 class NewVpnDialog(QDialog):
-    """A new VPN: its name, its kind, and the routers in it (with each one's role in a DMVPN)."""
+    """A new VPN: its name, its kind, and the routers in it (with each one's role in a DMVPN); or only one side of it
+    (the far end set up by hand), or a template with no routers at all."""
 
     def __init__(self, parent, routers, chosen=(), name="", kind=vpn.VTI):
         super().__init__(parent)
         self.setWindowTitle("New VPN")
-        self.resize(560, 520)
+        self.resize(560, 760)
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.name_input = QLineEdit(name or "VPN1")
@@ -31,6 +32,19 @@ class NewVpnDialog(QDialog):
         self.kind_combo.setCurrentIndex(max(0, self.kind_combo.findData(kind)))
         self.kind_combo.currentIndexChanged.connect(self.on_kind)
         form.addRow("Kind:", self.kind_combo)
+        template_row = QHBoxLayout()
+        self.template_check = QCheckBox("Template: no routers")
+        self.template_check.setToolTip("Lines for each side with <PLACEHOLDERS> (WAN interface and address, LANs...) "
+                                       "to fill in: nothing is read or sent")
+        self.template_check.toggled.connect(self.on_kind)
+        template_row.addWidget(self.template_check)
+        self.hubs_label = QLabel("Hubs:")
+        template_row.addWidget(self.hubs_label)
+        self.hubs_spin = QSpinBox()
+        self.hubs_spin.setRange(1, 2)
+        template_row.addWidget(self.hubs_spin)
+        template_row.addStretch(1)
+        form.addRow("", template_row)
         layout.addLayout(form)
         self.about = QLabel()
         self.about.setWordWrap(True)
@@ -55,6 +69,17 @@ class NewVpnDialog(QDialog):
         self.table.resizeColumnsToContents()
         self.table.itemChanged.connect(self.check)
         layout.addWidget(self.table, 1)
+        self.far_box = QGroupBox("Far end set up by hand")
+        far = QFormLayout(self.far_box)
+        self.far_about = QLabel()
+        self.far_about.setWordWrap(True)
+        far.addRow(self.far_about)
+        self.far_input = QLineEdit()
+        self.far_input.setPlaceholderText("203.0.113.10")
+        self.far_input.textChanged.connect(self.check)
+        self.far_label = QLabel("Its WAN address:")
+        far.addRow(self.far_label, self.far_input)
+        layout.addWidget(self.far_box)
         self.hint = QLabel()
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
@@ -66,6 +91,26 @@ class NewVpnDialog(QDialog):
 
     def kind(self):
         return self.kind_combo.currentData()
+
+    def template(self):
+        return self.template_check.isChecked()
+
+    def hubs(self):
+        return self.hubs_spin.value()
+
+    def far_wanted(self):
+        """Whether the ticked routers leave a side for a far end set up by hand: one router of a two-router kind, or
+        DMVPN spokes with no hub."""
+        if self.template():
+            return False
+        chosen = self.chosen()
+        if self.kind() == vpn.DMVPN:
+            return bool(chosen) and not any(role == vpn.HUB for _, role in chosen)
+        return len(chosen) == 1
+
+    def far_end(self):
+        """The far end's WAN address, when it's set up by hand ("" otherwise)."""
+        return self.far_input.text().strip() if self.far_wanted() else ""
 
     def on_kind(self, *_):
         kind = self.kind()
@@ -81,8 +126,12 @@ class NewVpnDialog(QDialog):
                        "hub(s), and (phase 2 and 3) build tunnels to each other as they need them. Tick the routers "
                        "and pick each one's role.",
         }[kind]
-        self.about.setText(about)
+        self.about.setText(about + ("" if self.template() else
+                                    " Tick only one side to build just that side (the far end by hand)."))
         self.table.setColumnHidden(1, kind != vpn.DMVPN)
+        self.table.setEnabled(not self.template())
+        for widget in (self.hubs_label, self.hubs_spin):
+            widget.setVisible(self.template() and kind == vpn.DMVPN)
         self.check()
 
     def chosen(self):
@@ -97,18 +146,29 @@ class NewVpnDialog(QDialog):
 
     def check(self, *_):
         chosen = self.chosen()
-        kind = self.kind()
-        problem = ""
-        if kind != vpn.DMVPN and len(chosen) != 2:
-            problem = f"Tick two routers ({len(chosen)} ticked)."
-        elif kind == vpn.DMVPN and not any(role == vpn.HUB for _, role in chosen):
-            problem = "Make one of the ticked routers a hub."
-        elif kind == vpn.DMVPN and len(chosen) < 2:
-            problem = "Tick a hub and at least one spoke."
+        dmvpn = self.kind() == vpn.DMVPN
+        wanted = self.far_wanted()
+        self.far_box.setVisible(wanted)
+        self.far_label.setText("The hub's WAN address:" if dmvpn else "Its WAN address:")
+        self.far_about.setText(
+            "No hub ticked: NOMAD builds the ticked spokes' side; the hub is set up by hand (its lines are shown to "
+            "copy)." if dmvpn else "One router ticked: NOMAD builds its side; the far end is set up by hand (its "
+            "lines are shown to copy).")
+        problem, info = "", "Routers not read yet are read when you click OK."
+        if self.template():
+            info = "Nothing is read or sent: each side's lines have <PLACEHOLDERS> to fill in."
+        elif not chosen:
+            problem = "Tick the routers (one is enough: the far end can be set up by hand), or make a template."
+        elif not dmvpn and len(chosen) > 2:
+            problem = f"Tick two routers ({len(chosen)} ticked): make a DMVPN for more."
+        elif wanted and not vpn.ipaddress_like(self.far_end()):
+            problem = "Type the hub's WAN address (where the spokes reach it)." if dmvpn else \
+                "Type the far end's WAN address (where this router reaches it)."
+        elif dmvpn and all(role == vpn.HUB for _, role in chosen):
+            info = "Only hubs: spokes can be added later (or set up by hand from a template). " + info
         if not self.name_input.text().strip():
             problem = problem or "Give it a name."
-        set_hint(self.hint, problem or "Routers not read yet are read when you click OK.",
-                 "warning" if problem else "info")
+        set_hint(self.hint, problem or info, "warning" if problem else "info")
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(not problem)
 
     def name(self):
@@ -122,10 +182,21 @@ class MemberDialog(QDialog):
     def __init__(self, parent, design, member, device):
         super().__init__(parent)
         self.design, self.member, self.device = design, member, device
-        self.setWindowTitle(f"{member.title()} in {design.name}")
+        # Free: a router NOMAD doesn't read (a far end set up by hand, a template's slot): everything is typed
+        self.free = device is None and (design.template or member.key.startswith("peer:"))
+        self.setWindowTitle(f"{member.title() or 'Far end'} in {design.name}")
         self.resize(560, 560)
         layout = QVBoxLayout(self)
+        if self.free:
+            about = QLabel("A template's side: type a value or a <PLACEHOLDER> for each." if design.template else
+                           "Set up by hand: NOMAD sends nothing to it, but its details go into the other routers' "
+                           "lines (and its own lines are shown to copy).")
+            about.setWordWrap(True)
+            layout.addWidget(about)
         form = QFormLayout()
+        self.label_input = QLineEdit(member.label)
+        if self.free:
+            form.addRow("Name:", self.label_input)
         self.role_combo = QComboBox()
         if design.kind == vpn.DMVPN:
             self.role_combo.addItem("Spoke", vpn.SPOKE)
@@ -147,10 +218,14 @@ class MemberDialog(QDialog):
         elif member.wan:
             self.wan_combo.setEditText(member.wan)
         self.wan_combo.currentIndexChanged.connect(self.on_wan)
-        self.wan_combo.setToolTip("Where the VPN's packets leave (the tunnel source, or the crypto map's interface)")
+        self.wan_combo.setToolTip("Where the VPN's packets leave (the tunnel source, or the crypto map's interface)" +
+                                  (": only for its own lines" if self.free else ""))
         form.addRow("WAN interface:", self.wan_combo)
         self.local_label = QLabel(member.local_ip or "")
-        form.addRow("WAN address:", self.local_label)
+        self.local_input = QLineEdit(member.local_ip)
+        self.local_input.setToolTip("Its address on the WAN interface (its IKE identity; where the others reach it "
+                                    "unless NAT changes it)")
+        form.addRow("WAN address:", self.local_input if self.free else self.local_label)
         self.public_input = QLineEdit(member.public_ip)
         self.public_input.setPlaceholderText("Only if NAT changes it")
         self.public_input.setToolTip("The address the other routers reach it at, when a NAT device in front of it "
@@ -185,6 +260,7 @@ class MemberDialog(QDialog):
         self.from_button = QToolButton()
         self.from_button.setText("Add From Its Interfaces")
         self.from_button.setPopupMode(QToolButton.InstantPopup)
+        self.from_button.setVisible(not self.free)
         menu = QMenu(self.from_button)
         for name, interface in (device.interfaces().items() if device is not None else []):
             if name.lower().startswith(("tunnel", "nve")) or interface.shutdown:
@@ -214,6 +290,8 @@ class MemberDialog(QDialog):
         return data if data and self.wan_combo.currentText().startswith(data) else vpn.full_interface(text)
 
     def on_wan(self, *_):
+        if self.free:
+            return
         address = self.device.interface_address(self.wan())[0] if self.device is not None else ""
         self.local_label.setText(address or "(no address on it)")
 
@@ -229,6 +307,9 @@ class MemberDialog(QDialog):
             text = line.strip()
             if not text:
                 continue
+            if self.design.template and vpn.is_placeholder(text):
+                found.append(text)
+                continue
             found.append(str(ipaddress.IPv4Network(text if "/" in text else f"{text}/32", strict=False)))
         return found
 
@@ -238,13 +319,20 @@ class MemberDialog(QDialog):
         except ValueError as error:
             set_hint(self.hint, f"A LAN isn't a prefix: {error}", "error")
             return
+        typed = self.design.template  # A template takes <PLACEHOLDERS> too
         public = self.public_input.text().strip()
-        if public and not vpn.ipaddress_like(public):
+        if public and not vpn.ipaddress_like(public) and not (typed and vpn.is_placeholder(public)):
             set_hint(self.hint, "Reached at has to be an IPv4 address.", "error")
             return
+        if self.free:
+            local = self.local_input.text().strip()
+            if not (vpn.ipaddress_like(local) or typed and vpn.is_placeholder(local)):
+                set_hint(self.hint, "Type its WAN address (an IPv4 address" +
+                         (", or a <PLACEHOLDER>)." if typed else ")."), "error")
+                return
         if self.design.kind != vpn.CRYPTO_MAP:
             address = self.tunnel_input.text().strip()
-            if address and not vpn.ipaddress_like(address):
+            if address and not vpn.ipaddress_like(address) and not (typed and vpn.is_placeholder(address)):
                 set_hint(self.hint, "The tunnel address has to be an IPv4 address.", "error")
                 return
         self.accept()
@@ -254,9 +342,12 @@ class MemberDialog(QDialog):
         if self.design.kind == vpn.DMVPN:
             member.role = self.role_combo.currentData()
             member.hub_order = self.hub_order.value() if member.role == vpn.HUB else 0
-        member.wan = self.wan()
-        member.local_ip = self.device.interface_address(member.wan)[0] if self.device is not None else \
-            member.local_ip
+        member.wan = self.wan() if not self.free else self.wan_combo.currentText().strip()
+        if self.free:
+            member.label = self.label_input.text().strip() or member.label
+            member.local_ip = self.local_input.text().strip()
+        elif self.device is not None:
+            member.local_ip = self.device.interface_address(member.wan)[0]
         member.public_ip = self.public_input.text().strip()
         if member.public_ip == member.local_ip:
             member.public_ip = ""

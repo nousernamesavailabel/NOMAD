@@ -1,5 +1,9 @@
 """Watching whether the devices on a map are up: ping each one every so often and note when one goes down or comes
-back. A device is down only after missing FAILS_FOR_DOWN polls in a row, so one lost ping doesn't make it flap."""
+back. A device is down only after missing FAILS_FOR_DOWN polls in a row, so one lost ping doesn't make it flap.
+
+A device with an IP SLA probe on a router (probes.py) is checked from that router instead: each new result of the
+probe counts as one poll, and while the router can't be read (or the probe isn't running) the device is unknown,
+not down."""
 import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +28,8 @@ class DeviceStatus:
     since: float = 0.0  # time.time() of the last change of status
     fails: int = 0  # Polls in a row with no answer
     checked: float = 0.0  # time.time() of the last poll
+    via: str = ""  # Checked from a router: "R5 (vrf MGMT-B)" ("" for a ping from this computer)
+    problem: str = ""  # Unknown because it can't be checked: why ("R5 isn't answering SNMP")
 
 
 @dataclass
@@ -33,6 +39,8 @@ class Change:
     when: float
     lasted: Optional[float] = None  # How long it had been in the status before, in seconds (None the first time)
     rtt: Optional[int] = None
+    via: str = ""
+    problem: str = ""
 
 
 def ping(address, tries=PING_TRIES, timeout=PING_TIMEOUT_MS):
@@ -71,13 +79,15 @@ class StatusTracker:
         """Drop devices no longer on the map."""
         self.devices = {key: status for key, status in self.devices.items() if key in keys}
 
-    def update(self, results):
-        """Take a poll's {key: rtt or None}. Returns the Changes of status it caused."""
+    def update(self, results, via=None):
+        """Take a poll's {key: rtt or None} (via: {key: the router it was checked from}). Returns the Changes of
+        status it caused."""
         now = self.clock()
+        via = via or {}
         changes = []
         for key, rtt in results.items():
             state = self.devices.setdefault(key, DeviceStatus(since=now))
-            state.checked = now
+            state.checked, state.via, state.problem = now, via.get(key, ""), ""
             if rtt is not None:
                 state.fails, state.rtt = 0, rtt
                 new = UP
@@ -89,8 +99,26 @@ class StatusTracker:
                     continue  # Not heard from yet: wait for the second miss before calling it down
             if new != state.status:
                 lasted = now - state.since if state.status != UNKNOWN else None
-                changes.append(Change(key, new, now, lasted, rtt))
+                changes.append(Change(key, new, now, lasted, rtt, state.via))
                 state.status, state.since = new, now
+        return changes
+
+    def cannot_check(self, problems, via=None):
+        """Devices that couldn't be checked this time ({key: why}, such as their router not answering): unknown
+        until they can be, with a Change when that starts or the reason changes."""
+        now = self.clock()
+        via = via or {}
+        changes = []
+        for key, problem in problems.items():
+            state = self.devices.setdefault(key, DeviceStatus(since=now))
+            state.checked, state.via, state.fails, state.rtt = now, via.get(key, ""), 0, None
+            changed = state.problem != problem
+            state.problem = problem
+            if state.status != UNKNOWN:
+                changes.append(Change(key, UNKNOWN, now, now - state.since, None, state.via, problem))
+                state.status, state.since = UNKNOWN, now
+            elif changed:
+                changes.append(Change(key, UNKNOWN, now, None, None, state.via, problem))
         return changes
 
     def counts(self):
@@ -118,15 +146,20 @@ def duration_text(seconds):
 def change_text(change, label, address):
     """A line for the Monitor log."""
     name = f"{label} ({address})" if address and address != label else label
+    if change.status == UNKNOWN:
+        return f"{name} can't be checked: {change.problem or 'no reason given'}"
     if change.status == DOWN:
-        text = f"{name} is down: no answer to ping"
+        text = f"{name} is down: no answer to " + (f"the IP SLA ping from {change.via}" if change.via else "ping")
         if change.lasted is not None:
             text += f" (it had been up for {duration_text(change.lasted)})"
         return text
     text = f"{name} is up"
     if change.lasted is not None:
         text += f" again, after being down for {duration_text(change.lasted)}"
-    return text + (f" ({change.rtt} ms)" if change.rtt is not None else "")
+    details = [f"{change.rtt} ms"] if change.rtt is not None else []
+    if change.via:
+        details.append(f"pinged from {change.via}")
+    return text + (f" ({', '.join(details)})" if details else "")
 
 
 def history_entry(change, label, text):
