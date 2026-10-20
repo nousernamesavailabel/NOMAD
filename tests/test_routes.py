@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from nomad.routes import build_add_route_script, build_delete_route_script, build_route_copy_command, \
-    matching_routes, parse_route_lookup, validate_route_input
+    connected_network_warning, gateway_suggestions, matching_routes, parse_route_lookup, validate_route_input
 from nomad.snapshot import Route, parse_snapshot
 
 FIXTURE = Path(__file__).parent / "fixtures" / "snapshot.json"
@@ -141,3 +141,29 @@ def test_copy_command():
     route = Route(4, ipaddress.ip_network("10.0.0.0/8"), "192.168.1.254", "11", 5, persistent=True)
     assert build_route_copy_command(route) == \
         "New-NetRoute -DestinationPrefix '10.0.0.0/8' -InterfaceIndex 11 -NextHop '192.168.1.254' -RouteMetric 5"
+
+
+def test_gateway_suggestions_list_default_gateways_then_route_next_hops(adapters):
+    routes = parse_snapshot(json.loads(FIXTURE.read_text())).routes
+    suggestions = gateway_suggestions(4, adapters, routes)
+    assert [(gateway, interface) for gateway, interface, _ in suggestions] == \
+        [("192.168.1.1", "11"), ("192.168.1.254", "11")]  # Not the inactive 172.16.0.0/12 route's gateway
+    assert "default gateway on Ethernet" in suggestions[0][2]
+    assert "next hop of 1 route on Ethernet" in suggestions[1][2]
+    assert [gateway for gateway, _, _ in gateway_suggestions(6, adapters, routes)] == ["fe80::1"]
+
+
+@pytest.mark.parametrize("network, warned", [
+    ("192.168.1.0/24", True), ("192.168.1.128/25", True),  # The computer is on it already
+    ("192.168.0.0/16", False),  # A summary that covers the connected subnet is a real route
+    ("10.5.0.0/16", False), ("127.0.0.0/8", False),
+])
+def test_connected_network_warning(adapters, network, warned):
+    assert bool(connected_network_warning(ipaddress.ip_network(network), adapters)) == warned
+
+
+def test_route_to_a_connected_subnet_warns_only_with_a_gateway(adapters):
+    spec, errors, warnings = validate(adapters, "192.168.1.0/24", gateway="192.168.1.254")
+    assert not errors and spec is not None and "already on 192.168.1.0/24" in warnings[0]
+    _, _, warnings = validate(adapters, "192.168.1.0/24", interface="11")  # The connected route itself
+    assert not warnings

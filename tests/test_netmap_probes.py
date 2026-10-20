@@ -294,6 +294,26 @@ def test_monitor_checks_probed_devices_from_their_router(app):
     watcher.shutdown()
 
 
+def test_box_of_a_device_checked_from_a_router(app):
+    """The crawl couldn't reach it but a router can: the box names the router, not Unreachable, and isn't red."""
+    from nomad.ui.netmap_view import DeviceItem
+    from nomad.ui.theme import COLORS
+    device = Device("sw-b", name="sw-b", mgmt_ip="10.20.5.11", kind=SWITCH, source="unreachable")
+    item = DeviceItem(device, {}, None)
+    assert item.detail_lines()[1] == ("Unreachable", COLORS["error"]) and item.name_color() == COLORS["error"]
+    assert "Unreachable when crawled" in item.toolTip()
+    item.monitor_state = monitor.DeviceStatus(status=UP, rtt=4, via="r1 (vrf MGMT-B)")
+    item.update_tip()
+    assert item.detail_lines() == [("10.20.5.11  ·  4 ms", COLORS["muted"]), ("Via r1", COLORS["muted"])]
+    assert item.name_color() == COLORS["text"]
+    assert "Checked from r1 (vrf MGMT-B) with an IP SLA ping" in item.toolTip()
+    item.monitor_state = monitor.DeviceStatus(status=DOWN, since=1.0, via="r1 (vrf MGMT-B)")
+    assert item.detail_lines()[1][0].startswith("Down for")  # Down still says so, router or not
+    item.monitor_state = None  # Not monitored: back to what the crawl found
+    item.update_tip()
+    assert item.detail_lines()[1][0] == "Unreachable" and "Checked from" not in item.toolTip()
+
+
 # ----------------------------------------------------------------- Sending
 
 class FakeShell:
@@ -413,6 +433,9 @@ def test_monitor_from_a_router_on_the_page(app, tmp_path, monkeypatch):
         page.show_device_menu("sw-b", None)
         tools = shown[-1]["Tools"]
         assert "Monitor from a Router..." in [action.text() for action in tools.actions()]
+        page.update_map_menu()
+        page.probes_action.trigger()  # The Map menu's way in: the dialog, with no devices added
+        assert page.probe_dialog.isVisible() and not page.probe_dialog.items
         page.show_probes(["sw-b", "r3"])
         dialog = page.probe_dialog
         assert sorted(dialog.items.values()) == ["r3", "sw-b"]

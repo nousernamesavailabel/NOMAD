@@ -4,6 +4,13 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.31.1] - 2026-10-15
+
+- **Better:** a Network Map device checked from a router says "Via R5" instead of a red "Unreachable" when it's up. Monitor from a Router is also in the Map menu now.
+- **New:** IP Addresses > right-click a subnet > Add Windows Route opens the Routing Table with a route to it filled in; pick the gateway, typed or from the new ▾ list of the gateways this computer uses.
+- **Better:** new routes on the Routing Table are persistent (survive a restart) unless you untick it.
+- **Better:** Carry VLAN lists the switches NOMAD chose in the Through these switches table after Plan, ready to change by hand.
+
 ## [1.31.0] - 2026-10-14
 
 - **New:** the Network Map can monitor devices this computer can't reach (behind a VRF, or with no route back) from a router that can: right-click > Tools > Monitor from a Router adds an IP SLA ping on the router, and Monitor reads its result over SNMP. Everyone monitoring the map uses the same probes.

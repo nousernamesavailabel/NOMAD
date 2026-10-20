@@ -4,11 +4,12 @@ import logging
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QFont, QKeySequence
-from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBox, QFormLayout, QGroupBox, \
-    QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QShortcut, QTableWidget, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QAbstractItemView, QAction, QApplication, QCheckBox, QComboBox, QFormLayout, \
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QShortcut, QTableWidget, \
+    QToolButton, QVBoxLayout, QWidget
 
-from ..routes import add_route, build_route_copy_command, delete_route, matching_routes, parse_route_lookup, \
-    validate_route_input
+from ..routes import add_route, build_route_copy_command, connected_network_warning, delete_route, \
+    gateway_suggestions, matching_routes, parse_route_lookup, validate_route_input
 from ..snapshot import Route
 from ..system import CommandError
 from .common import ColumnFitter, SortableTableItem, set_hint, set_invalid
@@ -100,13 +101,27 @@ class RoutingTab(QWidget):
         self.metric_input.setToolTip("Route metric. Windows adds the interface metric to it, so the table shows "
                                      "the combined value. Leave blank for automatic.")
         self.persistent_check = QCheckBox("Persistent (survives reboot)", self)
+        self.persistent_check.setChecked(True)
         self.route_hint_label = QLabel(self)
         self.route_hint_label.setWordWrap(True)
+
+        # The gateways this computer already uses, to pick one instead of typing it
+        self.gateway_pick_button = QToolButton(self)
+        self.gateway_pick_button.setText("▾")
+        self.gateway_pick_button.setToolTip("Pick a gateway this computer already uses")
+        self.gateway_pick_button.setPopupMode(QToolButton.InstantPopup)
+        self.gateway_menu = QMenu(self.gateway_pick_button)
+        self.gateway_menu.aboutToShow.connect(self.fill_gateway_menu)
+        self.gateway_menu.triggered.connect(self.on_gateway_picked)
+        self.gateway_pick_button.setMenu(self.gateway_menu)
+        gateway_layout = QHBoxLayout()
+        gateway_layout.addWidget(self.route_gateway_input, 1)
+        gateway_layout.addWidget(self.gateway_pick_button)
 
         route_form_layout = QFormLayout()
         route_form_layout.addRow("Network Destination:", self.destination_input)
         route_form_layout.addRow("Netmask:", self.netmask_input)
-        route_form_layout.addRow("Gateway:", self.route_gateway_input)
+        route_form_layout.addRow("Gateway:", gateway_layout)
         route_form_layout.addRow("Interface:", self.route_interface_combo)
         route_form_layout.addRow("Metric:", self.metric_input)
         route_form_layout.addRow("", self.persistent_check)
@@ -458,7 +473,54 @@ class RoutingTab(QWidget):
         for line_edit in (self.destination_input, self.netmask_input, self.route_gateway_input, self.metric_input):
             line_edit.clear()
         self.route_interface_combo.setCurrentIndex(0)
-        self.persistent_check.setChecked(False)
+        self.persistent_check.setChecked(True)
+
+    def fill_gateway_menu(self):
+        """List the gateways this computer already uses for the selected address family."""
+        menu = self.gateway_menu
+        menu.clear()
+        suggestions = gateway_suggestions(self.current_route_family(), self.adapters, self.window.snapshot.routes)
+        for gateway, interface, label in suggestions:
+            action = QAction(label, menu)
+            action.setData((gateway, interface))
+            menu.addAction(action)
+        if not suggestions:
+            action = QAction("This computer has no gateways for this address family", menu)
+            action.setEnabled(False)
+            menu.addAction(action)
+
+    def on_gateway_picked(self, action):
+        """Put the picked gateway in the form along with the interface it's reached through."""
+        if action.data() is None:
+            return
+        gateway, interface = action.data()
+        self.route_gateway_input.setText(gateway)
+        index = self.route_interface_combo.findData(interface)
+        if index >= 0:
+            self.route_interface_combo.setCurrentIndex(index)
+
+    def prefill(self, cidr):
+        """Start a new route to cidr (from the IP Addresses page), leaving the next hop for the user to pick."""
+        network = ipaddress.ip_network(cidr, strict=False)
+        family_index = self.route_family_combo.findData(network.version)
+        if family_index != self.route_family_combo.currentIndex():
+            self.route_family_combo.setCurrentIndex(family_index)  # Redraws the table and form for the family
+        self.clear_route_form()
+        if network.version == 4:
+            self.destination_input.setText(str(network.network_address))
+            self.netmask_input.setText(str(network.netmask))
+        else:
+            self.destination_input.setText(str(network))
+        # Show the routes that carry traffic to it now, with the one that wins marked
+        self.route_filter_input.setText(str(network))
+        warning = connected_network_warning(network, self.adapters)
+        if warning:
+            set_hint(self.route_hint_label, warning, "warning")
+        else:
+            how = ("type a gateway or choose one with ▾" if network.version == 4
+                   else "choose a gateway with ▾, or type one and pick its interface")
+            set_hint(self.route_hint_label, f"Pick the next hop for {network}: {how}.", "info")
+        self.route_gateway_input.setFocus()
 
     def read_route_form(self):
         """Return the validated route spec from the form, or None (after explaining why)."""

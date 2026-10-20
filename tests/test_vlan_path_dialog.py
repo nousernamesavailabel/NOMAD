@@ -129,11 +129,13 @@ def test_carry_a_vlan_plan_send_and_verify(setup, monkeypatch):
     assert dialog.isVisible() and dialog.b_combo.currentData() == keys["sw2"]
     assert [dialog.edge_list.item(row).checkState() == Qt.Checked for row in range(dialog.edge_list.count())][0]
     dialog.set_vlan(20)
+    assert dialog.vlan_combo.currentText() == "20"  # Only the number: the name has its own box
     assert dialog.name_input.text() == "USERS"  # The name the map already has for it
     dialog.plan_button.click()
     wait_for(dialog)
     plan = dialog.plan
     assert plan.ok and plan.route == [keys["sw1"], keys["sw2"]]
+    assert row_texts(dialog.route_table, 0) == ["sw1", "sw2"]  # The way chosen shows in the route table
     assert {keys["sw1"], keys["sw2"]} <= dialog.read_keys
     assert dialog.stp[keys["sw1"]].mode == "rapid-pvst"
     assert row_texts(dialog.steps_table, 0) == ["1. sw1", "2. sw2"]

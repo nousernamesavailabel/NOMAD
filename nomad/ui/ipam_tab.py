@@ -1724,6 +1724,7 @@ class IpamTab(QWidget):
             menu.addSeparator()
             menu.addAction("Copy Subnet", lambda: QApplication.clipboard().setText(subnet.cidr))
             menu.addAction("Open in Subnet Calculator", lambda: self.open_calculator(subnet.cidr))
+            menu.addAction("Add Windows Route...", self.add_windows_route)
             menu.addAction("Sweep Subnet", self.sweep_subnet).setEnabled(subnet.network.version == 4)
             menu.addAction("Find Free Blocks...", self.find_free_blocks).setEnabled(self.as_of is None)
             menu.addAction("History...", lambda: self.show_history("subnet", subnet)).setEnabled(self.as_of is None)
@@ -1937,6 +1938,14 @@ class IpamTab(QWidget):
     def open_calculator(self, cidr):
         self.window.navigator.setCurrentWidget(self.window.subnet_tab)
         self.window.subnet_tab.calculate_subnet(cidr)
+
+    def add_windows_route(self):
+        """Start a route on this computer to the selected subnet, on the Routing Table page."""
+        subnet = self.selected_subnet()
+        if subnet is None:
+            return
+        self.window.navigator.setCurrentWidget(self.window.routing_tab)
+        self.window.routing_tab.prefill(subnet.cidr)
 
     # ----------------------------------------------------------------- Addresses
 

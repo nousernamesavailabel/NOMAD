@@ -15,7 +15,7 @@ from ..netmap.layout import GROUP_PAD, GROUP_TITLE, NODE_HEIGHT, NODE_WIDTH
 from ..netmap.monitor import DOWN, UNKNOWN, UP, duration_text
 from ..netmap.vlans import ACCESS, NATIVE, ONE_END, TAGGED
 from ..netmap.model import AP, BUILDING, FIREWALL, GROUP_KINDS, KIND_NAMES, NO_SNMP, ROOM, ROUTER, SERVER, \
-    SHARED_PORT_HOSTS, SITE, SNMP, SOURCE_NAMES, SWITCH, UNREACHABLE
+    SHARED_PORT_HOSTS, SITE, SNMP, SWITCH, UNREACHABLE
 from .theme import COLORS
 
 KIND_COLORS = {SWITCH: COLORS["link"], ROUTER: COLORS["accent"], FIREWALL: "#ff9f43", AP: "#c792ea",
@@ -38,6 +38,7 @@ LABEL_MIN_ZOOM = 0.5  # Port labels are left off below this zoom
 COLLAPSED_WIDTH, COLLAPSED_HEIGHT = 200, 64
 GROUP_TAGS = {BUILDING: "BLDG", ROOM: "ROOM"}
 GROUP_Z = {SITE: -3, BUILDING: -2, ROOM: -1}  # Inner groups' boxes over the ones they're in
+SHORT_SOURCE_NAMES = {NO_SNMP: "Pings, no SNMP", UNREACHABLE: "Unreachable"}  # Under a device's address
 GROUP_BOX = "group:"  # Starts a group's key among devices' keys when arranging or lining them up together
 NODE_RECT = QRectF(-NODE_WIDTH / 2, -NODE_HEIGHT / 2, NODE_WIDTH, NODE_HEIGHT)
 # A VLAN highlighted: how each link carries it, and how faint what doesn't carry it is
@@ -72,6 +73,15 @@ def small_font(scale=0.85, bold=False):
 
 def elided(text, font, width):
     return QFontMetrics(font).elidedText(text, Qt.ElideRight, int(width))
+
+
+def via_router(via):
+    """"R5" from a monitored device's "R5 (vrf MGMT-B)": the router it's checked from, without the VRF."""
+    return via.split(" (vrf ", 1)[0]
+
+
+def probe_text(via):
+    return f"Checked from {via} with an IP SLA ping"
 
 
 def host_line(host):
@@ -215,8 +225,15 @@ class DeviceItem(NodeItem):
         self.rect = QRectF(-NODE_WIDTH / 2, -NODE_HEIGHT / 2, NODE_WIDTH, NODE_HEIGHT)
         self.host_count = sum(len(hosts) for hosts in host_ports.values())
         self.badge = QRectF(-45, NODE_HEIGHT / 2 + 4, 90, BADGE_HEIGHT) if self.host_count else QRectF()
+        self.update_tip()
+
+    def update_tip(self):
+        """Its tooltip: what the crawl found, and the router that checks it while it's monitored from one."""
+        device, state = self.device, self.monitor_state
         tip = [device.label, KIND_NAMES.get(device.kind, device.kind), device.mgmt_ip, device.platform,
                device.found_by, device.error, device.note]
+        if state is not None and state.via:
+            tip.append(probe_text(state.via))
         if self.host_count:
             tip.append(f"{self.host_count} hosts: double-click to show them by port")
         self.setToolTip("\n".join(part for part in tip if part))
@@ -256,6 +273,35 @@ class DeviceItem(NodeItem):
         painter.setFont(font)
         painter.setPen(QColor(COLORS["panel"]))
         painter.drawText(tag, Qt.AlignCenter, self.route_text)
+
+    def name_color(self):
+        """Red for a device the crawl couldn't reach, unless a router's checking it: then the router's word counts."""
+        state = self.monitor_state
+        if self.device.source == UNREACHABLE and not (state is not None and state.via):
+            return COLORS["error"]
+        return COLORS["text"]
+
+    def detail_lines(self):
+        """The two lines under its name, each (text, color): its address (and time to answer while it's up), then
+        down or can't check while monitored, the router checking it, how the crawl found it, or its platform."""
+        device, state = self.device, self.monitor_state
+        address = device.mgmt_ip if device.mgmt_ip != device.label else ""
+        if state is not None and state.status == UP and state.rtt is not None:
+            address = f"{address}  ·  {'<1' if state.rtt < 1 else state.rtt} ms".strip(" ·")
+        lines = [(address, COLORS["muted"])]
+        if state is not None and state.status == DOWN:
+            lines.append((f"Down for {duration_text(time.time() - state.since)}", COLORS["error"]))
+        elif state is not None and state.problem:
+            lines.append((f"Can't check: {state.problem}", COLORS["warning"]))
+        elif state is not None and state.via:  # Just the router: the box hasn't room for its VRF (the tooltip has)
+            lines.append((f"Via {via_router(state.via)}", COLORS["muted"]))
+        elif device.source in (NO_SNMP, UNREACHABLE):
+            lines.append((SHORT_SOURCE_NAMES[device.source],
+                          COLORS["warning" if device.source == NO_SNMP else "error"]))
+        else:
+            lines.append((device.platform or (device.sys_descr.splitlines()[0] if device.sys_descr else "")
+                          or ("Added by hand" if device.manual else ""), COLORS["muted"]))
+        return lines
 
     def paint(self, painter, option, widget=None):
         device = self.device
@@ -300,27 +346,12 @@ class DeviceItem(NodeItem):
         name_font = small_font(0.95, bold=True)
         name_font.setItalic(device.manual)  # Added by hand, as hosts added by hand are
         painter.setFont(name_font)
-        painter.setPen(QColor(COLORS["error"] if device.source == UNREACHABLE else COLORS["text"]))
+        painter.setPen(QColor(self.name_color()))
         painter.drawText(QRectF(left, self.rect.top() + 4, width, 18), Qt.AlignLeft | Qt.AlignVCenter,
                          elided(device.label, name_font, width))
         detail_font = small_font(0.8)
         painter.setFont(detail_font)
-        painter.setPen(QColor(COLORS["muted"]))
-        address = device.mgmt_ip if device.mgmt_ip != device.label else ""
-        if state is not None and state.status == UP and state.rtt is not None:
-            address = f"{address}  ·  {'<1' if state.rtt < 1 else state.rtt} ms".strip(" ·")
-        if state is not None and state.via:
-            address = f"{address}  ·  via {state.via}".strip(" ·")
-        lines = [(address, COLORS["muted"])]
-        if state is not None and state.status == DOWN:
-            lines.append((f"Down for {duration_text(time.time() - state.since)}", COLORS["error"]))
-        elif state is not None and state.problem:
-            lines.append((f"Can't check: {state.problem}", COLORS["warning"]))
-        elif device.source in (NO_SNMP, UNREACHABLE):
-            lines.append((SOURCE_NAMES[device.source], COLORS["warning" if device.source == NO_SNMP else "error"]))
-        else:
-            lines.append((device.platform or (device.sys_descr.splitlines()[0] if device.sys_descr else "")
-                          or ("Added by hand" if device.manual else ""), COLORS["muted"]))
+        lines = self.detail_lines()
         for row, (line, line_color) in enumerate((line, color) for line, color in lines if line):
             painter.setPen(QColor(line_color))
             painter.drawText(QRectF(left, self.rect.top() + 22 + row * 15, width, 15), Qt.AlignLeft | Qt.AlignVCenter,
@@ -1315,6 +1346,7 @@ class MapView(QGraphicsView):
                 state = status_of(key)
                 if state is not item.monitor_state or state is not None:
                     item.monitor_state = state
+                    item.update_tip()
                     item.update()
         for item in self.group_items.values():
             item.update()  # How many in it are down

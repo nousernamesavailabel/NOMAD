@@ -6,6 +6,21 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.31.1] - 2026-10-15
+
+### Changed
+
+- **Routing Table**: **Persistent (survives reboot)** is ticked by default (and again after Clear Form), so a route added from NOMAD comes back after a restart unless you untick it.
+- **Carry VLAN** > **Let NOMAD choose the way**: after Plan, the switches of the way chosen are listed in the **Through these switches** table, each with its link, as if the route had been set by hand (switch to set the route by hand to change it). The table also gets most of the height now, with a divider to drag between it and B's edge ports.
+- **Carry VLAN** > **VLAN** shows only the number once chosen (the name is in the Name box below); the list still shows each VLAN's name beside its number.
+- **Network Map devices checked from a router** no longer look unreachable: a device the crawl couldn't reach that a router's IP SLA probe is checking shows **Via R5** under its address (in place of the red **Unreachable**), with its name no longer red; its tooltip says which router and VRF check it. Down and Can't check still show as before. The crawl's word for such a device is now **Unreachable when crawled** (Devices table, details, Color by, Key), as the crawl may have run somewhere else (a tribe map, Map Watcher) and a router may still reach it.
+
+### Added
+
+- **Map** menu (compact bar) > **Monitor from a Router...**: the router probes list without finding a device to right-click first (as the Monitor tab's **Router Probes...** button).
+- **IP Addresses** > right-click a subnet > **Add Windows Route...**: opens the Routing Table with a new route to the subnet filled in (destination and netmask; the IPv6 prefix for an IPv6 subnet) and the table filtered to the routes that carry traffic to it now, the winning one marked. The gateway is left to pick; the subnet's own gateway isn't used, as it's the router inside that subnet, not this computer's next hop. If this computer has an address in the subnet already, it says so, as it reaches it without a route.
+- **Routing Table** > Gateway: a **▾** list of the gateways this computer already uses (each connected interface's default gateway, then the next hops of its other active routes); picking one also sets the interface it's reached through, which IPv6 routes need. Adding a route through a gateway to a subnet this computer is already on now warns.
+
 ## [1.31.0] - 2026-10-14
 
 ### Added

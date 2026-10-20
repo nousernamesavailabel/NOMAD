@@ -835,10 +835,10 @@ def test_map_menu_does_what_the_map_buttons_do(tab, crawled, monkeypatch):
     tab.update_map_menu()
     entries = {action.text(): action for action in tab.map_menu.actions() if not action.isSeparator()}
     assert list(entries) == ["Crawl: Start From, Gateway, Start, Stop", "New Map", "Open...", "Recent", "Save As...", "Export", "Compare", "IPAM Network...",
-                             "Record in IPAM...", "SNMP Credentials...", "Scope...", "Tribe", "Key"]
+                             "Record in IPAM...", "SNMP Credentials...", "Scope...", "Tribe", "Monitor from a Router...", "Key"]
     assert all(action.isEnabled() for action in entries.values())
     from PyQt5 import sip
-    kept = [tab.crawl_action] + [entry for entry, _ in tab.map_entries]
+    kept = [tab.crawl_action, tab.probes_action] + [entry for entry, _ in tab.map_entries]
     assert all(sip.ispycreated(item) for item in kept)  # Ones Qt made would outlive the menu as stale wrappers
     recent = entries["Recent"].menu()
     recent.aboutToShow.emit()
@@ -857,6 +857,9 @@ def test_map_menu_does_what_the_map_buttons_do(tab, crawled, monkeypatch):
     entries["SNMP Credentials..."].trigger()
     entries["Scope..."].trigger()  # ...but its settings are still in the Map menu
     assert called == ["new", "credentials", "scope"]
+    monkeypatch.setattr(tab, "show_probes", lambda *args: called.append("probes"))
+    entries["Monitor from a Router..."].trigger()  # The Monitor tab's Router Probes, from the Map menu
+    assert called[-1] == "probes"
     crawl = entries["Crawl: Start From, Gateway, Start, Stop"]
     assert not crawl.isChecked()
     crawl.trigger()  # The crawl row, without finding the Crawl button
@@ -869,6 +872,7 @@ def test_map_menu_does_what_the_map_buttons_do(tab, crawled, monkeypatch):
     tab.new_map()
     tab.update_map_menu()
     assert not entries["Save As..."].isEnabled() and not entries["Export"].isEnabled()
+    assert not entries["Monitor from a Router..."].isEnabled()  # No map: no routers to put probes on
     assert entries["Open..."].isEnabled()
 
 

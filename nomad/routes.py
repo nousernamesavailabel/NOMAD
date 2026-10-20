@@ -46,6 +46,52 @@ def find_interface_for_gateway(gateway, adapters):
     return None
 
 
+def connected_network_warning(network, adapters):
+    """A warning when this computer already has an address in network, so it reaches it without a route.
+
+    A route to a network bigger than the connected one (a summary like 10.0.0.0/8) is fine and isn't warned about.
+    """
+    for adapter in adapters.values():
+        if not adapter.connected:
+            continue
+        for address in adapter.ipv4 if network.version == 4 else adapter.ipv6:
+            if address.ip.is_loopback or address.ip.is_link_local:
+                continue
+            if network.subnet_of(address.network):
+                return (f"This computer is already on {address.network} ({adapter.name}, {address.ip}), so it "
+                        f"reaches {network} directly without a route.")
+    return None
+
+
+def gateway_suggestions(family, adapters, routes):
+    """Next hops this computer already uses, for the route form's gateway list: [(gateway, interface, label)].
+
+    Connected interfaces' default gateways come first, then the gateways other active routes go through.
+    """
+    suggestions, seen = [], set()
+    for adapter in sorted(adapters.values(), key=lambda adapter: adapter.name.lower()):
+        if not adapter.connected:
+            continue
+        for gateway in adapter.gateways4 if family == 4 else adapter.gateways6:
+            key = (gateway.lower(), adapter.index)
+            if key not in seen:
+                seen.add(key)
+                suggestions.append((gateway, adapter.index, f"{gateway}  ·  default gateway on {adapter.name}"))
+    used = {}
+    for route in routes:
+        if route.family != family or route.on_link or not route.active or route.is_default:
+            continue
+        key = (route.gateway.lower(), route.interface)
+        if key not in seen:
+            used.setdefault(key, [route.gateway, route.interface, 0])[2] += 1
+    for gateway, interface, count in sorted(used.values(), key=lambda entry: ipaddress.ip_address(entry[0])):
+        adapter = adapters.get(interface)
+        where = f" on {adapter.name}" if adapter is not None else ""
+        suggestions.append((gateway, interface, f"{gateway}  ·  next hop of {count} route{'s' if count > 1 else ''}"
+                                                f"{where}"))
+    return suggestions
+
+
 def validate_route_input(family, destination, netmask, gateway, metric, interface, adapters):
     """Check the add/edit route form.
 
@@ -94,6 +140,11 @@ def validate_route_input(family, destination, netmask, gateway, metric, interfac
     if metric:
         if not metric.isdigit() or not 1 <= int(metric) <= 9999:
             errors["metric"] = "Metric must be a number from 1 to 9999."
+
+    if network is not None and gateway_ip is not None:  # An on-link route to it is just the connected route
+        connected = connected_network_warning(network, adapters)
+        if connected:
+            warnings.append(connected)
 
     if errors:
         return None, errors, warnings

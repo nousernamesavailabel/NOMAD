@@ -18,10 +18,12 @@ NEIGHBOR = "neighbor"  # Only in another device's CDP/LLDP (not asked: out of sc
 NO_SNMP = "no-snmp"  # Answers ping but not SNMP (wrong community or an ACL)
 UNREACHABLE = "unreachable"  # Answered neither SNMP nor ping
 UNCHECKED = "unchecked"  # Added by hand and not asked yet (or it has no address to ask)
-SOURCE_NAMES = {SNMP: "SNMP", NEIGHBOR: "Seen as a neighbor", NO_SNMP: "Pings, no SNMP", UNREACHABLE: "Unreachable",
-                UNCHECKED: "Not checked"}
+# Unreachable from where it was crawled (which may not be here: a tribe map, or Map Watcher's), not from everywhere:
+# a router on the map may still reach it, and check it for Monitor
+SOURCE_NAMES = {SNMP: "SNMP", NEIGHBOR: "Seen as a neighbor", NO_SNMP: "Pings, no SNMP",
+                UNREACHABLE: "Unreachable when crawled", UNCHECKED: "Not checked"}
 MANUAL_SOURCE_NAMES = {SNMP: "Added by hand, answers SNMP", NO_SNMP: "Added by hand, pings, no SNMP",
-                       UNREACHABLE: "Added by hand, unreachable", UNCHECKED: "Added by hand"}
+                       UNREACHABLE: "Added by hand, unreachable when crawled", UNCHECKED: "Added by hand"}
 
 # Groups of devices on the map: sites, which can hold buildings, which can hold rooms (or workspaces)
 SITE, BUILDING, ROOM = "site", "building", "room"

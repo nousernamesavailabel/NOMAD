@@ -16,8 +16,8 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QAction, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, \
     QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, \
-    QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QSplitter, QTableWidget, \
-    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
+    QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QSplitter, \
+    QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
 
 from ..netmap import configpush, vlan_path, vlans, watch
 from ..netmap.crawl import apply_vlans
@@ -37,6 +37,17 @@ SEVERITY_COLORS = {vlans.ERROR: "error", vlans.WARNING: "warning", vlans.INFO: "
 STEP_COLUMNS = ["Switch", "Changes", "Status", ""]
 ROUTE_COLUMNS = ["Switch", "Link to the next", "Check"]
 CONFIG, UNDO = "config", "undo"
+NAME_ROLE = Qt.UserRole + 1  # The VLAN list: each VLAN's name, shown beside its number in the list only
+
+
+class VlanNameDelegate(QStyledItemDelegate):
+    """The VLAN list shows each VLAN's name after its number; the box itself shows only the number."""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        name = index.data(NAME_ROLE)
+        if name:
+            option.text = f"{option.text}  {name}"
 
 
 @dataclass
@@ -153,6 +164,8 @@ class VlanPathDialog(QDialog):
         self.vlan_combo.setInsertPolicy(QComboBox.NoInsert)
         self.vlan_combo.lineEdit().setPlaceholderText("VLAN number")
         self.vlan_combo.setToolTip("The VLAN to carry: one on the map, or a new number.")
+        self.vlan_delegate = VlanNameDelegate(self.vlan_combo)
+        self.vlan_combo.setItemDelegate(self.vlan_delegate)
         self.vlan_combo.currentTextChanged.connect(self.on_vlan_changed)
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("Its name, where it's created")
@@ -229,15 +242,25 @@ class VlanPathDialog(QDialog):
         self.remove_button.clicked.connect(self.remove_switch)
         self.fill_button.clicked.connect(self.fill_in_between)
         self.clear_button.clicked.connect(self.clear_route)
-        left_layout.addWidget(self.route_box, 1)
 
+        edge_box = QWidget()
+        edge_layout = QVBoxLayout(edge_box)
+        edge_layout.setContentsMargins(0, 0, 0, 0)
         self.edge_label = QLabel("B's edge ports to put in the VLAN too (optional):")
-        left_layout.addWidget(self.edge_label)
+        edge_layout.addWidget(self.edge_label)
         self.edge_list = QListWidget()
         self.edge_list.setToolTip("Access ports are put in the VLAN; trunks get it allowed. Links to other network "
                                   "devices are listed last.")
         self.edge_list.itemChanged.connect(self.plan_outdated)
-        left_layout.addWidget(self.edge_list, 1)
+        edge_layout.addWidget(self.edge_list)
+        route_split = QSplitter(Qt.Vertical)  # The route gets most of the height: its table shares it with buttons
+        route_split.setChildrenCollapsible(False)
+        route_split.addWidget(self.route_box)
+        route_split.addWidget(edge_box)
+        route_split.setStretchFactor(0, 2)
+        route_split.setStretchFactor(1, 1)
+        route_split.setSizes([400, 200])
+        left_layout.addWidget(route_split, 1)
         self.save_check = QCheckBox("Save each switch's configuration afterwards (write memory)")
         self.save_check.toggled.connect(self.show_preview)
         left_layout.addWidget(self.save_check)
@@ -383,7 +406,8 @@ class VlanPathDialog(QDialog):
             if item.vlan in seen:
                 continue
             seen.add(item.vlan)
-            self.vlan_combo.addItem(f"{item.vlan} {item.name}".strip(), item.vlan)
+            self.vlan_combo.addItem(str(item.vlan), item.vlan)
+            self.vlan_combo.setItemData(self.vlan_combo.count() - 1, item.name, NAME_ROLE)
         self.vlan_combo.setEditText(vlan_text)
         self.vlan_combo.blockSignals(False)
         devices = network_map.devices if network_map is not None else {}
@@ -694,14 +718,20 @@ class VlanPathDialog(QDialog):
             set_hint(self.status_label, f"Added {filled} switch{'es' if filled != 1 else ''} between." if filled
                      else "Every switch on the route is linked to the next.", "info")
 
-    def edit_route(self):
+    def copy_plan_route(self):
+        """Put the way NOMAD chose in the route table, the same as if it had been set by hand."""
         plan = self.plan
-        if plan is None or not plan.route:
-            return
         self.route = list(plan.route)
         for hop in plan.hops:
             if hop is not None:
                 self.hop_choices[frozenset([hop.a, hop.b])] = hop.key
+        self.refresh_route()
+
+    def edit_route(self):
+        plan = self.plan
+        if plan is None or not plan.route:
+            return
+        self.copy_plan_route()
         self.hand_radio.setChecked(True)
         self.refresh_route()
         set_hint(self.status_label, "The way NOMAD chose is now the route set by hand: change it, then Plan.", "info")
@@ -873,6 +903,8 @@ class VlanPathDialog(QDialog):
     def show_plan(self):
         plan, network_map = self.plan, self.network_map
         labels = [vlan_path.label_of(network_map, key) for key in plan.route]
+        if plan.route and not plan.by_hand:
+            self.copy_plan_route()
         if plan.route:
             how = " (set by hand)" if plan.by_hand else ""
             already = f" VLAN {plan.vlan} already reaches {labels[-1]}." if plan.already else ""

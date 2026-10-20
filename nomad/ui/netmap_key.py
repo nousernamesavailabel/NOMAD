@@ -221,13 +221,16 @@ SECTIONS = [
         (device(), "Solid outline: answered SNMP, so its neighbors, MAC and ARP tables were read"),
         (device(dashed=True), "Dashed outline: not read over SNMP. Only seen as a neighbor (out of scope or too "
                               "far), pings but doesn't answer SNMP, or added by hand and not checked yet"),
-        (device(dashed=True, unreachable=True), "Red outline and name: answered neither SNMP nor ping"),
+        (device(dashed=True, unreachable=True), "Red outline and name: answered neither SNMP nor ping when "
+                                                         "crawled (a router may still reach it: see Monitoring)"),
         (device(dashed=True, italic=True), "Name in italics: added by hand (kept when you map again)"),
     ]),
     ("Monitoring (Monitor ticked): the outline shows up or down instead of the kind", [
         (device(status=UP), "Green outline and dot: answers ping (its time is beside its address)"),
         (device(status=DOWN), "Red outline, red tint and dot: down (with how long for)"),
         (device(status=NOT_CHECKED), "Gray outline and an empty dot: not pinged yet"),
+        (device(dashed=True, status=UP), "\"Via R5\" under its address: checked from router R5 with an IP SLA ping "
+                                         "(Map > Monitor from a Router), as this PC can't reach it"),
     ]),
     ("Marks on devices", [
         (device(news=True), "NEW: found by Watch and not looked at yet (or \"2 new hosts\": new hosts on it)"),

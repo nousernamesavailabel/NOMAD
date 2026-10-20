@@ -364,7 +364,7 @@ class NetworkMapTab(QWidget):
         self.map_button = QToolButton()
         self.map_button.setText("Map")
         self.map_button.setToolTip("Crawl (start from, credentials, scope), New, Open, Recent, Save As, Export, "
-                                   "Compare, the map's IPAM network, and the tribe's maps.")
+                                   "Compare, the map's IPAM network, the tribe's maps, and Monitor from a Router.")
         self.map_button.setPopupMode(QToolButton.InstantPopup)
         self.map_menu = QMenu(self.map_button)
         self.map_button.setMenu(self.map_menu)
@@ -657,6 +657,13 @@ class NetworkMapTab(QWidget):
                 self.mirrored[entry] = source, fill
                 entry.aboutToShow.connect(self.mirror_menu)  # A method, as a lambda or partial isn't safe here
             self.map_entries.append((entry, button))
+        # Not a classic bar button (that bar's way there is the Monitor tab's Router Probes), so above Key by hand
+        self.probes_action = QAction("Monitor from a Router...", menu)
+        self.probes_action.setToolTip("Check devices this PC can't reach from a router on the map that can, with an "
+                                      "IP SLA ping on the router.")
+        self.probes_action.triggered.connect(self.show_all_probes)
+        menu.insertAction(self.map_entries[-1][0], self.probes_action)
+        menu.insertSeparator(self.map_entries[-1][0])
         menu.aboutToShow.connect(self.update_map_menu)
 
     def show_key(self):
@@ -678,6 +685,7 @@ class NetworkMapTab(QWidget):
         self.crawl_action.setChecked(self.crawl_row.isVisibleTo(self) if self.compact_top else True)
         self.crawl_action.setEnabled(self.crawl_button.isEnabled())
         self.crawl_action.blockSignals(False)
+        self.probes_action.setEnabled(self.network_map is not None)
         for entry, button in self.map_entries:
             if isinstance(entry, QMenu):
                 entry.menuAction().setEnabled(button.isEnabled())  # Its entry in the Map menu
@@ -2445,6 +2453,10 @@ class NetworkMapTab(QWidget):
         self.probe_dialog.show()
         self.probe_dialog.raise_()
         self.probe_dialog.activateWindow()
+
+    def show_all_probes(self):
+        """The Map menu's Monitor from a Router: the probes on the map's routers, with no device added."""
+        self.show_probes()
 
     def host_session_hints(self, host):
         """session_hints for a host learned on a switch port: its announced name, and the folder of its switch."""
