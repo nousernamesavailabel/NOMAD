@@ -190,9 +190,11 @@ class AssetStore:
 NOT_SEEN_DAYS = 30  # In service and not on a map for longer than this: gone?
 
 
-def problems(assets, when=None, not_seen_days=NOT_SEEN_DAYS):
+def problems(assets, when=None, not_seen_days=NOT_SEEN_DAYS, targets=()):
     """{asset id: [what's wrong, in words]} for the assets with something wrong: no serial number, not seen on a map
-    for a while, other software than most of its model run, a warranty or support life that has ended."""
+    for a while, software off its model's target (targets: SoftwareTargets) or, for a model without one, other
+    software than most of its model run, a warranty or support life that has ended."""
+    from .targets import compliance, describe
     when = when or today()
     try:
         cutoff = (datetime.date.fromisoformat(when) - datetime.timedelta(days=not_seen_days)).isoformat()
@@ -211,8 +213,13 @@ def problems(assets, when=None, not_seen_days=NOT_SEEN_DAYS):
         if asset.status == IN_SERVICE:
             if asset.last_seen and cutoff and asset.last_seen < cutoff:
                 listed.append(f"Not on a map since {asset.last_seen}")
+            state, target = compliance(asset, targets)
+            if target is not None:
+                line = describe(state, asset.software, target)
+                if line:
+                    listed.append(line)
             counts = usual.get(asset.model, {})
-            if asset.software and len(counts) > 1 and not is_part(asset.kind):
+            if target is None and asset.software and len(counts) > 1 and not is_part(asset.kind):
                 common = max(counts, key=lambda version: (counts[version], version))
                 if asset.software != common and counts[common] > counts.get(asset.software, 0):
                     listed.append(f"Runs {asset.software}; most {asset.model} run {common}")
@@ -268,11 +275,12 @@ def changed_fields(event):
 
 
 def all_asset_history(store, since=None):
-    """Every change to any asset, newest first (seen-only changes left out): the Assets page's Changes view."""
+    """Every change to any asset (and to the software targets), newest first (seen-only changes left out): the Assets
+    page's Changes view."""
     from .history import replay, source_of
     db, table = source_of(store)
-    rows = db.execute(f"SELECT seq, entity, entity_id, op, data, modified, modified_by FROM {table} WHERE entity = "
-                      "'assets' ORDER BY seq").fetchall()
+    rows = db.execute(f"SELECT seq, entity, entity_id, op, data, modified, modified_by FROM {table} WHERE entity IN "
+                      "('assets', 'software_targets') ORDER BY seq").fetchall()
     events = [event for event in replay(rows) if event.op != "update" or set(changed_fields(event)) - SEEN_FIELDS]
     if since:
         events = [event for event in events if event.when >= since]

@@ -15,11 +15,12 @@ service, if the move is called off before anyone uses the new server.
 import datetime
 import io
 import json
+import os
 import secrets
-import shutil
 import socket
 import sqlite3
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,7 @@ SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 15, 8, 1
 MIN_PASSWORD = 8
 CONFIG_CARRIED = ("server_id", "port", "team_secret", "admin_secret", "backup_keep_days")
 FILES = ("ipam.db", "maps.db", "cert.pem", "key.pem")
+RENAME_TRIES = 40  # 50 ms apart: a file in the folder can stay locked a moment after the service stops
 
 
 class MoveError(IpamError):
@@ -217,6 +219,22 @@ class MoveFile:
             raise MoveError("That move file is incomplete, or from a newer version of NOMAD.") from None
 
 
+def rename_aside(directory, aside):
+    """Rename the server's folder, all at once or not at all: never copy it and delete the original (which, with a
+    file in it open, leaves half a server behind)."""
+    for attempt in range(RENAME_TRIES):
+        try:
+            os.rename(directory, aside)
+            return
+        except OSError as error:
+            if attempt == RENAME_TRIES - 1:
+                raise MoveError(f"Couldn't rename {directory} to {Path(aside).name} to keep it: "
+                                f"{error.strerror or error}. Something still has its files open (the NOMAD IPAM "
+                                "Server service, or a NOMAD.exe in Task Manager's Details tab): stop it and try "
+                                "again. Nothing in the folder was changed.") from None
+            time.sleep(0.05)
+
+
 def existing_server(directory=None):
     """The server_id of a tribe server already set up in `directory`, or None."""
     try:
@@ -231,7 +249,7 @@ def import_server(move_file, directory=None, port=None):
     directory = Path(directory or server_dir())
     if directory.exists() and any(directory.iterdir()):
         aside = directory.with_name(f"{directory.name}-before-move-{datetime.datetime.now():%Y%m%d-%H%M%S}")
-        shutil.move(str(directory), str(aside))
+        rename_aside(directory, aside)
     directory.mkdir(parents=True, exist_ok=True)
     for name in FILES:
         (directory / name).write_bytes(move_file.archive.read(name))

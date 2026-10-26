@@ -18,8 +18,8 @@ from ..oui import format_mac, vendor
 from ..snmp import V2C, SnmpClient, SnmpError, oid_text, parse_oid
 from ..snmpv3 import credential_from_json, credential_to_json, is_v3, users_from_json
 from . import collect, hardware, l3, vlans
-from .model import AP, HOST, KIND_NAMES, NEIGHBOR, NETWORK_KINDS, NO_SNMP, PHONE, ROUTER, SERVER, SNMP, UNKNOWN, \
-    UNREACHABLE, Device, Host, Link, NetworkMap, Trace, display_name, normalize_name, port_key, \
+from .model import AP, HOST, KIND_NAMES, NEIGHBOR, NETWORK_KINDS, NO_SNMP, PHONE, ROUTER, SERVER, SNMP, SSH_READ, \
+    UNKNOWN, UNREACHABLE, Device, Host, Link, NetworkMap, Trace, display_name, normalize_name, port_key, \
     port_sort_key, short_port
 
 log = logging.getLogger(__name__)
@@ -1183,9 +1183,10 @@ def read_inventory_of(settings, address, client_factory=SnmpClient):
 
 def apply_inventory(device, tables):
     """Put what was read of a device's hardware on it (a crawl's, or Read Inventory Again's)."""
-    if tables.inventory_read:
+    if tables.inventory_read and (tables.parts or device.inventory_source != SSH_READ):
+        # (Its SNMP saying nothing of its hardware doesn't undo what was read at its command line)
         device.parts = [dict(part) for part in tables.parts]
-        device.inventory_read = True
+        device.inventory_read, device.inventory_source = True, ""
         members = hardware.chassis(device.parts)
         own = members[0].get("mac", "") if len(members) == 1 else ""
         device.mac = tables.base_mac or own or device.mac

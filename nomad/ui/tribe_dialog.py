@@ -326,7 +326,7 @@ class TribeDialog(QDialog):
 
         def set_up_here():
             if service.status() != service.NOT_INSTALLED:
-                service.stop()
+                service.stop(force=True)  # Its files must be free before its folder is put aside
             import_server(move_file)
             return service.install(summary.port)
 

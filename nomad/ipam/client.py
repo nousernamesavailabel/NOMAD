@@ -66,6 +66,7 @@ PLACEMENT_API = 8  # And subnet placement
 ROLES_API = 9  # And subnet roles
 MOVE_API = 10  # And moving subnets between networks
 ASSET_API = 11  # And assets
+TARGET_API = 12  # And software targets
 
 
 class ServerUnreachable(IpamError):
@@ -459,7 +460,7 @@ class TeamStore:
         with self.copy.transaction():
             for table in ("networks", "subnets", "addresses", "changes", "pending", "history", "sightings", "sweeps",
                           "sightings_out", "vlan_domains", "vlans", "vlan_pending", "placements", "subnet_moves",
-                          "subnet_roles", "assets", "asset_pending"):
+                          "subnet_roles", "assets", "asset_pending", "software_targets"):
                 self.copy.db.execute(f"DELETE FROM {table}")
             self.copy.set_meta("revision", 0)
             self.copy.set_meta("sighting_revision", 0)
@@ -534,6 +535,11 @@ class TeamStore:
     def server_keeps_assets(self):
         """Whether the server is new enough to keep assets (assumed so before the first sync)."""
         return self.server_api == 0 or self.server_api >= ASSET_API
+
+    @property
+    def server_keeps_targets(self):
+        """Whether the server is new enough to keep software targets (assumed so before the first sync)."""
+        return self.server_api == 0 or self.server_api >= TARGET_API
 
     @property
     def server_keeps_vlans(self):

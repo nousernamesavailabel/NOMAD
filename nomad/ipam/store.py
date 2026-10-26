@@ -13,7 +13,8 @@ sequence numbers (sightings_since).
 VLANs are kept here too (vlan_domains and vlans, see vlans.py), beside the networks rather than in them: they use
 the same change log, sync and backups, but nothing about a network, subnet or address changes when VLANs do. A VLAN
 names the subnets it carries by CIDR, in its domain's network. So are assets (the hardware on the network, see
-assets.py): one row per chassis, phone, server or part, unique by serial number.
+assets.py): one row per chassis, phone, server or part, unique by serial number; and the software each model
+should run (software targets, see targets.py), unique by model.
 
 Rows are never removed: deleting marks them deleted (a tombstone) and every change bumps the row's version and is
 written to the change log. On the NOMAD server, the change log's sequence numbers are the revisions clients sync by
@@ -36,18 +37,19 @@ from ..system import app_data_dir
 log = logging.getLogger(__name__)
 
 FILE_NAME = "ipam.db"
-SCHEMA_VERSION = 6  # 2 added subnets.loopbacks, 3 the VLAN tables, 4 subnet placement (overrides and moves),
-# 5 subnet roles, 6 assets
+SCHEMA_VERSION = 7  # 2 added subnets.loopbacks, 3 the VLAN tables, 4 subnet placement (overrides and moves),
+# 5 subnet roles, 6 assets, 7 software targets
 USED, RESERVED = "used", "reserved"
 ANYWHERE, VALUE, NAME, DESCRIPTION, MAC = "anywhere", "value", "name", "description", "mac"  # Where search looks
 STATUSES = {USED: "Used", RESERVED: "Reserved"}
 MAX_NEXT_FREE_SCAN = 1 << 20  # Stop looking for a free address after this many (a /12's worth)
 TABLES = ("networks", "subnets", "addresses", "vlan_domains", "vlans", "placements", "subnet_moves", "subnet_roles",
-          "assets")
+          "assets", "software_targets")
 # Unique by sort_key within
 PARENTS = {"subnets": "network_id", "addresses": "network_id", "vlans": "domain_id", "placements": "network_id",
            "subnet_roles": "network_id"}
-UNIQUE_KEYS = ("assets",)  # Unique by sort_key across the whole table (when it has one): an asset's serial number
+# Unique by sort_key across the whole table (when it has one): an asset's serial number, a software target's model
+UNIQUE_KEYS = ("assets", "software_targets")
 JSON_COLUMNS = ("fields", "subnets", "ranges")
 
 SCHEMA = """
@@ -116,6 +118,11 @@ CREATE TABLE IF NOT EXISTS assets (
     description TEXT NOT NULL DEFAULT '', fields TEXT NOT NULL DEFAULT '{}',
     version INTEGER NOT NULL, modified TEXT NOT NULL, modified_by TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
 CREATE UNIQUE INDEX IF NOT EXISTS assets_unique ON assets (sort_key) WHERE deleted = 0 AND sort_key != '';
+CREATE TABLE IF NOT EXISTS software_targets (
+    id TEXT PRIMARY KEY, sort_key TEXT NOT NULL, model TEXT NOT NULL, target TEXT NOT NULL DEFAULT '',
+    allowed TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL, modified TEXT NOT NULL, modified_by TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+CREATE UNIQUE INDEX IF NOT EXISTS software_targets_unique ON software_targets (sort_key) WHERE deleted = 0;
 CREATE INDEX IF NOT EXISTS sightings_seq ON sightings (seq);
 CREATE INDEX IF NOT EXISTS sweeps_seq ON sweeps (seq);
 """
@@ -128,6 +135,11 @@ class IpamError(Exception):
 def vlan_key(number):
     """Sort key for a VLAN number."""
     return f"{int(number):04d}"
+
+
+def model_key(model):
+    """Sort key (and what makes it unique) for a software target's model: in capitals, spaces made single."""
+    return " ".join(str(model or "").split()).upper()
 
 
 def serial_key(serial):
@@ -405,8 +417,23 @@ class Asset:
     modified_by: str = ""
 
 
+@dataclass
+class SoftwareTarget:
+    """The software a model of hardware should run: its target version, and others that are fine too. model may have
+    wildcards (C9300-*): the most exact target for a model is the one that counts."""
+    id: str
+    model: str
+    target: str
+    allowed: str = ""  # Other versions that are fine, separated by commas
+    note: str = ""
+    version: int = 1
+    modified: str = ""
+    modified_by: str = ""
+
+
 ENTITIES = {"networks": Network, "subnets": Subnet, "addresses": Address, "vlan_domains": VlanDomain, "vlans": Vlan,
-            "placements": Placement, "subnet_moves": SubnetMove, "subnet_roles": SubnetRole, "assets": Asset}
+            "placements": Placement, "subnet_moves": SubnetMove, "subnet_roles": SubnetRole, "assets": Asset,
+            "software_targets": SoftwareTarget}
 EDITABLE = {
     "networks": {"name", "description", "fields"},
     "subnets": {"name", "gateway", "description", "fields", "loopbacks"},
@@ -420,6 +447,7 @@ EDITABLE = {
     "assets": {"serial", "kind", "model", "maker", "hostname", "software", "mgmt_ip", "mac", "parent_id", "slot",
                "map_device", "location", "status", "asset_tag", "owner", "purchased", "warranty_end", "eol",
                "replaced_by", "first_seen", "last_seen", "seen_by", "description", "fields"},
+    "software_targets": {"model", "target", "allowed", "note"},
 }
 
 
@@ -504,6 +532,8 @@ class IpamStore:
             row["sort_key"] = subnet_key(parse_subnet(item.cidr))
         elif table == "assets":
             row["sort_key"] = serial_key(item.serial)
+        elif table == "software_targets":
+            row["sort_key"] = model_key(item.model)
         names = ", ".join(row)
         self.db.execute(f"INSERT INTO {table} ({names}) VALUES ({', '.join('?' * len(row))})", list(row.values()))
         self._log(table, item.id, item.version, "create", data)
@@ -525,6 +555,8 @@ class IpamStore:
                 row[name] = json.dumps(row[name])
         if table == "assets" and "serial" in changes:
             row["sort_key"] = serial_key(item.serial)
+        if table == "software_targets" and "model" in changes:
+            row["sort_key"] = model_key(item.model)
         assignments = ", ".join(f"{name} = ?" for name in row)
         self.db.execute(f"UPDATE {table} SET {assignments} WHERE id = ?", list(row.values()) + [item.id])
         self._log(table, item.id, item.version, "update", changes)

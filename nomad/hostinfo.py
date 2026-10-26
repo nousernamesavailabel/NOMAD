@@ -1,6 +1,6 @@
-"""Asking a server or phone what it is (maker, model, serial number, operating system or firmware), for the Assets
-page: the network map reads switches, routers and firewalls over SNMP, but servers rarely answer SNMP with any of
-that, and phones only tell their switch some of it.
+"""Asking a server, phone or network device what it is (maker, model, serial number, operating system or firmware),
+for the Assets page: the network map reads switches, routers and firewalls over SNMP, but servers rarely answer SNMP
+with any of that, phones only tell their switch some of it, and some network devices don't say over SNMP either.
 
 - Windows: WMI (CIM) over WinRM, or DCOM when WinRM isn't on, as this Windows login or a user name and password
   (Win32_BIOS's serial number, Win32_ComputerSystem's maker and model, Win32_OperatingSystem's name and version).
@@ -8,6 +8,8 @@ that, and phones only tell their switch some of it.
 - Linux: over SSH (a saved session or a login given for the read), from /sys/class/dmi/id and /etc/os-release. The
   serial number is readable only by root: sudo -n is tried, which works where sudo needs no password.
 - Cisco IP phones: their web page's DeviceInformationX (when the phone's web access is on).
+- Cisco switches, routers and firewalls (IOS, IOS XE, NX-OS, ASA): over SSH, show inventory and show version
+  (netmap.inventory_ssh): each chassis and stack member, and its parts, as the network map's SNMP read has them.
 
 Each returns a HostDetails; problems are in its error, not raised. Qt-free: the page runs these on worker threads.
 """
@@ -19,7 +21,7 @@ import subprocess
 import time
 import urllib.request
 import xml.etree.ElementTree as ElementTree
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import paramiko
 
@@ -27,8 +29,10 @@ from .oui import format_mac
 
 log = logging.getLogger(__name__)
 
-WINDOWS, LINUX, PHONE = "windows", "linux", "phone"
-METHODS = {WINDOWS: "Windows server (WMI)", LINUX: "Linux server (SSH)", PHONE: "Cisco IP phone (web page)"}
+WINDOWS, LINUX, PHONE, NETWORK = "windows", "linux", "phone", "network"
+METHODS = {WINDOWS: "Windows server (WMI)", LINUX: "Linux server (SSH)", PHONE: "Cisco IP phone (web page)",
+           NETWORK: "Cisco switch, router or firewall (SSH: show inventory)"}
+SSH_METHODS = (LINUX, NETWORK)
 WINDOWS_TIMEOUT = 90  # Seconds: WinRM, then DCOM, each with their own waits
 SSH_TIMEOUT = 30
 PHONE_TIMEOUT = 6
@@ -87,6 +91,7 @@ class HostDetails:
     mac: str = ""
     error: str = ""
     note: str = ""  # Worth knowing, such as why the serial number is missing
+    parts: list = field(default_factory=list)  # A network device's chassis and parts (netmap.hardware.parts')
 
     @property
     def ok(self):
@@ -222,6 +227,29 @@ def phone_details(address, fetch=None, timeout=PHONE_TIMEOUT):
         return HostDetails(address, PHONE, error=f"Its web page didn't answer ({reason}): its web access may be "
                                                  "turned off in Unified CM.")
     return parse_phone(address, text)
+
+
+# --------------------------------------------------------------------- Network devices
+
+def network_details(address, logins, vault=None, trust=False, known_hosts=None, asker_factory=None):
+    """Ask a Cisco switch, router or firewall over SSH (logins: a macssh.SshLogins) for its show inventory and show
+    version."""
+    from .netmap import hardware, inventory_ssh, macssh
+    factory = asker_factory or macssh.SshAsker
+    asker = factory(logins, vault, known_hosts, trust)
+    try:
+        parts, info, problem = inventory_ssh.read_device(asker, address)
+    finally:
+        asker.close()
+    if problem:
+        return HostDetails(address, NETWORK, error=problem)
+    members = hardware.chassis(parts)
+    serials = [part["serial"] for part in members if part.get("serial")]
+    models = list(dict.fromkeys(part["model"] for part in members if part.get("model")))
+    note = "" if serials else "Its inventory gave no chassis serial number."
+    return HostDetails(address, NETWORK, hostname=info.get("hostname", ""), maker="Cisco", model=", ".join(models),
+                       serial=", ".join(serials), os=info.get("os", ""), software=info.get("software", ""),
+                       mac=members[0].get("mac", "") if len(members) == 1 else "", note=note, parts=parts)
 
 
 def parse_phone(address, text):

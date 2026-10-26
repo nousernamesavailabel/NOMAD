@@ -4,7 +4,8 @@ Every few minutes each switch read over SNMP is asked for its CDP and LLDP neigh
 the whole crawl). When a switch's neighbors change from what they were, or a syslog message or trap says something
 happened on it, the map is crawled again from that switch, the way Crawl from Here does: new neighbors are read and
 added, and the hosts on its ports and its VLANs are refreshed (VLANs added, gone or renamed, ports moved to
-another VLAN, and subnets that appear, go or move between devices are noted in the watch log). Every so often every switch is read like that, to catch hosts
+another VLAN, subnets that appear, go or move between devices, and devices upgraded or with hardware swapped,
+added or taken out are noted in the watch log). Every so often every switch is read like that, to catch hosts
 plugged in where nothing announced it. What turns up is added to the map straight away and noted in its news, so it's
 drawn as new until someone looks at it.
 
@@ -16,7 +17,7 @@ import logging
 from dataclasses import dataclass, field, replace
 
 from ..snmp import SnmpError, parse_oid
-from . import collect
+from . import collect, hardware
 from .placement import places, vrf_text
 from .vlans import vlan_names
 from .crawl import CrawlSettings, Crawler, in_scope, parse_networks
@@ -305,9 +306,10 @@ class WatchResult:
     lines: list = field(default_factory=list)  # For the watch log
     vlans: list = field(default_factory=list)  # Device keys whose VLANs changed
     subnets: list = field(default_factory=list)  # (VRF, CIDR) of subnets that appeared, went or moved
+    hardware: list = field(default_factory=list)  # Device keys whose software or hardware changed
 
     def __bool__(self):
-        return bool(self.devices or self.hosts or self.moved or self.vlans or self.subnets)
+        return bool(self.devices or self.hosts or self.moved or self.vlans or self.subnets or self.hardware)
 
 
 def place_text(network_map, device_key, port):
@@ -348,6 +350,7 @@ def apply_refresh(network_map, crawled, now=None, by=""):
     before_hosts = {host.mac: host for host in network_map.hosts if host.mac}
     before_vlans = {key: (vlan_names(device), dict(device.port_vlans)) for key, device in network_map.devices.items()}
     before_places = places(network_map)
+    before_hardware = {key: hardware_snapshot(device) for key, device in network_map.devices.items()}
     recent = (now - datetime.timedelta(days=HOST_NEW_DAYS)).date().isoformat()
     added, read = network_map.merge_crawl(crawled)
     network_map.fold_manual_devices(new=set(added))
@@ -386,6 +389,12 @@ def apply_refresh(network_map, crawled, now=None, by=""):
             if lines:
                 result.vlans.append(key)
                 result.lines += lines
+    for key in sorted(read):
+        if key in before_hardware and key in network_map.devices:
+            lines = hardware_changes(network_map.devices[key], before_hardware[key])
+            if lines:
+                result.hardware.append(key)
+                result.lines += lines
     for subnet, line in subnet_changes(network_map, before_places, places(network_map), read):
         result.subnets.append(subnet)
         result.lines.append(line)
@@ -422,6 +431,62 @@ def subnet_changes(network_map, before, after, read):
             line = f"{name} gone from {', '.join(map(label, gone))}"
         changes.append((subnet, line))
     return changes
+
+
+def hardware_snapshot(device):
+    """What a device runs and is made of, to tell what changed after it's read again."""
+    members = hardware.chassis(device.parts)
+    return {"software": device.software, "read": device.inventory_read,
+            "chassis": [(_member_name(part, len(members)), part.get("serial", ""), part.get("model", ""))
+                        for part in members],
+            "parts": {part["serial"]: part for part in device.parts
+                      if part.get("class") != hardware.CHASSIS and part.get("serial")}}
+
+
+def _member_name(part, count):
+    if count < 2:
+        return ""
+    return part.get("name") or (f"Member {part['position']}" if part.get("position") else f"Chassis {part['index']}")
+
+
+def _part_text(part):
+    what = hardware.PART_NAMES.get(part.get("class"), "Part")
+    model = part.get("model") or part.get("descr") or ""
+    return f"{what} {part['serial']}" + (f" ({model})" if model else "")
+
+
+def hardware_changes(device, before):
+    """What changed in a device's software and hardware since it was last read, for the watch log: an upgrade (or
+    downgrade), a chassis or stack member with another serial number (swapped), stack members added or gone, and
+    parts with serial numbers added or taken out. Nothing for a device whose hardware wasn't read both times."""
+    lines = []
+    if before["software"] and device.software and before["software"] != device.software:
+        lines.append(f"Software changed on {device.label}: {before['software']} → {device.software}")
+    if not before["read"] or not device.inventory_read:
+        return lines
+    now = hardware_snapshot(device)
+    old = {name: (serial, model) for name, serial, model in before["chassis"]}
+    new = {name: (serial, model) for name, serial, model in now["chassis"]}
+    where = (lambda name: f"{device.label} {name}".strip())
+    for name, (serial, model) in new.items():
+        if name not in old:
+            lines.append(f"New stack member on {device.label}: {name} ({' '.join(filter(None, (model, serial)))})")
+        elif old[name][0] and serial and old[name][0] != serial:
+            lines.append(f"Hardware swapped on {where(name)}: {old[name][0]} → {serial}" + (f" ({model})" if model
+                                                                                           else ""))
+    for name, (serial, model) in old.items():
+        if name not in new:
+            lines.append(f"Stack member gone from {device.label}: {name} ({' '.join(filter(None, (model, serial)))})")
+    chassis_serials = {serial for _, serial, _ in now["chassis"] + before["chassis"] if serial}
+    added = [part for serial, part in now["parts"].items() if serial not in before["parts"]
+             and serial not in chassis_serials]
+    gone = [part for serial, part in before["parts"].items() if serial not in now["parts"]
+            and serial not in chassis_serials]
+    for title, listed in (("Parts added on", added), ("Parts taken out of", gone)):
+        if listed:
+            more = f" and {len(listed) - PORTS_LISTED} more" if len(listed) > PORTS_LISTED else ""
+            lines.append(f"{title} {device.label}: {'; '.join(map(_part_text, listed[:PORTS_LISTED]))}{more}")
+    return lines
 
 
 def vlan_changes(device, names_before, ports_before):

@@ -4,6 +4,15 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.33.0] - 2026-10-26
+
+- **Fixed:** the tribe server could stop answering anyone (laptops: "actively refused") after one connection was cut off part way.
+- **Fixed:** setting the tribe server up from a move file, or updating its service, on a computer where a NOMAD service was still running.
+
+- **New:** Software targets on the Assets page: say which software each model should run, and see which devices are behind it (on the page, and on the map with Overlay > Software Targets).
+- **New:** read a switch's, router's or firewall's hardware over SSH (show inventory) when its SNMP doesn't say: Assets > Read Details over SSH/WMI, or right-click it on the map > Tools > Read Hardware over SSH.
+- **New:** the Map Watcher's log notes upgrades and swapped hardware (an RMA'd stack member, a power supply added, a transceiver taken out).
+
 ## [1.32.0] - 2026-10-26
 
 - **New:** Assets (Network Management): every switch, stack member, router, firewall, access point, phone and server with its hostname, model, serial number and software version, brought in from each Network Map crawl by itself. Renames and upgrades go in its history; hardware swapped for other hardware (an RMA) is marked Replaced. Parts (modules, power supplies, fans, transceivers) too, if you want them. Shared with the tribe.

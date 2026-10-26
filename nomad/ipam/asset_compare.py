@@ -10,12 +10,12 @@ plan lists what would change as AssetChanges; the user ticks the ones to make (o
 ones by itself after a crawl) and apply makes them, all at once.
 """
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..netmap import hardware
 from ..netmap.collect import PHONE as MAP_PHONE, classify
 from ..netmap.model import AP, FIREWALL, PHONE, ROUTER, SERVER, SWITCH, UNKNOWN, display_name
-from .assets import IN_SERVICE, OUT_OF_SERVICE, PART_KINDS, REPLACED, STATUSES, label, today
+from .assets import IN_SERVICE, OUT_OF_SERVICE, PART_KINDS, REPLACED, STATUSES, is_part, label, today
 from .store import serial_key
 
 NEW, UPDATE, REPLACE, SAME, CONFLICT = "new", "update", "replace", "same", "conflict"
@@ -114,38 +114,9 @@ def sightings(network_map, track_parts=True):
     for key, device in sorted(network_map.devices.items()):
         if device.kind not in DEVICE_KINDS or (device.manual and not device.serial):
             continue
-        hostname = display_name(device.name)
-        location = network_map.device_group_label(key)
-        common = dict(hostname=hostname, software=device.software, mgmt_ip=device.mgmt_ip, map_device=key,
-                      location=location)
-        chassis = hardware.chassis(device.parts)
-        if not chassis:
-            if not hostname and not device.mgmt_ip:
-                continue
-            serial = serial_key(device.serial)
-            found.append(Sighting(serial or f"{key}|", device.kind, serial=serial, model=device.platform,
-                                  mac=device.mac, **common))
-            continue
-        refs = {}
-        for part in chassis:
-            slot = chassis_slot(part, len(chassis))
-            serial = serial_key(part["serial"])
-            ref = serial or f"{key}|{slot}"
-            refs[part["index"]] = ref
-            found.append(Sighting(ref, device.kind, serial=serial, model=part["model"] or device.platform,
-                                  maker=part["maker"], mac=part.get("mac", ""), slot=slot, **common))
-        if not track_parts:
-            continue
-        taken = set(refs.values())  # A router's route processor (R0) often has its chassis' serial number
-        for part in device.parts:
-            serial = serial_key(part["serial"])
-            if part["class"] == hardware.CHASSIS or not serial or serial in taken:
-                continue
-            taken.add(serial)
-            parent = refs.get(part["chassis"]) or (next(iter(refs.values())) if len(refs) == 1 else "")
-            found.append(Sighting(serial, part["class"], serial=serial, model=part["model"] or part["descr"],
-                                  maker=part["maker"], hostname=hostname, software=part["software"],
-                                  slot=part_slot(part), map_device=key, location=location, parent_ref=parent))
+        found += device_sightings(key, device.kind, device.parts, display_name(device.name), device.software,
+                                  device.mgmt_ip, network_map.device_group_label(key), device.platform,
+                                  device.serial, device.mac, track_parts)
     for host in network_map.hosts:
         phone = classify(platform=host.platform) == MAP_PHONE or (host.name or "").upper().startswith("SEP")
         if not phone and not host.serial:
@@ -156,6 +127,72 @@ def sightings(network_map, track_parts=True):
         found.append(Sighting(serial or f"mac:{host.mac}", PHONE if phone else UNKNOWN, serial=serial,
                               model=host.platform, hostname=host.name, software=host.software, mgmt_ip=host.ip,
                               mac=host.mac, slot=where, location=network_map.device_group_label(host.device)))
+    return found
+
+
+def device_sightings(key, kind, parts, hostname="", software="", mgmt_ip="", location="", platform="", serial="",
+                     mac="", track_parts=True):
+    """[Sighting] of one device: each chassis (a stack's members each), and its parts with serial numbers when
+    track_parts; one with no chassis read is one Sighting from what else is known of it. key: its map device ("" for
+    one that isn't on a map)."""
+    place = key or mgmt_ip
+    common = dict(hostname=hostname, software=software, mgmt_ip=mgmt_ip, map_device=key, location=location)
+    chassis = hardware.chassis(parts)
+    if not chassis:
+        if not hostname and not mgmt_ip:
+            return []
+        serial = serial_key(serial)
+        return [Sighting(serial or f"{place}|", kind, serial=serial, model=platform, mac=mac, **common)]
+    found, refs = [], {}
+    for part in chassis:
+        slot = chassis_slot(part, len(chassis))
+        serial = serial_key(part["serial"])
+        ref = serial or f"{place}|{slot}"
+        refs[part["index"]] = ref
+        found.append(Sighting(ref, kind, serial=serial, model=part["model"] or platform, maker=part["maker"],
+                              mac=part.get("mac", ""), slot=slot, **common))
+    if not track_parts:
+        return found
+    taken = set(refs.values())  # A router's route processor (R0) often has its chassis' serial number
+    for part in parts:
+        serial = serial_key(part["serial"])
+        if part["class"] == hardware.CHASSIS or not serial or serial in taken:
+            continue
+        taken.add(serial)
+        parent = refs.get(part["chassis"]) or (next(iter(refs.values())) if len(refs) == 1 else "")
+        found.append(Sighting(serial, part["class"], serial=serial, model=part["model"] or part["descr"],
+                              maker=part["maker"], hostname=hostname, software=part["software"],
+                              slot=part_slot(part), map_device=key, location=location, parent_ref=parent))
+    return found
+
+
+def map_device_at(network_map, address):
+    """The map device with this address (its management address first), or None."""
+    if network_map is None or not address:
+        return None
+    devices = list(network_map.devices.values())
+    return next((device for device in devices if device.mgmt_ip == address), None) or \
+        next((device for device in devices if device.owns(address)), None)
+
+
+def network_sightings(details, network_map=None, track_parts=True):
+    """[Sighting] of what network devices said of themselves over SSH (hostinfo.HostDetails with parts): each the
+    map device it is, when the open map has one at its address (so it's matched by where it is, as a crawl's are)."""
+    found = []
+    for item in details:
+        if not item.ok or not item.parts:
+            continue
+        device = map_device_at(network_map, item.address)
+        if device is not None:
+            kind = device.kind if device.kind in DEVICE_KINDS else UNKNOWN
+            found += device_sightings(device.key, kind, item.parts, display_name(device.name) or item.hostname,
+                                      item.software or device.software, item.address,
+                                      network_map.device_group_label(device.key), device.platform,
+                                      track_parts=track_parts)
+            continue
+        kind = classify(descr=item.os, platform=item.model)
+        found += device_sightings("", kind if kind in DEVICE_KINDS else UNKNOWN, item.parts, item.hostname,
+                                  item.software, item.address, track_parts=track_parts)
     return found
 
 
@@ -190,6 +227,11 @@ def _same_place(asset, sighting, renamed):
     return bool(asset.mgmt_ip) and asset.mgmt_ip == sighting.mgmt_ip and asset.kind == sighting.kind
 
 
+def _says_nothing(sighting):
+    """A whole device seen with nothing that tells its hardware: no serial number, MAC or slot."""
+    return not sighting.is_part and not sighting.serial and not sighting.mac and not sighting.slot
+
+
 def _macs_agree(asset, sighting):
     """Whether a MAC doesn't say they're different hardware: with no serial number on one side, another MAC (another
     phone on that port) is. With both serial numbers it's those that tell (a replaced chassis has another MAC)."""
@@ -219,7 +261,20 @@ def plan(store, found, user="", when=None):
             if asset.hostname and sighting.hostname:
                 renamed.setdefault(asset.hostname.lower(), sighting.hostname.lower())
     changes, matched = [], set()
+    at_device = {}  # Map device -> its whole-device assets with serial numbers
+    for asset in assets:
+        if asset.map_device and asset.serial and not is_part(asset.kind) and asset.status != REPLACED:
+            at_device.setdefault(asset.map_device, []).append(asset)
     for sighting in found:
+        if _says_nothing(sighting) and sighting.map_device in at_device:
+            # A device its SNMP says nothing of the hardware of, read before (over SSH): what it does say (its
+            # hostname, software) for each of its chassis, without a model or slot to undo theirs
+            for asset in at_device[sighting.map_device]:
+                if asset.id not in matched:
+                    matched.add(asset.id)
+                    changes.append(_compare(asset, replace(sighting, ref=asset.serial, kind=asset.kind, model="",
+                                                           maker="", slot=asset.slot)))
+            continue
         if sighting.serial and len({item.map_device or item.ref for item in serials_found[sighting.serial]}) > 1:
             if sighting is serials_found[sighting.serial][0]:
                 places = ", ".join(item.name for item in serials_found[sighting.serial])

@@ -6,6 +6,26 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.33.0] - 2026-10-26
+
+### Added
+
+- **Assets** > **Software Targets...**: the software each model should run (a target version and other versions that are fine too), for a model or a family of them with a wildcard (`C9300-*`; the most exact one counts). Each device is on target, behind, ahead, or running other software (another train); versions compare the way their numbers read (17.9.4a is ahead of 17.9.4 and behind 17.12.1; 15.2(7)E4 is behind 15.2(7)E10). The Software column is colored by it, devices off target are listed under Problems (in place of "most of its model run" for a model with a target), **Show** > Not on target software lists them, the summary counts them, and the export has each one's target and where it stands. **Add from the Asset List...** starts a target for each model from the version most of it runs; right-click a device > **Make (its version) the Target for (its model)...**. Kept in the IPAM database (schema 7) and shared through the tribe server (API 12), changed only while the server can be reached. Changes to targets are in **All Changes...**.
+- **Network Map** > **Overlay** > **Software Targets**: each device colored by whether it runs its model's software target (on it, behind, ahead, other software, no target).
+- **Hardware over SSH**, for devices whose SNMP doesn't say (no ENTITY-MIB, no serial numbers, or no SNMP at all): **Assets** > **Read Details over SSH/WMI...** (it was Read Server/Phone Details) > **Cisco switch, router or firewall** logs in (a saved session, a saved credential or a typed login, as MAC Finder does) and reads **show inventory** and **show version**: each chassis and stack member with its model and serial number, its modules, power supplies, fans and transceivers, the software it runs and each member's base MAC (IOS, IOS XE, NX-OS, ASA; nothing is changed). What it says is reviewed and recorded like a crawl's (matched by the map device it is, so stack members and replacements come out the same), and put on the map device too, where it stays when later crawls' SNMP says nothing of its hardware (a crawl that does read it over SNMP takes over). On the map: right-click devices > **Tools** > **Read Hardware over SSH...**; **Read Hardware Again** names the devices whose SNMP gave no serial numbers. A device read over SSH that its SNMP says nothing of isn't brought in again as a serial-less asset by later crawls, but what they do say (its hostname, an upgrade) reaches its recorded chassis.
+- **Map Watcher** log: a device upgraded (or downgraded), a chassis or stack member swapped for another serial number, stack members added or gone, and parts with serial numbers added or taken out, each noted when a watched switch is read again; the Assets page brings the change in by itself.
+
+### Fixed
+
+- **The tribe (IPAM) server could stop answering everyone** until its service was ended: a single connection that didn't finish its TLS handshake (a laptop going to sleep as it connected, a dropped connection, a port scan) held up the one thread that takes connections, after which Windows refused all of them (laptops saw "the target machine actively refused it", the server itself too) while the service still looked to be running (and couldn't be stopped: error 1053). Each connection's handshake is now made on its own, and dropped after 15 seconds; a connection that sends nothing for 85 seconds is closed.
+- **Tribe server** > **Set Up from Move File** on a computer whose server folder was in use: the folder is renamed aside all at once or not at all (it was copied aside and then deleted as far as Windows let it, which left half a server behind, without its settings and certificate). A server folder with the tribe's data but without its settings or certificate is no longer given new ones (a new server identity no laptop's tribe key works with): NOMAD says which files to put back.
+- **Installing or updating a NOMAD service** while the other one (the IPAM server or the Map Watcher, which run the same NOMAD.exe in Program Files) was running failed with "The process cannot access the file because it is being used by another process": the other one is stopped while the exe is replaced, and started again. A service that doesn't answer when told to stop (Windows' error 1053) has its process ended, rather than the install going on regardless.
+- **IPAM server service**: stopping it no longer hangs when the server never started listening, and if it stops serving by itself the service ends (and is noted in server.log and Event Viewer), so Windows starts it again, rather than sit there running with nothing listening.
+
+### Changed
+
+- **Network Map** > **Overlay** > **Color By** > Software Version uses the version the crawl read (the same as the Devices table's Software column), not only what's in the description.
+
 ## [1.32.0] - 2026-10-26
 
 ### Added

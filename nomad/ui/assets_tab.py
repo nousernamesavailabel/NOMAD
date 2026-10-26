@@ -31,6 +31,8 @@ from ..ipam.assets import DEVICE_KINDS, IN_SERVICE, KINDS, OUT_OF_SERVICE, PHONE
 from ..ipam.client import ServerUnreachable, TeamKeyError
 from ..ipam.server import ConflictError
 from ..ipam.store import IpamError
+from ..ipam.target_team import TeamTargetStore
+from ..ipam.targets import OFF_TARGET, STATE_NAMES, TargetStore, compliance
 from ..netmap import hardware, store as map_store
 from ..oui import format_mac
 from .asset_dialogs import AssetDialog, AssetImportDialog, AssetRefusedDialog, ReadDetailsDialog, Source, ValueDialog
@@ -38,6 +40,7 @@ from .common import SortableTableItem, add_action, add_submenu, set_hint
 from .integration import MAP_DEVICE, hub, link
 from .ipam_tab import ago
 from .table_filter import TableFilter
+from .target_dialogs import STATE_COLORS, TargetDialog, TargetsDialog
 from .theme import COLORS
 
 log = logging.getLogger(__name__)
@@ -51,9 +54,12 @@ COLUMNS = ["Hostname", "Slot", "Kind", "Model", "Serial", "Software", "Managemen
 WHOLE_MAC = re.compile(r"^(?:[0-9A-Fa-f]{2}([-:])(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{12}"
                        r"|[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4})$")
 LOCAL, TEAM = "local", "team"  # As the IP Addresses page names where networks come from
-EVERYTHING, DEVICES, PROBLEMS, SERVING, NOT_SERVING = "all", "devices", "problems", "in", "out"
+EVERYTHING, DEVICES, PROBLEMS, OFF, SERVING, NOT_SERVING = "all", "devices", "problems", "off target", "in", "out"
 SHOWS = {EVERYTHING: "Everything", DEVICES: "Devices (no parts)", PROBLEMS: "With problems",
+         OFF: "Not on target software",
          SERVING: "In service", NOT_SERVING: "Out of service (spare, repair, replaced, retired)"}
+NETWORK_ASSET_KINDS = ("switch", "router", "firewall")  # Read over SSH with show inventory
+READABLE_KINDS = (SERVER, PHONE) + NETWORK_ASSET_KINDS  # Right-click > Read Its Details
 STATUS_COLORS = {"spare": "link", "repair": "warning", "replaced": "muted", "retired": "muted"}
 HISTORY_SHOWN = 8
 
@@ -66,6 +72,7 @@ class AssetsTab(QWidget):
         self.saved_source = ""
         self.assets = []
         self.found_problems = {}
+        self.target_list = []  # The source's software targets, as last filled
         self.review = None  # (Source key, [AssetChange]) left to look at after bringing in a crawl by itself
         self.init_ui()
         window.ipam_tab.tribe_synced.connect(self.on_tribe_synced)
@@ -161,9 +168,10 @@ class AssetsTab(QWidget):
         self.read_button.setToolTip("Ask every device on the open map that answers SNMP for its chassis, parts, "
                                     "serial numbers and software (a map made before NOMAD read them has none), then "
                                     "bring that in.")
-        self.details_button = QPushButton("Read Server/Phone Details...")
-        self.details_button.setToolTip("Ask Windows servers (WMI), Linux servers (SSH) or Cisco IP phones (their web "
-                                       "page) for their maker, model, serial number and software.")
+        self.details_button = QPushButton("Read Details over SSH/WMI...")
+        self.details_button.setToolTip("Ask Windows servers (WMI), Linux servers (SSH), Cisco IP phones (their web "
+                                       "page) or Cisco switches, routers and firewalls (show inventory over SSH) for "
+                                       "their model, serial number and software: for what SNMP doesn't say.")
         self.add_button = QPushButton("Add...")
         self.edit_button = QPushButton("Edit...")
         self.delete_button = QPushButton("Delete")
@@ -172,11 +180,15 @@ class AssetsTab(QWidget):
         self.changes_button.setToolTip("Every change to the asset list, newest first: what was added, renamed, "
                                        "upgraded or replaced, by whom.")
         self.export_button = QPushButton("Export...")
+        self.targets_button = QPushButton("Software Targets...")
+        self.targets_button.setToolTip("The software each model should run: devices off their model's target are "
+                                       "listed under Problems, and the Network Map's Overlay > Software colors them.")
         self.map_button = QPushButton("Show on Map")
         for button in (self.import_button, self.read_button, self.details_button, self.add_button, self.edit_button,
                        self.delete_button, self.history_button):
             buttons.addWidget(button)
         buttons.addStretch()
+        buttons.addWidget(self.targets_button)
         buttons.addWidget(self.changes_button)
         buttons.addWidget(self.export_button)
         buttons.addWidget(self.map_button)
@@ -200,6 +212,7 @@ class AssetsTab(QWidget):
         self.history_button.clicked.connect(self.show_history)
         self.changes_button.clicked.connect(self.show_changes)
         self.export_button.clicked.connect(self.export)
+        self.targets_button.clicked.connect(self.show_targets)
         self.map_button.clicked.connect(self.show_on_map)
         self.update_buttons()
 
@@ -242,8 +255,10 @@ class AssetsTab(QWidget):
         team = page.team
         if team is not None:
             found.append(Source(TEAM, "Tribe", team, TeamAssetStore(team),
-                                can_edit=team.server_keeps_assets and not team.key_rejected))
-        found.append(Source(LOCAL, "Local", page.local_store, AssetStore(page.local_store)))
+                                can_edit=team.server_keeps_assets and not team.key_rejected,
+                                targets=TeamTargetStore(team)))
+        found.append(Source(LOCAL, "Local", page.local_store, AssetStore(page.local_store),
+                            targets=TargetStore(page.local_store)))
         return found
 
     def source(self, key=None):
@@ -285,6 +300,9 @@ class AssetsTab(QWidget):
             return [asset for asset in assets if not is_part(asset.kind)]
         if shown == PROBLEMS:
             return [asset for asset in assets if asset.id in self.found_problems]
+        if shown == OFF:
+            return [asset for asset in assets if asset.status == IN_SERVICE
+                    and compliance(asset, self.target_list)[0] in OFF_TARGET]
         if shown == SERVING:
             return [asset for asset in assets if asset.status == IN_SERVICE]
         if shown == NOT_SERVING:
@@ -299,7 +317,8 @@ class AssetsTab(QWidget):
         source = self.source()
         selected = select if select is not None else [asset.id for asset in self.selected_assets()]
         everything = source.assets.assets() if source is not None else []
-        self.found_problems = problems(everything)
+        self.target_list = source.targets.targets() if source is not None and source.targets is not None else []
+        self.found_problems = problems(everything, targets=self.target_list)
         by_id = {asset.id: asset for asset in everything}
         self.assets = self.chosen_assets(everything)
         pending = source.assets.pending_ids() if source is not None and source.key == TEAM else set()
@@ -326,6 +345,8 @@ class AssetsTab(QWidget):
                     item.setForeground(QColor(COLORS["warning"]))
                 if column == COL_HOSTNAME and is_part(asset.kind):
                     item.setForeground(QColor(COLORS["muted"]))
+                if column == COL_SOFTWARE and self.target_list and asset.status == IN_SERVICE:
+                    self.show_compliance(item, asset)
                 self.table.setItem(row, column, item)
         self.table.setSortingEnabled(True)
         if self.searched_mac:
@@ -334,6 +355,17 @@ class AssetsTab(QWidget):
         self.select_rows(set(selected))
         self.show_summary(source, everything)
         self.on_selection()
+
+    def show_compliance(self, item, asset):
+        """Color a Software cell by where it stands against its model's target, and say so in its tooltip."""
+        state, target = compliance(asset, self.target_list)
+        if target is None:
+            return
+        if state in STATE_COLORS:
+            item.setForeground(QColor(COLORS[STATE_COLORS[state]]))
+        item.setToolTip(f"{asset.software or 'Not known'}: {STATE_NAMES[state].lower()} (the target for "
+                        f"{target.model} is {target.target}" + (f", also {target.allowed}" if target.allowed else "")
+                        + ")")
 
     def show_summary(self, source, everything):
         if source is None:
@@ -358,6 +390,12 @@ class AssetsTab(QWidget):
         if models:
             top = sorted(models.items(), key=lambda item: (-item[1], item[0]))[:4]
             text.append("most: " + ", ".join(f"{count} {html.escape(model)}" for model, count in top))
+        if self.target_list:
+            off = sum(1 for asset in devices if asset.status == IN_SERVICE
+                      and compliance(asset, self.target_list)[0] in OFF_TARGET)
+            color = COLORS["warning" if off else "success"]
+            text.append(f"<span style='color:{color}'>{off} not on target software</span>" if off else
+                        f"<span style='color:{color}'>all on target software</span>")
         if self.found_problems:
             text.append(f"<span style='color:{COLORS['warning']}'>{len(self.found_problems)} with problems</span>")
         self.summary_label.setText(" · ".join(text))
@@ -476,7 +514,8 @@ class AssetsTab(QWidget):
                 "<p>An asset is its serial number: found under another hostname it's renamed, running other software "
                 "it was upgraded, and a hostname (or stack member, or slot) with a new serial number had its hardware "
                 "replaced (the old one is marked Replaced).</p>"
-                "<p>Read Server/Phone Details asks servers and phones for what the map can't read.</p>")
+                "<p>Read Details over SSH/WMI asks servers, phones and network devices for what the map can't "
+                "read over SNMP.</p>")
 
     def asset_html(self, asset):
         escape = html.escape
@@ -499,6 +538,12 @@ class AssetsTab(QWidget):
             if value:
                 parts.append(f"<tr><td><b>{title}</b>&nbsp;</td><td>{escape(value)}</td></tr>")
         parts.append("</table>")
+        state, target = compliance(asset, self.target_list)
+        if target is not None:
+            color = COLORS[STATE_COLORS.get(state, "muted")]
+            parts.append(f"<p>Software target for {escape(target.model)}: {escape(target.target)}"
+                         + (f" (also {escape(target.allowed)})" if target.allowed else "")
+                         + f" &middot; <span style='color:{color}'>{escape(STATE_NAMES[state])}</span></p>")
         for problem in self.found_problems.get(asset.id, []):
             parts.append(f"<p style='color:{COLORS['warning']}'>{escape(problem)}</p>")
         inside = source.assets.parts_of(asset.id)
@@ -538,6 +583,7 @@ class AssetsTab(QWidget):
         self.history_button.setEnabled(len(selected) == 1)
         self.export_button.setEnabled(source is not None)
         self.changes_button.setEnabled(source is not None)
+        self.targets_button.setEnabled(source is not None and source.targets is not None)
         single = selected[0] if len(selected) == 1 else None
         network_map = self.open_map()
         self.map_button.setEnabled(single is not None and network_map is not None and
@@ -563,10 +609,16 @@ class AssetsTab(QWidget):
         owner = add_action(menu, "Set Owner...", self.set_owner)
         for action in (location, owner):
             action.setEnabled(source.can_edit)
-        servers = [asset for asset in selected if asset.mgmt_ip and asset.kind in (SERVER, PHONE)]
+        servers = [asset for asset in selected if asset.mgmt_ip and asset.kind in READABLE_KINDS]
         if servers:
             add_action(menu, "Read Their Details..." if len(servers) > 1 else "Read Its Details...",
                        self.read_selected_details)
+        single = selected[0] if len(selected) == 1 else None
+        if single is not None and single.model and single.software and not is_part(single.kind) \
+                and source.targets is not None:
+            action = add_action(menu, f"Make {single.software} the Target for {single.model}...",
+                                self.target_from_selected)
+            action.setEnabled(source.targets.can_change)
         menu.addSeparator()
         add_action(menu, "Copy Serial Numbers" if len(selected) > 1 else "Copy Serial Number", self.copy_serials)
         menu.exec_(self.table.viewport().mapToGlobal(position))
@@ -737,7 +789,7 @@ class AssetsTab(QWidget):
     # ----------------------------------------------------------------- Servers and phones
 
     def ask_details(self):
-        """The Read Server/Phone Details button (clicked passes its checked flag, never addresses)."""
+        """The Read Details over SSH/WMI button (clicked passes its checked flag, never addresses)."""
         self.read_details()
 
     def read_details(self, addresses=(), method=hostinfo.WINDOWS):
@@ -750,19 +802,30 @@ class AssetsTab(QWidget):
                 return
             source = self.source()
             kind = dialog.kind()
-            changes = asset_compare.plan(source.assets, asset_compare.detail_sightings(answers, kind))
+            if kind == "network":
+                page = getattr(self.window, "netmap_tab", None)
+                if page is not None and page.network_map is not None:
+                    page.apply_ssh_hardware(answers)  # The map shows it too, and keeps it across crawls
+                found = asset_compare.network_sightings(answers, self.open_map(), self.parts_check.isChecked())
+            else:
+                found = asset_compare.detail_sightings(answers, kind)
+            changes = asset_compare.plan(source.assets, found)
             review = AssetImportDialog(self, source, changes, "Record What They Said",
-                                       "What the servers or phones said of themselves, against the asset list. Tick "
-                                       "what to record.")
+                                       "What they said of themselves, against the asset list. Tick what to record.")
             if review.exec_():
                 self.make(source, changes, "from their answers")
 
     def read_selected_details(self):
-        selected = [asset for asset in self.selected_assets() if asset.mgmt_ip and asset.kind in (SERVER, PHONE)]
+        selected = [asset for asset in self.selected_assets() if asset.mgmt_ip and asset.kind in READABLE_KINDS]
         if not selected:
             return
-        method = hostinfo.PHONE if all(asset.kind == PHONE for asset in selected) else hostinfo.WINDOWS
-        self.read_details([asset.mgmt_ip for asset in selected], method)
+        if all(asset.kind == PHONE for asset in selected):
+            method = hostinfo.PHONE
+        elif all(asset.kind in NETWORK_ASSET_KINDS for asset in selected):
+            method = hostinfo.NETWORK
+        else:
+            method = hostinfo.WINDOWS
+        self.read_details(list(dict.fromkeys(asset.mgmt_ip for asset in selected)), method)
 
     # ----------------------------------------------------------------- Changing assets
 
@@ -864,6 +927,44 @@ class AssetsTab(QWidget):
         set_hint(self.status_label, f"Copied {len(serials)} serial number{'s' if len(serials) != 1 else ''}.",
                  "success")
 
+    # ----------------------------------------------------------------- Software targets
+
+    def show_targets(self):
+        if not self.ensure_open():
+            return
+        source = self.source()
+        if source is None or source.targets is None:
+            return
+        dialog = TargetsDialog(self, source)
+        dialog.exec_()
+        if dialog.changed:
+            self.on_targets_changed()
+
+    def target_from_selected(self):
+        """Right-click > Make (its software) the Target for (its model): add or change that model's target."""
+        asset, source = self.selected_asset(), self.source()
+        if asset is None or source is None or source.targets is None:
+            return
+        existing = source.targets.by_model(asset.model)
+        dialog = TargetDialog(self, source.targets, source.assets.assets(), existing, model=asset.model,
+                              version=asset.software)
+        if existing is not None:
+            dialog.version_combo.setCurrentText(asset.software)
+        if dialog.exec_():
+            self.on_targets_changed()
+
+    def on_targets_changed(self):
+        self.fill_table()
+        page = getattr(self.window, "netmap_tab", None)
+        refresh = getattr(page, "refresh_software_overlay", None)
+        if refresh is not None:
+            refresh()
+
+    def software_targets(self):
+        """The software targets of the asset list shown (the tribe's or this computer's), for the map's overlay."""
+        source = self.source() if self.window.ipam_tab.local_store is not None else None
+        return source.targets.targets() if source is not None and source.targets is not None else []
+
     # ----------------------------------------------------------------- Exporting
 
     def export(self):
@@ -875,7 +976,7 @@ class AssetsTab(QWidget):
                                                    "Excel workbooks (*.xlsx);;CSV files (*.csv)")
         if not path:
             return
-        rows = export_rows(source.assets.assets())
+        rows = export_rows(source.assets.assets(), self.target_list)
         try:
             if path.lower().endswith(".csv") or "CSV" in chosen and not path.lower().endswith(".xlsx"):
                 with open(path, "w", newline="", encoding="utf-8-sig") as file:
@@ -945,20 +1046,22 @@ class AssetsTab(QWidget):
             set_hint(self.server_label, f"● Tribe · connecting ({synced})", "info")
 
 
-EXPORT_COLUMNS = ["Hostname", "Slot", "Kind", "Model", "Maker", "Serial", "Software", "Management IP", "MAC",
-                  "Location", "Status", "Asset Tag", "Owner", "Purchased", "Warranty Ends", "End of Life",
-                  "First Seen", "Last Seen", "Notes"]
+EXPORT_COLUMNS = ["Hostname", "Slot", "Kind", "Model", "Maker", "Serial", "Software", "Software Target",
+                  "On Target", "Management IP", "MAC", "Location", "Status", "Asset Tag", "Owner", "Purchased",
+                  "Warranty Ends", "End of Life", "First Seen", "Last Seen", "Notes"]
 
 
-def export_rows(assets):
+def export_rows(assets, targets=()):
     by_id = {asset.id: asset for asset in assets}
     rows = []
     for asset in sorted(assets, key=lambda item: (
             (item.hostname or (by_id[item.parent_id].hostname if item.parent_id in by_id else "")).lower(),
             is_part(item.kind), item.slot)):
         chassis = by_id.get(asset.parent_id)
+        state, target = compliance(asset, targets)
         rows.append([asset.hostname or (chassis.hostname if chassis is not None else ""), asset.slot,
                      KINDS.get(asset.kind, asset.kind), asset.model, asset.maker, asset.serial, asset.software,
+                     target.target if target is not None else "", STATE_NAMES[state] if target is not None else "",
                      asset.mgmt_ip, asset.mac, asset.location, STATUSES.get(asset.status, asset.status),
                      asset.asset_tag, asset.owner, asset.purchased, asset.warranty_end, asset.eol, asset.first_seen,
                      asset.last_seen, asset.description])

@@ -36,6 +36,7 @@ class Source:
     ipam: object  # TeamStore or IpamStore: where its history is
     assets: object  # TeamAssetStore or AssetStore
     can_edit: bool = True
+    targets: object = None  # TeamTargetStore or TargetStore: the software each model should run
 
 
 def _table(columns):
@@ -284,6 +285,9 @@ class DetailsReader(StoppableThread):
             return hostinfo.phone_details(address)
         from ..terminal.hostkeys import KnownHosts
         logins = login["logins"]
+        if self.method == hostinfo.NETWORK:
+            return hostinfo.network_details(address, logins, login.get("vault"), login.get("trust", False),
+                                            KnownHosts())
         session, _ = logins.login_for(address)
         if session is None:
             return hostinfo.HostDetails(address, hostinfo.LINUX, error="No saved session or login to use.")
@@ -292,8 +296,8 @@ class DetailsReader(StoppableThread):
 
 
 class ReadDetailsDialog(QDialog):
-    """Ask servers or phones what they are (maker, model, serial number, operating system or firmware), then review
-    what that changes in the asset list."""
+    """Ask servers, phones or network devices what they are (maker, model, serial number, operating system or
+    firmware; a network device's stack members and parts), then review what that changes in the asset list."""
 
     COLUMNS = ["Address", "Hostname", "Maker", "Model", "Serial", "Software", "Problem"]
 
@@ -302,12 +306,14 @@ class ReadDetailsDialog(QDialog):
         self.session_store = session_store
         self.reader = None
         self.results = {}
-        self.setWindowTitle("Read Server or Phone Details")
+        self.setWindowTitle("Read Details over SSH or WMI")
         self.resize(1000, 520)
         layout = QVBoxLayout(self)
-        intro = QLabel("Servers rarely tell SNMP their serial number, and phones tell their switch only some of it: "
-                       "ask them instead. Windows servers are asked over WMI (WinRM, or DCOM), Linux servers over SSH, "
-                       "and Cisco phones through their web page.")
+        intro = QLabel("Servers rarely tell SNMP their serial number, phones tell their switch only some of it, and "
+                       "some switches, routers and firewalls don't say over SNMP either: ask them instead. Windows "
+                       "servers are asked over WMI (WinRM, or DCOM), Linux servers over SSH, Cisco phones through "
+                       "their web page, and Cisco switches, routers and firewalls (IOS, IOS XE, NX-OS, ASA) for show "
+                       "inventory and show version over SSH (nothing is changed on them).")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         form = QFormLayout()
@@ -340,7 +346,7 @@ class ReadDetailsDialog(QDialog):
         self.password_input.setPlaceholderText("Kept only while this window is open")
         form.addRow("User name:", self.user_input)
         form.addRow("Password:", self.password_input)
-        self.trust_check = QCheckBox("Trust Linux servers' SSH keys NOMAD hasn't seen before")
+        self.trust_check = QCheckBox("Trust SSH keys NOMAD hasn't seen before")
         form.addRow("", self.trust_check)
         layout.addLayout(form)
         self.table = _table(self.COLUMNS)
@@ -375,12 +381,12 @@ class ReadDetailsDialog(QDialog):
         return self.method_combo.currentData()
 
     def kind(self):
-        return "phone" if self.method == hostinfo.PHONE else "server"
+        return {hostinfo.PHONE: "phone", hostinfo.NETWORK: "network"}.get(self.method, "server")
 
     def typed(self):
         if self.method == hostinfo.WINDOWS:
             return self.windows_combo.currentData() == "typed"
-        if self.method == hostinfo.LINUX:
+        if self.method in hostinfo.SSH_METHODS:
             return self.picker is None or not self.picker.credential_id()
         return False
 
@@ -389,11 +395,11 @@ class ReadDetailsDialog(QDialog):
         self.login_row.setVisible(method != hostinfo.PHONE)
         self.windows_combo.setVisible(method == hostinfo.WINDOWS)
         if self.picker is not None:
-            self.picker.setVisible(method == hostinfo.LINUX)
+            self.picker.setVisible(method in hostinfo.SSH_METHODS)
         typed = self.typed()
         for field in (self.user_input, self.password_input):
             field.setEnabled(typed)
-        self.trust_check.setVisible(method == hostinfo.LINUX)
+        self.trust_check.setVisible(method in hostinfo.SSH_METHODS)
         reading = self.reader is not None
         self.ask_button.setEnabled(not reading)
         self.stop_button.setEnabled(reading)

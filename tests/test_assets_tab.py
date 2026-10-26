@@ -325,7 +325,8 @@ def test_read_hardware_again_on_the_map(app, tmp_path, monkeypatch):
         {action.text(): action.menu() for action in menu.actions() if not action.isSeparator()}))
     tab.show_device_menu(key, None)
     entries = shown[-1]
-    assert "Read Hardware Again" in [action.text() for action in entries["Tools"].actions()]
+    tools = [action.text() for action in entries["Tools"].actions()]
+    assert "Read Hardware Again" in tools and "Read Hardware over SSH..." in tools
     assert "Assets" in [action.text() for action in entries["Show In"].actions()]
     tab.shutdown()
 
@@ -363,3 +364,103 @@ def test_a_mac_finds_its_asset_even_a_port_of_a_stack_member(page, monkeypatch):
     assert tab.table_filter.row_test is None
     tab.search_input.clear()
     assert len(rows(tab.table)) == 4
+
+
+def test_software_targets_from_the_page(page, monkeypatch):
+    from nomad.ui import target_dialogs
+    tab, store, window = page
+    bring_in(monkeypatch, tab)
+    assert not tab.target_list and "target" not in tab.summary_label.text()
+    shown = []
+
+    def suggested(dialog):
+        shown.append([dialog.table.item(row, 0).text() for row in range(dialog.table.rowCount())])
+        return True
+    monkeypatch.setattr(target_dialogs.SuggestedTargetsDialog, "exec_", suggested)
+    monkeypatch.setattr(target_dialogs.TargetsDialog, "exec_", lambda dialog: dialog.add_suggested() or True)
+    tab.show_targets()
+    assert shown == [["C9300-48P", "Cisco IP Phone 8845"]]  # Each model without a target, with what it runs
+    target = tab.target_list[0]
+    assert (target.model, target.target) == ("C9300-48P", "17.9.4a")
+    assert "all on target software" in tab.summary_label.text()
+    switch = AssetStore(store).by_serial("FOC2")
+    AssetStore(store).set_asset(switch.id, software="17.6.5")
+    tab.fill_table()
+    assert "1 not on target software" in tab.summary_label.text()
+    tab.show_combo.setCurrentIndex(tab.show_combo.findData(assets_module.OFF))
+    assert [row[COL_SERIAL] for row in rows(tab.table)] == ["FOC2"]
+    assert "Behind target: runs 17.6.5" in rows(tab.table)[0][COL_PROBLEMS]
+    assert "behind target" in tab.table.item(0, assets_module.COL_SOFTWARE).toolTip()
+    tab.select_ids({switch.id})
+    assert "Behind target" in tab.details.toPlainText()
+    # Right-click > Make 17.6.5 the Target for C9300-48P
+    monkeypatch.setattr(target_dialogs.TargetDialog, "exec_", lambda dialog: dialog.save() or True)
+    tab.target_from_selected()
+    assert tab.target_list[0].target == "17.6.5" and tab.target_list[0].id == target.id
+    rows_out = assets_module.export_rows(AssetStore(store).assets(), tab.target_list)
+    column = assets_module.EXPORT_COLUMNS.index("On Target")
+    assert {row[column] for row in rows_out if row[assets_module.EXPORT_COLUMNS.index("Serial")] == "FOC1"} == {
+        "Ahead of target"}
+
+
+def test_software_targets_overlay_on_the_map(app, tmp_path, monkeypatch):
+    from netmap_fakes import FakeNetwork
+    from test_assets import crawl as crawl_network, stack_switch
+    from test_netmap_tab import Window as MapWindow
+    from nomad.ipam.store import SoftwareTarget
+    from nomad.netmap import overlays, store as map_store
+    from nomad.ui import netmap_tab
+    monkeypatch.setattr(map_store, "maps_dir", lambda: tmp_path)
+    network = FakeNetwork()
+    network.add("10.0.0.11", stack_switch())
+    window = MapWindow()
+    targets = [SoftwareTarget("t1", "C9300-*", "17.12.1")]
+
+    class Assets:
+        def software_targets(self):
+            return targets
+    window.assets_tab = Assets()
+    tab = netmap_tab.NetworkMapTab(window)
+    tab.on_crawled(crawl_network(network))
+    tab.fill_overlay_menu()
+    action = next(action for action in tab.overlay_menu.actions() if action.text() == "Software Targets")
+    assert action.isEnabled()
+    action.trigger()
+    [key] = tab.network_map.devices
+    assert tab.overlay_shown == (overlays.SOFTWARE, None)
+    assert tab.view.overlay.devices[key].color == "warning" and "1 behind" in tab.vlan_label.text()
+    targets[0] = SoftwareTarget("t1", "C9300-*", "17.9.4a")  # Changed on the Assets page
+    tab.refresh_software_overlay()
+    assert tab.view.overlay.devices[key].color == "success"
+    tab.shutdown()
+
+
+def test_network_devices_read_over_ssh_go_on_the_map_and_the_list(page, monkeypatch):
+    from test_inventory_ssh import CAT9K_INVENTORY, CAT9K_VERSION
+    from nomad.netmap import inventory_ssh
+    tab, store, window = page
+    window.netmap_tab.network_map.devices["sw1"].parts = []  # Its SNMP said nothing of its hardware
+    applied = []
+    window.netmap_tab.apply_ssh_hardware = lambda details: applied.extend(details) or len(details)
+    parts, info = inventory_ssh.device_hardware(CAT9K_INVENTORY, CAT9K_VERSION)
+    answers = [hostinfo.HostDetails("10.0.0.11", hostinfo.NETWORK, hostname="acc1", software=info["software"],
+                                    parts=parts)]
+    monkeypatch.setattr(ReadDetailsDialog, "exec_", lambda dialog: True)
+    monkeypatch.setattr(ReadDetailsDialog, "answers", lambda dialog: answers)
+    monkeypatch.setattr(ReadDetailsDialog, "kind", lambda dialog: "network")
+    bring_in(monkeypatch, tab)
+    tab.read_details(["10.0.0.11"], hostinfo.NETWORK)
+    assert applied == answers  # The map device got it too
+    member = AssetStore(store).by_serial("FOC2222B2BB")
+    assert member.slot == "Switch 2" and member.map_device == "sw1" and member.software == "17.09.04a"
+    assert AssetStore(store).by_serial("LIT2222").parent_id == member.id
+
+
+def test_read_details_dialog_asks_network_devices_over_ssh(app):
+    dialog = ReadDetailsDialog(None, None, ["10.0.0.11"], hostinfo.NETWORK)
+    assert dialog.method == hostinfo.NETWORK and dialog.kind() == "network"
+    assert dialog.trust_check.isVisibleTo(dialog) and dialog.typed()
+    dialog.user_input.setText("admin")
+    login = dialog.login()
+    assert login["logins"].fallback.username == "admin"
+    dialog.deleteLater()

@@ -142,3 +142,126 @@ def test_move_password_and_file_checks(old, tmp_path):
         MoveFile(other, "correct horse")
     json.loads((old.directory / "config.json").read_text())  # Untouched by a refused export
     assert moved(old.directory) is None
+
+
+# --------------------------------------------------------------------- A server folder that's in use
+
+def test_a_folder_in_use_is_left_whole_not_half_deleted(old, tmp_path, monkeypatch):
+    from nomad.ipam import migrate
+    old.stop()
+    move_path = tmp_path / "tribe.nomadmove"
+    export_server(move_path, "correct horse", ["127.0.0.1"], 0, old.directory)
+    here = tmp_path / "here"
+    server, thread = start(here)  # A server already here, still running (its ipam.db open)
+    stop(server, thread)
+    before = sorted(path.name for path in here.iterdir())
+
+    def locked(source, target):
+        raise PermissionError(5, "Access is denied")
+    monkeypatch.setattr(migrate.os, "rename", locked)
+    monkeypatch.setattr(migrate.time, "sleep", lambda seconds: None)
+    with pytest.raises(MoveError, match="Nothing in the folder was changed"):
+        import_server(MoveFile(move_path, "correct horse"), here)
+    assert sorted(path.name for path in here.iterdir()) == before  # Not copied aside and deleted
+    assert not list(tmp_path.glob("here-before-move-*"))
+
+
+def test_a_folder_with_data_but_no_settings_isnt_made_a_new_server(tmp_path):
+    from nomad.ipam.server import set_up
+    from nomad.ipam.store import IpamError
+    server, thread = start(tmp_path / "server")
+    stop(server, thread)
+    (tmp_path / "server" / "config.json").unlink()  # Lost (deleted by a failed move, say)
+    with pytest.raises(IpamError, match="has the tribe's data .* but not config.json"):
+        set_up(tmp_path / "server")
+    with pytest.raises(IpamError, match="but not config.json"):
+        IpamServer(tmp_path / "server", host="127.0.0.1", port=0)
+    assert not (tmp_path / "server" / "config.json").exists()
+    fresh = set_up(tmp_path / "fresh")  # An empty folder still becomes a new server
+    assert fresh["server_id"] and (tmp_path / "fresh" / "cert.pem").exists()
+
+
+def test_stopping_a_server_that_never_served_doesnt_hang(tmp_path, monkeypatch):
+    from nomad.ipam import server as server_module
+    monkeypatch.setattr(server_module, "STOP_WAIT_SECONDS", 0.5)
+    server = IpamServer(tmp_path / "server", host="127.0.0.1", port=0)
+    finished = threading.Event()
+    threading.Thread(target=lambda: (server.stop(), finished.set()), daemon=True).start()
+    assert finished.wait(5)  # Python's shutdown() alone waits forever for a serve_forever() never begun
+    server.httpd.server_close()
+    server.store.close()
+    server.maps.close()
+
+
+def test_a_service_that_wont_stop_is_ended(monkeypatch):
+    pytest.importorskip("win32serviceutil")
+    import win32serviceutil
+    from nomad.ipam import service
+    states = iter([service.STOPPING, service.STOPPING, service.STOPPED, service.STOPPED])
+    killed = []
+
+    def not_answering(name, waitSecs=0):
+        raise RuntimeError("(1053, 'ControlService', 'The service did not respond')")
+    monkeypatch.setattr(win32serviceutil, "StopServiceWithDeps", not_answering)
+    monkeypatch.setattr(service, "status", lambda spec=service.IPAM: next(states))
+    monkeypatch.setattr(service, "service_pid", lambda spec=service.IPAM: 4242)
+    monkeypatch.setattr(service.subprocess, "run", lambda arguments, **options: killed.append(arguments))
+    monkeypatch.setattr(service.time, "sleep", lambda seconds: None)
+    service.stop(force=True)
+    assert killed == [["taskkill", "/F", "/PID", "4242"]]
+    monkeypatch.setattr(service, "status", lambda spec=service.IPAM: service.STOPPING)
+    monkeypatch.setattr(service, "KILL_WAIT_SECONDS", 0)
+    with pytest.raises(service.ServiceError, match="won't stop.*process 4242"):
+        service.stop(force=True)
+
+
+def test_installing_one_service_stops_the_other_running_the_same_exe(monkeypatch):
+    pytest.importorskip("win32service")
+    import sys
+    import win32service
+    from nomad.ipam import service
+    from nomad.netmap import watch_service
+    watcher = watch_service.spec()
+    running = {service.IPAM.name: service.RUNNING, watcher.name: service.RUNNING}
+    calls = []
+
+    def stop(spec, force=False):
+        calls.append(("stop", spec.name, force))
+        running[spec.name] = service.STOPPED
+
+    def start(spec=service.IPAM):
+        calls.append(("start", spec.name))
+        running[spec.name] = service.RUNNING
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(service, "status", lambda spec=service.IPAM: running[spec.name])
+    monkeypatch.setattr(service, "stop", stop)
+    monkeypatch.setattr(service, "start", start)
+    monkeypatch.setattr(service, "_command", lambda argument: (calls.append(("copy",)) or ("NOMAD.exe", None)))
+    for name in ("OpenSCManager", "OpenService", "ChangeServiceConfig", "ChangeServiceConfig2", "CloseServiceHandle"):
+        monkeypatch.setattr(win32service, name, lambda *arguments: None)
+    service.register(service.IPAM)
+    assert calls == [("stop", service.IPAM.name, True), ("stop", watcher.name, True), ("copy",),
+                     ("start", watcher.name)]  # The IPAM server itself is started by install()
+
+
+def test_a_client_that_never_finishes_its_handshake_doesnt_stop_the_others(tmp_path, monkeypatch):
+    import socket
+    from nomad.ipam import server as server_module
+    monkeypatch.setattr(server_module, "HANDSHAKE_SECONDS", 2, raising=False)
+    server, thread = start(tmp_path / "server")
+    stuck = socket.create_connection(("127.0.0.1", server.port))  # Connects, then says nothing (asleep, a scan...)
+    synced = []
+
+    def sync():
+        laptop = team_store(server, tmp_path, "alice")
+        laptop.close()
+        synced.append(True)
+    try:
+        worker = threading.Thread(target=sync, daemon=True)
+        worker.start()
+        worker.join(8)
+        assert synced, "Another laptop couldn't sync while one connection sat in its TLS handshake"
+    finally:
+        stuck.close()
+        stop(server, thread)
+    assert not thread.is_alive()  # And it still stops

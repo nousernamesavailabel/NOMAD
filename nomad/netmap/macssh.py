@@ -365,7 +365,7 @@ class SshAsker:
             self.listener(address, ok, self.login_labels.get(address, ""), problem)
 
     def fail(self, address, problem):
-        log.info("MAC Finder: SSH to %s: %s", address, problem)
+        log.info("SSH to %s: %s", address, problem)
         self.problems[address] = problem
         shell = self.shells.get(address)
         if shell is not None:

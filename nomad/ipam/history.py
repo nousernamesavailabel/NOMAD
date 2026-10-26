@@ -19,7 +19,9 @@ FIELD_LABELS = {"name": "Name", "status": "Status", "mac": "MAC", "description":
                 "hostname": "Hostname", "serial": "Serial", "kind": "Kind", "model": "Model", "maker": "Maker",
                 "software": "Software", "mgmt_ip": "Management IP", "slot": "Slot", "location": "Location",
                 "asset_tag": "Asset tag", "owner": "Owner", "purchased": "Purchased", "warranty_end": "Warranty ends",
-                "eol": "End of life"}
+                "eol": "End of life",
+                # Software targets'
+                "target": "Target", "allowed": "Also allowed", "note": "Note"}
 # Addresses', VLANs' (vlans.STATUSES) and assets' (assets.STATUSES)
 SHOWN_STATUSES = dict(STATUSES, active="Active", planned="Planned", in_service="In service", spare="Spare",
                       repair="In repair (RMA)", replaced="Replaced", retired="Retired")
@@ -57,6 +59,8 @@ class Event:
             return f"VLAN {row.get('vlan', '')}" + (f" ({name})" if name else "")
         if self.entity == "vlan_domains":
             return f"VLAN domain {row.get('name', '')}"
+        if self.entity == "software_targets":
+            return f"Software target for {row.get('model', '')}"
         if self.entity == "assets":
             name = " ".join(part for part in (row.get("hostname"), row.get("slot")) if part)
             what = " ".join(part for part in (row.get("model"), row.get("serial")) if part)
@@ -115,6 +119,9 @@ def describe_row(entity, row):
         parts = [SHOWN_STATUSES.get(row.get("status"), row.get("status", ""))]
         parts += [row[name] for name in ("model", "serial", "software", "mgmt_ip", "location") if row.get(name)]
         return ", ".join(parts)
+    if entity == "software_targets":
+        text = row.get("target", "")
+        return text + (f", also {row['allowed']}" if row.get("allowed") else "")
     if entity == "vlans":
         parts = [SHOWN_STATUSES.get(row.get("status"), row.get("status", ""))]
         parts += [row["name"]] if row.get("name") else []

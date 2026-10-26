@@ -1162,6 +1162,7 @@ class NetworkMapTab(QWidget):
         dropped, folded, links_left_out = [], [], 0
         if self.network_map is not None:  # Devices and links added by hand, first: their places are kept below
             network_map.carry_deleted(self.network_map)
+            network_map.carry_ssh_hardware(self.network_map)  # What their SNMP doesn't say, read over SSH before
             folded, links_left_out = network_map.carry_manual(self.network_map)
         if self.live_positions:  # Where devices were drawn (and dragged) while it crawled
             network_map.positions = {key: position for key, position in self.live_positions.items()
@@ -1530,6 +1531,50 @@ class NetworkMapTab(QWidget):
         shown = self.tunnels_check.isChecked() and self.network_map is not None
         self.view.set_map_tunnels(self.tunnel_lines() if shown else [])
 
+    def apply_ssh_hardware(self, details):
+        """Put what network devices said over SSH (hostinfo.HostDetails with parts) on the map devices at their
+        addresses, and save. Returns how many were on the map."""
+        from ..ipam.asset_compare import map_device_at
+        from ..netmap.model import apply_ssh_hardware
+        if self.network_map is None:
+            return 0
+        applied = 0
+        for item in details:
+            device = map_device_at(self.network_map, item.address) if item.parts else None
+            if device is not None:
+                apply_ssh_hardware(device, item.parts, item.software, item.mac)
+                applied += 1
+        if applied:
+            self.map_changed()
+        return applied
+
+    def read_hardware_over_ssh(self, keys):
+        """Right-click > Tools > Read Hardware over SSH: the Assets page asks them (show inventory, show version)."""
+        page = getattr(self.window, "assets_tab", None)
+        if page is None or self.network_map is None:
+            return
+        from .. import hostinfo
+        addresses = [self.network_map.devices[key].mgmt_ip for key in keys
+                     if key in self.network_map.devices and self.network_map.devices[key].mgmt_ip]
+        page.read_details(addresses, hostinfo.NETWORK)
+
+    def show_software_overlay(self):
+        self.show_overlay(overlays.SOFTWARE)
+
+    def software_targets(self):
+        """The software targets of the asset list the Assets page shows (the tribe's or this computer's)."""
+        read = getattr(getattr(self.window, "assets_tab", None), "software_targets", None)
+        try:
+            return list(read() or []) if read is not None else []
+        except IpamError:
+            return []
+
+    def refresh_software_overlay(self):
+        """The software targets changed: show the Software Targets overlay again with them, if it's showing."""
+        if self.network_map is not None and self.overlay_shown is not None and \
+                self.overlay_shown[0] == overlays.SOFTWARE:
+            self.apply_vlan_focus()
+
     def tunnels_changed(self):
         """The VPNs page read routers: the map's tunnels (and the VPN Tunnels overlay) as it now has them."""
         if self.network_map is None:
@@ -1553,6 +1598,8 @@ class NetworkMapTab(QWidget):
         shown = self.overlay_shown
         if shown is not None and shown[0] == overlays.VPNS:  # The map's tunnels, as they are now
             shown = (overlays.VPNS, self.tunnel_lines())
+        if shown is not None and shown[0] == overlays.SOFTWARE:  # The Assets page's targets, as they are now
+            shown = (overlays.SOFTWARE, self.software_targets())
         overlay = overlays.build(network_map, *shown, rates=self.counters.rates,
                                  monitoring=self.monitor.running) if shown is not None else None
         if overlay is None:
@@ -1654,6 +1701,8 @@ class NetworkMapTab(QWidget):
             self.answered[address] = community
         apply_inventory(device, tables)
         reading["read"] += 1
+        if not any(part.get("serial") for part in hardware.chassis(device.parts)):
+            reading.setdefault("no_serial", []).append(device.label)
 
     def on_hardware_read_finished(self):
         thread = self.sender()
@@ -1668,7 +1717,12 @@ class NetworkMapTab(QWidget):
         if reading["failed"]:
             listed = ", ".join(reading["failed"][:5]) + ("..." if len(reading["failed"]) > 5 else "")
             text += f"; {len(reading['failed'])} didn't answer SNMP ({listed})"
-        set_hint(self.status_label, text + ".", "warning" if reading["failed"] else "success")
+        unsaid = reading.get("no_serial", [])
+        if unsaid:
+            listed = ", ".join(unsaid[:5]) + ("..." if len(unsaid) > 5 else "")
+            text += (f"; {len(unsaid)} gave no serial number over SNMP ({listed}): right-click > Tools > Read "
+                     "Hardware over SSH asks their command line")
+        set_hint(self.status_label, text + ".", "warning" if reading["failed"] or unsaid else "success")
         if reading["read"]:
             self.hardware_found.emit()
 
@@ -1810,6 +1864,12 @@ class NetworkMapTab(QWidget):
             action.setCheckable(True)
             action.setChecked(shown is not None and shown[0] == kind)
             action.setEnabled(usable)
+        action = menu.addAction("Software Targets", self.show_software_overlay)
+        action.setToolTip("Each device colored by whether it runs its model's software target (Assets > Software "
+                          "Targets): on it, behind it, ahead of it, or other software.")
+        action.setCheckable(True)
+        action.setChecked(shown is not None and shown[0] == overlays.SOFTWARE)
+        action.setEnabled(usable)
         action = menu.addAction("VPN Tunnels", lambda: self.show_overlay(overlays.VPNS))
         action.setToolTip("The tunnels between this map's routers, colored by whether they're up: found by the crawl "
                           "over SNMP, and by the VPNs page when it has read them.")
@@ -2579,6 +2639,15 @@ class NetworkMapTab(QWidget):
                           and action.text() == "Tools"), menu)
             label = "Read Hardware Again" if len(readable) == 1 else f"Read Hardware of {len(readable)} Again"
             actions[tools.addAction(label)] = lambda: self.read_hardware_again(readable)
+        by_ssh = [item for item in (here_keys if key in here_keys else [key])
+                  if self.network_map is not None and item in self.network_map.devices
+                  and self.network_map.devices[item].mgmt_ip
+                  and self.network_map.devices[item].kind in (SWITCH, ROUTER, FIREWALL)]
+        if by_ssh and hasattr(self.window, "assets_tab"):  # Also for ones that don't answer SNMP at all
+            tools = next((action.menu() for action in menu.actions() if action.menu() is not None
+                          and action.text() == "Tools"), menu)
+            label = "Read Hardware over SSH..." if len(by_ssh) == 1 else f"Read Hardware of {len(by_ssh)} over SSH..."
+            actions[tools.addAction(label)] = lambda: self.read_hardware_over_ssh(by_ssh)
         if self.worker is None:
             actions[menu.addAction("Put at the Top")] = lambda: self.put_at_top(key)
         if self.current_view() is self.view and self.worker is None:
@@ -3765,6 +3834,8 @@ class NetworkMapTab(QWidget):
                 place[key] = (position.x() + 40 * (1 + len(place)), position.y() + 140)
         self.map_changed(place=place)
         self.log_ipam_news(result)
+        if result.hardware or result.devices:
+            self.hardware_found.emit()  # The Assets page brings in what changed
         if result:
             self.window.show_status("Watch: " + "; ".join(result.lines[:3])
                                     + (f" (and {len(result.lines) - 3} more)" if len(result.lines) > 3 else ""))

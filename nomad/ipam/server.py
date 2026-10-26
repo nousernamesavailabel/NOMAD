@@ -24,6 +24,7 @@ add_vlan_domain, update_vlan_domain, delete_vlan_domain, set_vlan, delete_vlan a
 Subnet placement (API 8; see placement.py): set_placement, plan_move, update_move and complete_move; set_role (API 9).
 Moving subnets between networks (API 10; see network_move.py): move_subnet, and take_subnets (from a laptop's own).
 Assets (API 11; see assets.py): set_asset, set_assets (several at once) and delete_asset.
+Software targets (API 12; see targets.py): set_target and delete_target.
 
 A server moved to another computer (see migrate.py) answers every request with HTTP 410 and {"hosts", "port"}: the
 new server's address, which laptops switch to by themselves.
@@ -64,6 +65,7 @@ from ..system import replace_file
 from ..netmap.shared import MapError, MapStore
 from .store import IpamError, IpamStore
 from .assets import AssetStore, label as asset_label
+from .targets import TargetStore
 from .placement import PlacementStore
 from .vlans import VlanStore, check_number
 
@@ -79,8 +81,12 @@ TEAM, ADMIN = "team", "admin"
 ADMIN_ONLY_ACTIONS = {"add_network", "delete_network"}
 CERTIFICATE_YEARS = 20
 MAX_WAIT_SECONDS = 55
-API_LEVEL = 11  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
-# 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks, 11 assets.
+STOP_WAIT_SECONDS = 10  # How long stop() waits for the listener to close
+HANDSHAKE_SECONDS = 15  # A connection that hasn't finished its TLS handshake by then is dropped
+IDLE_SECONDS = MAX_WAIT_SECONDS + 30  # A connection that sends nothing for this long is closed (past /api/wait's)
+API_LEVEL = 12  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
+# 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks, 11 assets,
+# 12 software targets.
 # Clients cope with servers below this
 
 
@@ -127,10 +133,19 @@ def save_config(config, directory=None):
 def set_up(directory=None, port=DEFAULT_PORT):
     """Create the server's folder, secrets and certificate if they don't exist yet; returns the config.
 
-    Running it again keeps what's there, so reinstalling the service doesn't lock out any laptops.
+    Running it again keeps what's there, so reinstalling the service doesn't lock out any laptops. A folder with the
+    tribe's data but without its settings or certificate (deleted, or not all moved back) raises IpamError rather
+    than get new ones: they'd make it another server, whose tribe key no laptop has.
     """
     directory = Path(directory or server_dir())
     directory.mkdir(parents=True, exist_ok=True)
+    data = [name for name in DATA_FILES if (directory / name).exists()]
+    identity = [name for name in IDENTITY_FILES if not (directory / name).exists()]
+    if data and identity:
+        raise IpamError(f"{directory} has the tribe's data ({', '.join(data)}) but not {', '.join(identity)}. New "
+                        "ones would make it another server, whose tribe key no laptop has: put them back from a "
+                        "backup or a server-before-move folder beside it (or move the folder aside to start a "
+                        "new server).")
     try:
         config = load_config(directory)
     except FileNotFoundError:
@@ -142,6 +157,10 @@ def set_up(directory=None, port=DEFAULT_PORT):
     if not (directory / "cert.pem").exists() or not (directory / "key.pem").exists():
         create_certificate(directory)
     return config
+
+
+DATA_FILES = ("ipam.db", "maps.db")  # The tribe's data: a folder with them is a server already
+IDENTITY_FILES = ("config.json", "cert.pem", "key.pem")  # What makes it that server (its id, secrets, fingerprint)
 
 
 def create_certificate(directory):
@@ -236,15 +255,13 @@ class IpamServer:
         context.load_cert_chain(self.directory / "cert.pem", self.directory / "key.pem")
         handler = type("Handler", (_Handler,), {"server_app": self})
         try:
-            self.httpd = http.server.ThreadingHTTPServer((host, self.port), handler)
+            self.httpd = _TlsServer((host, self.port), handler, context)
         except OSError as error:
             self.store.close()
             self.maps.close()
             raise OSError(f"Couldn't listen on port {self.port}: {error.strerror or error}. Another program may be "
                           f"using it (see which with: netstat -ano | findstr :{self.port}).") from error
-        self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]  # The actual port, when asked for any free one (0)
-        self.httpd.socket = context.wrap_socket(self.httpd.socket, server_side=True)
         self.backup_thread = threading.Thread(target=self._backups, name="IPAM backups", daemon=True)
         self.backup_lock = threading.Lock()  # One backup at a time (the nightly one and any asked for)
 
@@ -270,7 +287,10 @@ class IpamServer:
         self.stop_event.set()
         with self.changed:
             self.changed.notify_all()  # Let waiting requests finish
-        self.httpd.shutdown()
+        # shutdown() waits for serve() to finish, forever if it never started (or died starting): wait a while only
+        stopper = threading.Thread(target=self.httpd.shutdown, name="IPAM server stop", daemon=True)
+        stopper.start()
+        stopper.join(STOP_WAIT_SECONDS)
 
     def announce(self, revision=None, sightings=None, maps=None):
         """Tell every waiting laptop there's a new revision (or new sightings, or a map changed)."""
@@ -644,6 +664,28 @@ class IpamServer:
         self._check_asset(request["asset_id"], request.get("expected_version", -1))
         AssetStore(self.store).delete_asset(request["asset_id"])
 
+    # ----------------------------------------------------------------- Software targets
+
+    def _edit_set_target(self, request):
+        target_id, expected = request.get("target_id"), request.get("expected_version")
+        targets = TargetStore(self.store)
+        if target_id and expected is not None:
+            self._check_version("software_targets", target_id, expected, "software target")
+        elif target_id and targets.target(target_id) is not None:
+            raise ConflictError("That software target was just set by someone else. Check it again, then make your "
+                                "change.")
+        values = request.get("values") or {}
+        same = targets.by_model(values.get("model", ""))
+        if same is not None and same.id != target_id:
+            raise ConflictError(f"{same.modified_by} set a target for {same.model} ({same.target}) "
+                                f"{same.modified[:16].replace('T', ' ')} UTC: change that one.")
+        targets.set_target(target_id, **values)
+
+    def _edit_delete_target(self, request):
+        self._check_version("software_targets", request["target_id"], request.get("expected_version", -1),
+                            "software target")
+        TargetStore(self.store).delete_target(request["target_id"])
+
     # ----------------------------------------------------------------- Backups
 
     def backup_now(self):
@@ -688,6 +730,39 @@ class IpamServer:
                 except (OSError, sqlite3.Error) as error:
                     log.error("Backup failed: %s", error)
             self.stop_event.wait(BACKUP_CHECK_SECONDS)
+
+
+class _TlsServer(http.server.ThreadingHTTPServer):
+    """HTTPS with each connection's TLS handshake made on its own thread, with a time limit. (Wrapping the
+    listening socket makes accept() make it, on the one thread that accepts: a single client that connects and never
+    finishes its handshake, a laptop going to sleep or a port scan, stops the server taking anyone else, and Windows
+    then refuses every connection, until the service is ended: it can't even stop.)"""
+    daemon_threads = True
+
+    def __init__(self, address, handler, context):
+        self.context = context
+        super().__init__(address, handler)
+
+    def get_request(self):
+        connection, address = self.socket.accept()
+        connection.settimeout(HANDSHAKE_SECONDS)
+        return connection, address
+
+    def finish_request(self, request, client_address):
+        """On the connection's own thread: the handshake, then the request."""
+        try:
+            connection = self.context.wrap_socket(request, server_side=True)
+        except OSError as error:  # Timed out, not TLS, or the certificate refused (ssl.SSLError is an OSError)
+            log.debug("TLS handshake with %s failed: %s", client_address[0], error)
+            return
+        try:
+            connection.settimeout(IDLE_SECONDS)
+            super().finish_request(connection, client_address)
+        finally:
+            connection.close()
+
+    def handle_error(self, request, client_address):
+        log.debug("Request from %s failed", client_address[0], exc_info=True)
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):

@@ -28,6 +28,8 @@ FIREWALL_RULE = "NOMAD IPAM Server"
 SERVICE_ARGUMENT = "--ipam-service"
 NETWORK_SERVICE = r"NT AUTHORITY\NetworkService"
 START_WAIT_SECONDS = 20
+KILL_WAIT_SECONDS = 10  # After ending a service's process that wouldn't stop, for Windows to see it stopped
+COPY_TRIES = 40  # 250 ms apart: the exe can stay locked a moment after its process ends
 NOT_INSTALLED, STOPPED, STARTING, RUNNING, STOPPING = "Not installed", "Stopped", "Starting", "Running", "Stopping"
 # icacls grants by SID, so they work in any Windows language: SYSTEM, Administrators, Network Service
 FOLDER_GRANTS = ["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-20:(OI)(CI)M"]
@@ -97,10 +99,21 @@ def _service_class():
                 log.exception("The IPAM server couldn't start")
                 servicemanager.LogErrorMsg(f"{DISPLAY_NAME} couldn't start: {error}")
                 return
-            thread = threading.Thread(target=self.server.serve, name="IPAM server", daemon=True)
+            thread = threading.Thread(target=self.serve, name="IPAM server", daemon=True)
             thread.start()
-            win32event.WaitForSingleObject(self.stopped, win32event.INFINITE)
+            while win32event.WaitForSingleObject(self.stopped, 2000) == win32event.WAIT_TIMEOUT:
+                if not thread.is_alive():  # It stopped serving by itself: end, so Windows starts it again
+                    servicemanager.LogErrorMsg(f"{DISPLAY_NAME} stopped serving by itself (see server.log)")
+                    logging.shutdown()
+                    os._exit(1)
             thread.join(15)
+
+        def serve(self):
+            try:
+                self.server.serve()
+            except Exception:
+                log.exception("The IPAM server stopped serving")
+                raise
 
     return IpamService
 
@@ -134,11 +147,30 @@ def _command(argument=SERVICE_ARGUMENT):
         target = install_dir() / "NOMAD.exe"
         target.parent.mkdir(parents=True, exist_ok=True)
         if Path(sys.executable).resolve() != target.resolve():
-            shutil.copy2(sys.executable, target)
+            _copy_exe(Path(sys.executable), target)
         return f'"{target}" {argument}', NETWORK_SERVICE
     python = Path(sys.executable).with_name("python.exe")
     main = Path(__file__).resolve().parents[2] / "Main.py"
     return f'"{python}" "{main}" {argument}', None  # None: Local System
+
+
+def _copy_exe(source, target):
+    for attempt in range(COPY_TRIES):
+        try:
+            shutil.copy2(source, target)
+            return
+        except PermissionError as error:
+            if attempt == COPY_TRIES - 1:
+                raise ServiceError(f"Couldn't update {target}: {error.strerror or error}. A NOMAD service (or "
+                                   "NOMAD itself, started from there) is still running it: stop it, or end that "
+                                   "NOMAD.exe in Task Manager (Details tab), and try again.") from None
+            time.sleep(0.25)
+
+
+def shared_exe_specs():
+    """The services that run the same copy of NOMAD.exe in Program Files: the IPAM server and the Map Watcher."""
+    from ..netmap.watch_service import spec as watcher_spec
+    return [IPAM, watcher_spec()]
 
 
 def secure_folder(directory, grants=FOLDER_GRANTS):
@@ -166,10 +198,16 @@ def close_firewall(rule=FIREWALL_RULE):
 
 def register(spec):
     """Create the service (or point it at this copy of NOMAD again), starting with Windows and restarting if it
-    fails. Returns the command line."""
+    fails. Returns the command line. The other NOMAD service running the same exe is stopped while it's replaced,
+    and started again after."""
     import win32service
-    if status(spec) in (RUNNING, STARTING):
-        stop(spec)  # So the exe can be replaced
+    others = []
+    if getattr(sys, "frozen", False):
+        others = [other for other in shared_exe_specs() if other.name != spec.name and status(other) in (
+            RUNNING, STARTING, STOPPING)]
+    for item in [spec] + others:
+        if status(item) in (RUNNING, STARTING, STOPPING):
+            stop(item, force=True)  # So the exe can be replaced
     command, account = _command(spec.argument)
     manager = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_ALL_ACCESS)
     try:
@@ -195,6 +233,11 @@ def register(spec):
     finally:
         win32service.CloseServiceHandle(manager)
     log.info("Installed the %s service: %s", spec.display_name, command)
+    for other in others:
+        try:
+            start(other)
+        except Exception as error:  # Its own problem: this service is installed all the same
+            log.warning("Couldn't start the %s service again: %s", other.display_name, error)
     return command
 
 
@@ -228,17 +271,50 @@ def start(spec=IPAM):
     raise ServiceError(f"The service didn't start. {last_log_error(spec)}")
 
 
-def stop(spec=IPAM):
+def stop(spec=IPAM, force=False):
+    """Stop the service. force: if it doesn't stop (Windows' error 1053: it isn't answering), end its process, and
+    raise ServiceError if even that doesn't stop it."""
     import win32serviceutil
     try:
         win32serviceutil.StopServiceWithDeps(spec.name, waitSecs=START_WAIT_SECONDS)
-    except Exception as error:  # Already stopped, or it doesn't exist
+    except Exception as error:  # Already stopped, or it doesn't exist, or it isn't answering
         log.info("Stopping the service: %s", error)
+    if not force or status(spec) in (STOPPED, NOT_INSTALLED):
+        return
+    pid = service_pid(spec)
+    if pid:
+        log.warning("The %s service didn't stop: ending its process (%s)", spec.display_name, pid)
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, creationflags=_hidden())
+    deadline = time.monotonic() + KILL_WAIT_SECONDS
+    while time.monotonic() < deadline and status(spec) not in (STOPPED, NOT_INSTALLED):
+        time.sleep(0.25)
+    if status(spec) not in (STOPPED, NOT_INSTALLED):
+        raise ServiceError(f"The {spec.display_name} service won't stop. End its NOMAD.exe in Task Manager (Details "
+                           f"tab; the one run by NETWORK SERVICE, process {pid or '?'}) and try again.")
+
+
+def service_pid(spec=IPAM):
+    """The process ID of the running service, or 0."""
+    import win32service
+    try:
+        manager = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+    except win32service.error:
+        return 0
+    try:
+        handle = win32service.OpenService(manager, spec.name, win32service.SERVICE_QUERY_STATUS)
+        try:
+            return int(win32service.QueryServiceStatusEx(handle).get("ProcessId") or 0)
+        finally:
+            win32service.CloseServiceHandle(handle)
+    except win32service.error:
+        return 0
+    finally:
+        win32service.CloseServiceHandle(manager)
 
 
 def remove(spec):
     import win32serviceutil
-    stop(spec)
+    stop(spec, force=True)
     win32serviceutil.RemoveService(spec.name)
 
 

@@ -125,6 +125,7 @@ class Device:
     inventory_read: bool = False
     serial: str = ""
     mac: str = ""
+    inventory_source: str = ""  # SSH_READ when its parts were read at its command line (show inventory), not SNMP
 
     @property
     def label(self):
@@ -281,6 +282,7 @@ class NetworkMap:
             if old is None or device.source == SNMP or (old.source != SNMP and device.source != NEIGHBOR):
                 if old is not None and old.corrected and not device.corrected:  # Corrected by hand: still is
                     device.apply_corrections(old.corrections())
+                keep_ssh_hardware(device, old)
                 self.devices[key] = device
         for link in newer.links:
             self.add_link(Link(link.a, link.a_port, link.b, link.b_port, list(link.protocols)))
@@ -350,6 +352,12 @@ class NetworkMap:
         """Forget that devices were deleted, so the next crawl puts them back on the map."""
         for key in keys:
             self.deleted.pop(key, None)
+
+    def carry_ssh_hardware(self, older):
+        """Keep the hardware an earlier map of the network read at its devices' command lines (show inventory), for
+        the devices whose SNMP doesn't say."""
+        for key, device in self.devices.items():
+            keep_ssh_hardware(device, older.devices.get(key))
 
     def carry_deleted(self, older):
         """Keep an earlier map's deleted devices off this one too (the crawl was told to leave them out). One the
@@ -631,6 +639,34 @@ def _build(cls, data):
 def port_sort_key(name):
     """Gi1/0/2 before Gi1/0/10."""
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name or "")]
+
+
+SSH_READ = "ssh"  # Device.inventory_source: its hardware was read over SSH
+
+
+def has_chassis(parts):
+    return any(part.get("class") == "chassis" for part in parts)
+
+
+def keep_ssh_hardware(device, older):
+    """A device read again whose SNMP said nothing of its hardware: what was read at its command line before stays
+    (until its SNMP says, or it's read over SSH again)."""
+    if older is None or older.inventory_source != SSH_READ or has_chassis(device.parts):
+        return
+    device.parts = [dict(part) for part in older.parts]
+    device.inventory_read, device.inventory_source = True, SSH_READ
+    device.mac = device.mac or older.mac
+    device.software = device.software or older.software
+
+
+def apply_ssh_hardware(device, parts, software="", mac=""):
+    """Put hardware read at a device's command line (netmap.inventory_ssh) on it."""
+    device.parts = [dict(part) for part in parts]
+    device.inventory_read, device.inventory_source = True, SSH_READ
+    members = [part for part in parts if part.get("class") == "chassis"]
+    own = members[0].get("mac", "") if len(members) == 1 else ""
+    device.mac = mac or own or device.mac
+    device.software = software or device.software
 
 
 def normalize_vtp_domain(domain):

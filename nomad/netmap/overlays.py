@@ -1,6 +1,6 @@
 """Overlays on the network map's physical view, beside Highlight VLAN: what one failure would cut off (and the
-single points of failure), links whose two ends are set up differently, a VRF, a subnet, and coloring devices by
-what they run or where they are.
+single points of failure), links whose two ends are set up differently, a VRF, a subnet, coloring devices by what
+they run or where they are, and whether they run their model's software target (the Assets page's).
 
 Each is an Overlay worked out from the map alone: marks for devices (by key) and links (by id(Link), as the view
 draws the map's own Link objects), the rest fading when it fades, and a legend.
@@ -17,6 +17,7 @@ from .model import AP, FIREWALL, KIND_NAMES, NETWORK_KINDS, ROUTER, SOURCE_NAMES
 IMPACT, SPOF, TRUNKS, VRF, SUBNET, COLOR = "impact", "spof", "trunks", "vrf", "subnet", "color"
 SPEED, STP, UTIL = "speed", "stp", "util"  # From what's read over SNMP: ports' status, a VLAN's tree, counters
 VPNS = "vpns"  # The tunnels between the map's routers: the crawl's, and the VPNs page's
+SOFTWARE = "software"  # Each device against its model's software target (ipam.targets)
 # How a link's drawn
 SOLID, DASH, DOT = "solid", "dash", "dot"
 # Color By: what devices can be colored by, and what each is called
@@ -451,7 +452,10 @@ def subnet(network_map, text):
 # ----------------------------------------------------------------- Color By
 
 def software_version(device):
-    """The software version in a device's description (sysDescr), or ""."""
+    """The software version a device runs: as its crawl read it, else the one in its description (sysDescr), or
+    ""."""
+    if getattr(device, "software", ""):
+        return device.software
     for pattern in VERSION_PATTERNS:
         match = pattern.search(device.sys_descr or "")
         if match:
@@ -503,6 +507,67 @@ def color_by(network_map, attribute):
         overlay.legend.append((OTHER, f"{NONE_TEXT} ({unknown})"))
     overlay.summary.append(f"{count_text(len(counts), 'value')} across {count_text(len(values), 'device')}"
                            if counts else f"not known for any device{' (read over SNMP)' if values else ''}")
+    return overlay
+
+
+# ----------------------------------------------------------------- Software targets
+
+SOFTWARE_COLORS = {"on target": "success", "behind": "warning", "ahead": "link", "other": "#c792ea",
+                   "no software": OTHER, "no target": OTHER}
+# Which state a device shows when its stack members' differ: the one most worth seeing
+SOFTWARE_ORDER = ["behind", "other", "ahead", "no software", "on target", "no target"]
+
+
+def device_models(device):
+    """The models a device is: its chassis' (a stack's members'), else its platform."""
+    from .hardware import chassis
+    models = [part.get("model") for part in chassis(device.parts) if part.get("model")]
+    return list(dict.fromkeys(models)) or ([device.platform] if device.platform else [])
+
+
+def software_state(device, targets):
+    """(state, target) of a device against its models' software targets (ipam.targets' states), the stack member
+    most worth seeing when they differ."""
+    from ..ipam.targets import NO_TARGET, state_of, target_for
+    found = [(state_of(device.software, target), target)
+             for target in (target_for(targets, model) for model in device_models(device))]
+    if not found:
+        return NO_TARGET, None
+    return min(found, key=lambda pair: SOFTWARE_ORDER.index(pair[0]))
+
+
+def software_targets(network_map, targets):
+    """Color each device by whether it runs its model's software target: on it, behind it, ahead of it, other
+    software (another train), or no target (or software not known). targets: SoftwareTargets."""
+    from ..ipam.targets import BEHIND, NO_SOFTWARE, NO_TARGET, OTHER as OTHER_SOFTWARE, STATE_NAMES
+    overlay = Overlay(SOFTWARE, "Software targets", fade=False)
+    tally = {}
+    for key, device in network_map.devices.items():
+        if device.kind not in NETWORK_KINDS and not device.software:
+            continue
+        state, target = software_state(device, targets)
+        tally[state] = tally.get(state, 0) + 1
+        if target is None:
+            note = f"No software target for {', '.join(device_models(device)) or 'its model'}"
+        elif state == NO_SOFTWARE:
+            note = f"Software not known (the target for {target.model} is {target.target})"
+        else:
+            note = f"Runs {device.software}: {STATE_NAMES[state].lower()} (the target for {target.model} is " \
+                   f"{target.target})"
+        overlay.devices[key] = Mark(SOFTWARE_COLORS[state], note)
+    for state in SOFTWARE_ORDER:
+        if tally.get(state):
+            overlay.legend.append((SOFTWARE_COLORS[state], f"{STATE_NAMES[state]} ({tally[state]})"))
+    if not targets:
+        overlay.summary.append("no software targets set yet (Assets > Software Targets...)")
+        return overlay
+    with_target = sum(count for state, count in tally.items() if state != NO_TARGET)
+    off = tally.get(BEHIND, 0) + tally.get(OTHER_SOFTWARE, 0)
+    overlay.summary.append(f"{tally.get('on target', 0)} of {count_text(with_target, 'device')} with a target on it")
+    if tally.get(BEHIND):
+        overlay.summary.append(f"{tally[BEHIND]} behind")
+    if off:
+        overlay.tone = "warning"
     return overlay
 
 
@@ -767,6 +832,8 @@ def build(network_map, kind, argument=None, rates=None, monitoring=False):
             return link_speed(network_map)
         if kind == VPNS:
             return vpn_tunnels(network_map, argument or [])
+        if kind == SOFTWARE:
+            return software_targets(network_map, argument or [])
         if kind == STP:
             vlan, views, unread = argument
             return spanning_tree(network_map, vlan, views, unread)
