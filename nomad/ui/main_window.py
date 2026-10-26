@@ -22,6 +22,7 @@ from .dialogs import AboutDialog, LogDialog, WhatsNewDialog
 from .dns_servers_tab import DnsServersTab
 from .iperf_tab import IperfTab
 from .integration import Integration
+from .assets_tab import AssetsTab
 from .inventory_tab import InventoryTab
 from .ipam_tab import IpamTab
 from .ip_menu import IpContextMenus
@@ -211,6 +212,7 @@ class MainWindow(QMainWindow):
         self.ipam_tab = IpamTab(self)
         self.vlan_tab = VlanTab(self)  # Uses the IP Addresses page's databases and sync
         self.placement_tab = PlacementTab(self)  # Those and the Network Map's
+        self.assets_tab = AssetsTab(self)  # Those, and the Network Map's hardware
         self.integration.connect_pages()
         sections = [
             ("This Computer", [(self.adapter_tab, "Interfaces"), (self.routing_tab, "Routing Table"),
@@ -229,7 +231,7 @@ class MainWindow(QMainWindow):
             ("Network Management", [(self.netmap_tab, "Network Map"), (self.ipam_tab, "IP Addresses"),
                 (self.vlan_tab, "VLANs"), (self.placement_tab, "Subnet Placement"),
                 (self.snmp_config_tab, "SNMP Config"), (self.acl_tab, "ACLs & Route Maps"), (self.vpn_tab, "VPNs"),
-                (self.inventory_tab, "Ansible Inventory")]),
+                (self.assets_tab, "Assets"), (self.inventory_tab, "Ansible Inventory")]),
             ("Capture & Logs", [(self.capture_tab, "Packet Capture"), (self.mirror_tab, "Port Mirroring"),
                                 (self.syslog_tab, "Syslog")]),
             ("Utilities", [(self.subnet_tab, "Subnet Calculator")]),

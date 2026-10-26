@@ -35,6 +35,7 @@ from ..system import app_data_dir, log_dir
 from .server import ADMIN, KEY_FILE_FORMAT, TEAM, ConflictError, fingerprint, fingerprint_of_file, load_config, \
     server_dir
 from .store import TABLES, IpamError, IpamStore, current_user, ip_key, parse_address
+from .assets import ASSET_PENDING_SCHEMA, keep_pending_on_top as keep_asset_pending_on_top
 from .vlans import VLAN_PENDING_SCHEMA, keep_pending_on_top as keep_vlan_pending_on_top
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ VLAN_API = 7  # The server API level that keeps VLANs
 PLACEMENT_API = 8  # And subnet placement
 ROLES_API = 9  # And subnet roles
 MOVE_API = 10  # And moving subnets between networks
+ASSET_API = 11  # And assets
 
 
 class ServerUnreachable(IpamError):
@@ -115,20 +117,58 @@ def read_key_file(path):
 
 def admin_key(directory=None):
     """The key for managing the server from the server itself, or None if this isn't the server (or NOMAD isn't
-    running as administrator, which reading the server's folder needs)."""
+    running as administrator, which reading the server's folder needs). None too once the server has been moved to
+    another computer: this one only points laptops there now."""
     directory = Path(directory or server_dir())
     try:
         config = load_config(directory)
+        if config.get("moved"):
+            return None
         return TeamKey(config["server_id"], ["127.0.0.1"], int(config["port"]),
                        fingerprint_of_file(directory / "cert.pem"), config["admin_secret"], ADMIN)
     except (OSError, KeyError, ValueError):
         return None
 
 
+def moved_server_key(directory=None):
+    """On a tribe server moved to another computer (see migrate.py): the tribe key for the new one (the same server,
+    certificate and secret at its new address), or None if it wasn't moved or no address was given."""
+    directory = Path(directory or server_dir())
+    try:
+        config = load_config(directory)
+        moved = config.get("moved") or {}
+        if not moved.get("hosts"):
+            return None
+        return TeamKey(config["server_id"], [str(host) for host in moved["hosts"]],
+                       int(moved.get("port") or config["port"]), fingerprint_of_file(directory / "cert.pem"),
+                       config["team_secret"])
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def adopt_moved_key(directory=None, path=None):
+    """This computer's tribe server was moved to another computer: carry on as a member of the tribe, saving the new
+    server's key as this computer's tribe key (unless it already has one). Returns the key saved, or None."""
+    if load_saved_key(path) is not None:
+        return None
+    key = moved_server_key(directory)
+    if key is not None:
+        save_key(key, path)
+        log.info("This computer's tribe server moved to %s: saved its key to carry on in the tribe",
+                 ", ".join(key.hosts))
+    return key
+
+
 def current_key(admin=False):
     """The tribe key NOMAD uses on this computer: on the tribe server itself (NOMAD running as administrator), the
-    server's own admin key; otherwise the saved tribe key, or None."""
-    return (admin_key() if admin else None) or load_saved_key()
+    server's own admin key; otherwise the saved tribe key, or None. On a server moved away, the new one's key is
+    saved first (adopt_moved_key)."""
+    if admin:
+        key = admin_key()
+        if key is not None:
+            return key
+        adopt_moved_key()
+    return load_saved_key()
 
 
 def is_tribe_server():
@@ -393,6 +433,7 @@ class TeamStore:
         self.copy.db.executescript(HISTORY_SCHEMA)
         self.copy.db.executescript(SIGHTINGS_OUT_SCHEMA)
         self.copy.db.executescript(VLAN_PENDING_SCHEMA)
+        self.copy.db.executescript(ASSET_PENDING_SCHEMA)
         if self.copy.get_meta("server_id") not in ("", key.server_id):
             self.reset_copy()
         if self.copy.get_meta("synced_tables") != ",".join(TABLES):
@@ -418,7 +459,7 @@ class TeamStore:
         with self.copy.transaction():
             for table in ("networks", "subnets", "addresses", "changes", "pending", "history", "sightings", "sweeps",
                           "sightings_out", "vlan_domains", "vlans", "vlan_pending", "placements", "subnet_moves",
-                          "subnet_roles"):
+                          "subnet_roles", "assets", "asset_pending"):
                 self.copy.db.execute(f"DELETE FROM {table}")
             self.copy.set_meta("revision", 0)
             self.copy.set_meta("sighting_revision", 0)
@@ -458,6 +499,7 @@ class TeamStore:
         self.copy.apply_rows(items)
         self._keep_pending_on_top(items)
         keep_vlan_pending_on_top(self.copy, items)
+        keep_asset_pending_on_top(self.copy, items)
         with self.copy.transaction():
             self.copy.set_meta("revision", revision)
             self.copy.set_meta("server_id", self.key.server_id)
@@ -487,6 +529,11 @@ class TeamStore:
     def server_moves_subnets(self):
         """Whether the server is new enough to move subnets between networks (assumed so before the first sync)."""
         return self.server_api == 0 or self.server_api >= MOVE_API
+
+    @property
+    def server_keeps_assets(self):
+        """Whether the server is new enough to keep assets (assumed so before the first sync)."""
+        return self.server_api == 0 or self.server_api >= ASSET_API
 
     @property
     def server_keeps_vlans(self):

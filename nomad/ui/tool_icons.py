@@ -82,6 +82,8 @@ TOOL_ART = {
                          '<path d="M9 9h6M9 13h6M9 17h3"/>',
     "VPNs": '<rect x="3" y="11" width="18" height="11" rx="2"/>'
             '<path d="M7 11V7a5 5 0 0 1 10 0v4 M2 16h4m12 0h4 M9 16h6"/>',
+    "Assets": '<rect x="2" y="7" width="20" height="13" rx="2"/>'
+              '<path d="M8 7V4h8v3 M2 12h20 M10 12v3h4v-3"/>',
     "Ansible Inventory": '<rect x="4" y="3" width="16" height="19" rx="2"/>'
                          '<path d="M9 3V1h6v2 M8 9h1m3 0h4 M8 13h1m3 0h4 M8 17h1m3 0h4"/>',
     "Packet Capture": '<path d="M2 7h20M5 7l3 13h8l3-13 M12 2v12m-3-3 3 3 3-3"/>',

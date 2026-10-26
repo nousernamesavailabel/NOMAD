@@ -116,6 +116,15 @@ class Device:
     tunnels: dict = field(default_factory=dict)
     ike_sessions: list = field(default_factory=list)
     ike_read: bool = False
+    # Its hardware and software, as last read (netmap.hardware): the version it runs, its chassis (one per stack
+    # member) and parts from ENTITY-MIB ([{"class", "model", "serial", "mac", ...}]), whether those were asked for,
+    # and the serial number a neighbor's CDP gave in its name, for a device that wasn't read; and its base MAC (its
+    # LLDP chassis ID or bridge address, or for a device that wasn't read the LLDP chassis ID its neighbor saw)
+    software: str = ""
+    parts: list = field(default_factory=list)
+    inventory_read: bool = False
+    serial: str = ""
+    mac: str = ""
 
     @property
     def label(self):
@@ -190,6 +199,8 @@ class Host:
     platform: str = ""
     manual: bool = False  # Added by hand (a device that's off or unplugged while mapping), kept when mapping again
     note: str = ""
+    software: str = ""  # What it runs, as its CDP (or LLDP-MED) said: a phone's firmware
+    serial: str = ""  # Its serial number, from LLDP-MED
 
     def same_as(self, other):
         """The same machine: by MAC, or by IP when either has no MAC."""
@@ -420,7 +431,7 @@ class NetworkMap:
         a crawled one between the same two devices. A found device in new (just added to the map) takes key's
         place rather than where the crawl drew it."""
         old = self.devices[key]
-        for attribute in ("name", "mgmt_ip", "platform", "note"):
+        for attribute in ("name", "mgmt_ip", "platform", "note", "software", "serial", "mac"):
             if not getattr(found, attribute):
                 setattr(found, attribute, getattr(old, attribute))
         if found.kind == UNKNOWN:

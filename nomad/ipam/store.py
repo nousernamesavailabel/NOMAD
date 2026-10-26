@@ -12,7 +12,8 @@ sequence numbers (sightings_since).
 
 VLANs are kept here too (vlan_domains and vlans, see vlans.py), beside the networks rather than in them: they use
 the same change log, sync and backups, but nothing about a network, subnet or address changes when VLANs do. A VLAN
-names the subnets it carries by CIDR, in its domain's network.
+names the subnets it carries by CIDR, in its domain's network. So are assets (the hardware on the network, see
+assets.py): one row per chassis, phone, server or part, unique by serial number.
 
 Rows are never removed: deleting marks them deleted (a tombstone) and every change bumps the row's version and is
 written to the change log. On the NOMAD server, the change log's sequence numbers are the revisions clients sync by
@@ -35,16 +36,18 @@ from ..system import app_data_dir
 log = logging.getLogger(__name__)
 
 FILE_NAME = "ipam.db"
-SCHEMA_VERSION = 5  # 2 added subnets.loopbacks, 3 the VLAN tables, 4 subnet placement (overrides and moves),
-# 5 subnet roles
+SCHEMA_VERSION = 6  # 2 added subnets.loopbacks, 3 the VLAN tables, 4 subnet placement (overrides and moves),
+# 5 subnet roles, 6 assets
 USED, RESERVED = "used", "reserved"
 ANYWHERE, VALUE, NAME, DESCRIPTION, MAC = "anywhere", "value", "name", "description", "mac"  # Where search looks
 STATUSES = {USED: "Used", RESERVED: "Reserved"}
 MAX_NEXT_FREE_SCAN = 1 << 20  # Stop looking for a free address after this many (a /12's worth)
-TABLES = ("networks", "subnets", "addresses", "vlan_domains", "vlans", "placements", "subnet_moves", "subnet_roles")
+TABLES = ("networks", "subnets", "addresses", "vlan_domains", "vlans", "placements", "subnet_moves", "subnet_roles",
+          "assets")
 # Unique by sort_key within
 PARENTS = {"subnets": "network_id", "addresses": "network_id", "vlans": "domain_id", "placements": "network_id",
            "subnet_roles": "network_id"}
+UNIQUE_KEYS = ("assets",)  # Unique by sort_key across the whole table (when it has one): an asset's serial number
 JSON_COLUMNS = ("fields", "subnets", "ranges")
 
 SCHEMA = """
@@ -101,6 +104,18 @@ CREATE TABLE IF NOT EXISTS subnet_roles (
     id TEXT PRIMARY KEY, network_id TEXT NOT NULL, cidr TEXT NOT NULL, sort_key TEXT NOT NULL, role TEXT NOT NULL,
     version INTEGER NOT NULL, modified TEXT NOT NULL, modified_by TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
 CREATE UNIQUE INDEX IF NOT EXISTS subnet_roles_unique ON subnet_roles (network_id, sort_key) WHERE deleted = 0;
+CREATE TABLE IF NOT EXISTS assets (
+    id TEXT PRIMARY KEY, sort_key TEXT NOT NULL DEFAULT '', serial TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'unknown', model TEXT NOT NULL DEFAULT '', maker TEXT NOT NULL DEFAULT '',
+    hostname TEXT NOT NULL DEFAULT '', software TEXT NOT NULL DEFAULT '', mgmt_ip TEXT NOT NULL DEFAULT '',
+    mac TEXT NOT NULL DEFAULT '', parent_id TEXT NOT NULL DEFAULT '', slot TEXT NOT NULL DEFAULT '',
+    map_device TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'in_service',
+    asset_tag TEXT NOT NULL DEFAULT '', owner TEXT NOT NULL DEFAULT '', purchased TEXT NOT NULL DEFAULT '',
+    warranty_end TEXT NOT NULL DEFAULT '', eol TEXT NOT NULL DEFAULT '', replaced_by TEXT NOT NULL DEFAULT '',
+    first_seen TEXT NOT NULL DEFAULT '', last_seen TEXT NOT NULL DEFAULT '', seen_by TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '', fields TEXT NOT NULL DEFAULT '{}',
+    version INTEGER NOT NULL, modified TEXT NOT NULL, modified_by TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+CREATE UNIQUE INDEX IF NOT EXISTS assets_unique ON assets (sort_key) WHERE deleted = 0 AND sort_key != '';
 CREATE INDEX IF NOT EXISTS sightings_seq ON sightings (seq);
 CREATE INDEX IF NOT EXISTS sweeps_seq ON sweeps (seq);
 """
@@ -113,6 +128,11 @@ class IpamError(Exception):
 def vlan_key(number):
     """Sort key for a VLAN number."""
     return f"{int(number):04d}"
+
+
+def serial_key(serial):
+    """Sort key (and what makes it unique) for an asset's serial number: without case or spaces; "" for none."""
+    return "".join(str(serial or "").split()).upper()
 
 
 def ip_key(address):
@@ -350,8 +370,43 @@ class SubnetRole:
     modified_by: str = ""
 
 
+@dataclass
+class Asset:
+    """A piece of hardware on the network: a switch, router or firewall chassis (one per stack member), an access
+    point, phone or server, or a part of one (a module, power supply, fan or transceiver, whose parent_id is the
+    chassis it's in). Unique by serial number; one without (not readable, or not known yet) by its id."""
+    id: str
+    serial: str = ""
+    kind: str = "unknown"  # The map's kinds (switch, router...), or a part's (module, power supply, fan, transceiver)
+    model: str = ""
+    maker: str = ""
+    hostname: str = ""
+    software: str = ""  # The version it runs
+    mgmt_ip: str = ""
+    mac: str = ""  # A phone's or server's (how one without a serial number is known again)
+    parent_id: str = ""  # A part's chassis
+    slot: str = ""  # Where it is in its stack or chassis ("Switch 2", "Power supply A")
+    map_device: str = ""  # The network map's key of the device it is (or is in)
+    location: str = ""
+    status: str = "in_service"
+    asset_tag: str = ""
+    owner: str = ""
+    purchased: str = ""  # Dates as written (YYYY-MM-DD from the dialogs)
+    warranty_end: str = ""
+    eol: str = ""
+    replaced_by: str = ""  # The id of the asset that took its place
+    first_seen: str = ""  # Dates (YYYY-MM-DD) a network map found it first and last
+    last_seen: str = ""
+    seen_by: str = ""  # Who brought in the map that found it last
+    description: str = ""
+    fields: dict = field(default_factory=dict)
+    version: int = 1
+    modified: str = ""
+    modified_by: str = ""
+
+
 ENTITIES = {"networks": Network, "subnets": Subnet, "addresses": Address, "vlan_domains": VlanDomain, "vlans": Vlan,
-            "placements": Placement, "subnet_moves": SubnetMove, "subnet_roles": SubnetRole}
+            "placements": Placement, "subnet_moves": SubnetMove, "subnet_roles": SubnetRole, "assets": Asset}
 EDITABLE = {
     "networks": {"name", "description", "fields"},
     "subnets": {"name", "gateway", "description", "fields", "loopbacks"},
@@ -362,6 +417,9 @@ EDITABLE = {
     "subnet_moves": {"from_domain_id", "from_vlan", "from_device", "to_domain_id", "to_vlan", "to_device", "status",
                      "planned_for", "note", "finished"},
     "subnet_roles": {"role"},
+    "assets": {"serial", "kind", "model", "maker", "hostname", "software", "mgmt_ip", "mac", "parent_id", "slot",
+               "map_device", "location", "status", "asset_tag", "owner", "purchased", "warranty_end", "eol",
+               "replaced_by", "first_seen", "last_seen", "seen_by", "description", "fields"},
 }
 
 
@@ -444,6 +502,8 @@ class IpamStore:
             row["sort_key"] = vlan_key(item.vlan)
         elif table in ("placements", "subnet_moves", "subnet_roles"):
             row["sort_key"] = subnet_key(parse_subnet(item.cidr))
+        elif table == "assets":
+            row["sort_key"] = serial_key(item.serial)
         names = ", ".join(row)
         self.db.execute(f"INSERT INTO {table} ({names}) VALUES ({', '.join('?' * len(row))})", list(row.values()))
         self._log(table, item.id, item.version, "create", data)
@@ -463,6 +523,8 @@ class IpamStore:
         for name in JSON_COLUMNS:
             if name in row:
                 row[name] = json.dumps(row[name])
+        if table == "assets" and "serial" in changes:
+            row["sort_key"] = serial_key(item.serial)
         assignments = ", ".join(f"{name} = ?" for name in row)
         self.db.execute(f"UPDATE {table} SET {assignments} WHERE id = ?", list(row.values()) + [item.id])
         self._log(table, item.id, item.version, "update", changes)
@@ -538,6 +600,9 @@ class IpamStore:
                     # An older row here may still hold the same address, subnet or VLAN: the server's word wins
                     self.db.execute(f"UPDATE {table} SET deleted = 1 WHERE {parent} = ? AND sort_key = ? AND "
                                     "deleted = 0 AND id != ?", (row[parent], row["sort_key"], row["id"]))
+                elif table in UNIQUE_KEYS and row.get("sort_key") and not row.get("deleted"):
+                    self.db.execute(f"UPDATE {table} SET deleted = 1 WHERE sort_key = ? AND deleted = 0 AND id != ?",
+                                    (row["sort_key"], row["id"]))
                 names = ", ".join(row)
                 self.db.execute(f"INSERT OR REPLACE INTO {table} ({names}) VALUES ({', '.join('?' * len(row))})",
                                 list(row.values()))

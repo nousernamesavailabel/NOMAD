@@ -7,8 +7,8 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, \
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QRadioButton, QVBoxLayout, QWidget
 
-from ..ipconfig import ApplyError, apply_ip_config, build_apply_commands, config_from_adapter, release_dhcp, \
-    renew_dhcp, reset_adapter, set_adapter_enabled, set_mtu, validate_ip_config, validate_mtu
+from ..ipconfig import ApplyError, apply_ip_config, build_apply_commands, config_from_adapter, format_gateway, \
+    release_dhcp, renew_dhcp, reset_adapter, set_adapter_enabled, set_mtu, validate_ip_config, validate_mtu
 from ..profiles import Profile
 from .common import set_hint, set_invalid
 from .dialogs import KeepChangesDialog, SaveProfileDialog
@@ -159,8 +159,20 @@ class AdapterTab(QWidget):
         self.ip_input.setPlaceholderText("e.g. 192.168.1.10 or 192.168.1.10/24")
         self.subnet_input = QLineEdit()
         self.subnet_input.setPlaceholderText("e.g. 255.255.255.0 (filled in for /24 notation)")
+        self.secondary_input = QLineEdit()
+        self.secondary_input.setPlaceholderText("Optional, e.g. 192.168.1.11, 10.0.0.5/24")
+        self.secondary_input.setToolTip("More static addresses on this adapter, separated by commas. Give each a "
+                                        "/prefix or a mask (10.0.0.5 255.255.255.0); one without takes the subnet "
+                                        "mask above.")
         self.gateway_input = QLineEdit()
         self.gateway_input.setPlaceholderText("Optional, e.g. 192.168.1.1")
+        self.gateway_input.setToolTip("The default gateway. Add a metric to set its preference, e.g. "
+                                      "192.168.1.1 metric 10; without one, Windows picks it automatically.")
+        self.more_gateways_input = QLineEdit()
+        self.more_gateways_input.setPlaceholderText("Optional, e.g. 192.168.1.2 metric 20")
+        self.more_gateways_input.setToolTip("More default gateways, separated by commas, each with an optional "
+                                            "metric. Windows prefers the lowest metric and falls back to the others "
+                                            "when it stops answering.")
         self.dns_auto_check = QCheckBox("Obtain DNS server addresses automatically")
         self.primary_dns_input = QLineEdit()
         self.primary_dns_input.setPlaceholderText("e.g. 1.1.1.1")
@@ -169,7 +181,9 @@ class AdapterTab(QWidget):
         form = QFormLayout()
         form.addRow("IP address:", self.ip_input)
         form.addRow("Subnet mask:", self.subnet_input)
+        form.addRow("Secondary IPs:", self.secondary_input)
         form.addRow("Default gateway:", self.gateway_input)
+        form.addRow("More gateways:", self.more_gateways_input)
         form.addRow("", self.dns_auto_check)
         form.addRow("Primary DNS:", self.primary_dns_input)
         form.addRow("Backup DNS:", self.backup_dns_input)
@@ -247,7 +261,8 @@ class AdapterTab(QWidget):
         self.export_button.clicked.connect(self.export_profiles)
 
     def settings_inputs(self):
-        return [self.ip_input, self.subnet_input, self.gateway_input, self.primary_dns_input, self.backup_dns_input]
+        return [self.ip_input, self.subnet_input, self.secondary_input, self.gateway_input, self.more_gateways_input,
+                self.primary_dns_input, self.backup_dns_input]
 
     # ----------------------------------------------------------------- Tab interface
 
@@ -304,7 +319,8 @@ class AdapterTab(QWidget):
         labels["speed"].setText(adapter.speed_text if adapter.status == "Up" and adapter.speed_text else "—")
         labels["ipv4"].setText("\n".join(str(address) for address in adapter.ipv4) or "—")
         labels["ipv6"].setText("\n".join(str(address) for address in adapter.ipv6) or "—")
-        labels["gateway"].setText(", ".join(adapter.gateways4 + adapter.gateways6) or "—")
+        labels["gateway"].setText(", ".join([format_gateway(gateway, adapter.gateway_metrics4.get(gateway))
+                                             for gateway in adapter.gateways4] + adapter.gateways6) or "—")
         dns = ", ".join(adapter.dns4 + adapter.dns6) or "—"
         if adapter.dns4 and adapter.dns_static is not None:
             dns += "  (manual)" if adapter.dns_static else "  (automatic)"
@@ -359,7 +375,10 @@ class AdapterTab(QWidget):
         (self.dhcp_radio if config.dhcp else self.static_radio).setChecked(True)
         self.ip_input.setText(config.address)
         self.subnet_input.setText(config.netmask)
-        self.gateway_input.setText(config.gateway)
+        self.secondary_input.setText(", ".join(config.secondary))
+        self.gateway_input.setText(format_gateway(config.gateway, config.gateway_metric))
+        self.more_gateways_input.setText(", ".join(format_gateway(entry["gateway"], entry["metric"])
+                                                   for entry in config.extra_gateways))
         dns = config.dns + ["", ""]
         self.primary_dns_input.setText(dns[0])
         self.backup_dns_input.setText(dns[1])
@@ -388,7 +407,7 @@ class AdapterTab(QWidget):
         configurable = self.configurable_adapter() is not None
         self.settings_group.setEnabled(configurable)
         static = self.static_radio.isChecked()
-        for line_edit in (self.ip_input, self.gateway_input):
+        for line_edit in (self.ip_input, self.secondary_input, self.gateway_input, self.more_gateways_input):
             line_edit.setEnabled(static)
         self.subnet_input.setEnabled(static and "/" not in self.ip_input.text())
         self.dns_auto_check.setEnabled(not static)
@@ -400,9 +419,11 @@ class AdapterTab(QWidget):
     def validate_form(self):
         config, errors, warnings = validate_ip_config(
             self.dhcp_radio.isChecked(), self.ip_input.text(), self.subnet_input.text(), self.gateway_input.text(),
-            self.primary_dns_input.text(), self.backup_dns_input.text(), self.dns_auto_check.isChecked())
+            self.primary_dns_input.text(), self.backup_dns_input.text(), self.dns_auto_check.isChecked(),
+            self.secondary_input.text(), self.more_gateways_input.text())
         self.form_config = config
-        fields = {"address": self.ip_input, "netmask": self.subnet_input, "gateway": self.gateway_input,
+        fields = {"address": self.ip_input, "netmask": self.subnet_input, "secondary": self.secondary_input,
+                  "gateway": self.gateway_input, "gateways": self.more_gateways_input,
                   "primary_dns": self.primary_dns_input, "backup_dns": self.backup_dns_input}
         for name, line_edit in fields.items():
             set_invalid(line_edit, name in errors and line_edit.isEnabled() and bool(line_edit.text().strip()))
@@ -669,7 +690,8 @@ class AdapterTab(QWidget):
                                    None if mtu_error else mtu)
         if dialog.exec_() != SaveProfileDialog.Accepted:
             return
-        config = replace(self.form_config, dns=list(self.form_config.dns),
+        config = replace(self.form_config, dns=list(self.form_config.dns), secondary=list(self.form_config.secondary),
+                         extra_gateways=[dict(entry) for entry in self.form_config.extra_gateways],
                          mtu=mtu if dialog.include_mtu and not mtu_error else None)
         try:
             self.window.profile_store.put(Profile(dialog.name, config))

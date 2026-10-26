@@ -21,11 +21,12 @@ from ..ipam.client import ADMIN, current_key, is_tribe_server
 from ..ipam.map_compare import DEVICE as DEVICE_ADDRESS, compare_map
 from ..ipam.reconcile import MAC_DIFFERS, NOT_RECORDED
 from ..ipam.store import IpamError
-from ..netmap import diff, export, l3, monitor, overlays, shared, store, tunnels, watch
+from ..netmap import diff, export, hardware, l3, monitor, overlays, shared, store, tunnels, watch
 from ..netmap import vlan_path
 from ..netmap import vlans as vlan_info
-from ..netmap.crawl import MAX_WORKERS, WORKERS, CrawlSettings, Crawler, apply_vlans, check_device, \
-    communities_for, credentials_from_json, credentials_to_json, ordered_credentials, parse_overrides, read_vlans_of
+from ..netmap.crawl import MAX_WORKERS, WORKERS, CrawlSettings, Crawler, apply_inventory, apply_vlans, \
+    check_device, communities_for, credentials_from_json, credentials_to_json, ordered_credentials, parse_overrides, \
+    read_inventory_of, read_vlans_of
 from ..netmap.layout import BOTTOM, CENTER, GROUP_PAD, GROUP_TITLE, HORIZONTAL, LEFT, MIDDLE, \
     NORMAL, RESPACE_MIN_GAP, RIGHT, SPACING_NAMES, SPACINGS, STYLE_NAMES, TOP, TOP_DOWN, VERTICAL, align, arrange, \
     arrange_boxes_in_place, arrange_in_place, distribute, merge_positions, nearest_spacing, respace, spacing_of
@@ -149,10 +150,18 @@ class VlanReadThread(CheckThread):
     """Reads just the VLANs (and IP interfaces) of the switches on the map, a few at once: Read VLANs Again."""
 
 
+class HardwareReadThread(CheckThread):
+    """Reads just the hardware and software of devices on the map (chassis, parts, serial numbers), a few at once:
+    Read Hardware Again."""
+
+
 class NetworkMapTab(QWidget):
     map_shown = pyqtSignal()  # The map open was drawn again (another opened, mapped again, changed, read again)
     routes_read = pyqtSignal(int, int)  # Read Routes Again finished: devices read, devices that didn't answer
     ipam_network_changed = pyqtSignal()  # The open map was said to be of another IPAM network
+    # A crawl, Crawl from Here or Read Hardware Again finished with the map saved: the Assets page brings its hardware
+    # in (when it's set to)
+    hardware_found = pyqtSignal()
 
     def __init__(self, window):
         super().__init__(window)
@@ -201,6 +210,8 @@ class NetworkMapTab(QWidget):
         self.show_added = False  # Add Device to Map (from other pages) shows the map afterwards
         self.check_device = check_device  # What asks one (tests swap in the fake network)
         self.read_vlans = read_vlans_of  # What reads one's VLANs (tests swap in the fake network)
+        self.read_hardware = read_inventory_of  # And its hardware
+        self.hardware_reading = None  # While Read Hardware Again runs: {"map", "read", "failed"}
         self.vlan_reading = None  # While Read VLANs Again runs: {"map", "read", "failed", "lines"}
         self.carry_dialog = None  # Carry VLAN (made the first time it's used, then kept)
         self.save_timer = QTimer(self)
@@ -1130,6 +1141,7 @@ class NetworkMapTab(QWidget):
             message += f" {problems} of the new ones didn't answer SNMP."
         message += folded_text(folded)
         set_hint(self.status_label, message, "warning" if newer.stopped or problems else "success")
+        self.hardware_found.emit()
 
     def ring_devices_being_read(self):
         if self.live_map is None:
@@ -1203,6 +1215,7 @@ class NetworkMapTab(QWidget):
                  or links_left_out else "success")
         # Ask the devices added by hand again, so whether they answer SNMP is as fresh as the rest
         self.check_devices([key for key, device in network_map.devices.items() if device.manual and device.mgmt_ip])
+        self.hardware_found.emit()
 
     # ----------------------------------------------------------------- Showing a map
 
@@ -1600,6 +1613,64 @@ class NetworkMapTab(QWidget):
         set_hint(self.status_label, f"Reading the {what} of {count_text(len(targets), 'device')}...", "info")
         thread.start()
         return True
+
+    def read_hardware_again(self, keys=None):
+        """Read the hardware and software (chassis, parts, serial numbers, software version) of the devices on the
+        map that answered SNMP, or of those among keys: for a map made before NOMAD read them, or after hardware was
+        swapped, without mapping again. Returns whether it started."""
+        network_map = self.network_map
+        if network_map is None or self.worker is not None or self.hardware_reading is not None:
+            return False
+        targets = [(key, device.mgmt_ip) for key, device in network_map.devices.items()
+                   if (keys is None or key in keys) and device.source == SNMP and device.mgmt_ip]
+        if not targets:
+            set_hint(self.status_label, "No device chosen answered SNMP, so there's no hardware to read.", "warning")
+            return False
+        self.hardware_reading = {"map": network_map, "read": 0, "failed": []}
+        thread = HardwareReadThread(self.crawl_settings([address for _, address in targets]), targets,
+                                    self.read_hardware, self)
+        thread.checked.connect(self.on_hardware_read)
+        thread.finished.connect(self.on_hardware_read_finished)
+        self.check_threads.append(thread)
+        set_hint(self.status_label, f"Reading the hardware of {count_text(len(targets), 'device')}...", "info")
+        thread.start()
+        return True
+
+    def reading_hardware(self):
+        return self.hardware_reading is not None
+
+    def on_hardware_read(self, key, address, result):
+        reading = self.hardware_reading
+        if reading is None or reading["map"] is not self.network_map:
+            return  # Another map was opened meanwhile
+        device = self.network_map.devices.get(key)
+        tables, community = result
+        if device is None:
+            return
+        if tables is None:
+            reading["failed"].append(device.label)
+            return
+        if community:
+            self.answered[address] = community
+        apply_inventory(device, tables)
+        reading["read"] += 1
+
+    def on_hardware_read_finished(self):
+        thread = self.sender()
+        if thread in self.check_threads:
+            self.check_threads.remove(thread)
+        reading, self.hardware_reading = self.hardware_reading, None
+        if reading is None or reading["map"] is not self.network_map:
+            return
+        if reading["read"]:
+            self.map_changed()
+        text = f"Read the hardware of {count_text(reading['read'], 'device')}"
+        if reading["failed"]:
+            listed = ", ".join(reading["failed"][:5]) + ("..." if len(reading["failed"]) > 5 else "")
+            text += f"; {len(reading['failed'])} didn't answer SNMP ({listed})"
+        set_hint(self.status_label, text + ".", "warning" if reading["failed"] else "success")
+        if reading["read"]:
+            self.hardware_found.emit()
 
     def reading_routes(self):
         """Whether Read Routes Again is under way (routes_read says when it's done)."""
@@ -2487,6 +2558,8 @@ class NetworkMapTab(QWidget):
             actions[stop] = self.clear_vlan
         show_in = add_submenu(menu, "Show In")
         self.add_show_in(show_in, actions, key)
+        if hasattr(self.window, "assets_tab") and self.network_map is not None and key in self.network_map.devices:
+            actions[show_in.addAction("Assets")] = lambda: self.window.assets_tab.show_map_device(key)
         menu.addSeparator()
         if device.mgmt_ip:
             actions[menu.addAction("Crawl from Here")] = lambda: self.crawl_from(device.mgmt_ip)
@@ -2496,6 +2569,16 @@ class NetworkMapTab(QWidget):
             actions[tools.addAction("Mirror Ports...")] = lambda: self.window.show_mirror(source=key)
             if hasattr(self.window, "show_acls"):
                 actions[tools.addAction("ACLs & Route Maps...")] = lambda: self.window.show_acls(device=key)
+        current = self.tabs.currentWidget()
+        here_keys = current.selected_keys() if current in (self.view, self.l3_view) else []
+        readable = [item for item in (here_keys if key in here_keys else [key])
+                    if self.network_map is not None and item in self.network_map.devices
+                    and self.network_map.devices[item].source == SNMP]
+        if readable and self.worker is None and self.hardware_reading is None:  # In Tools, beside Ping...
+            tools = next((action.menu() for action in menu.actions() if action.menu() is not None
+                          and action.text() == "Tools"), menu)
+            label = "Read Hardware Again" if len(readable) == 1 else f"Read Hardware of {len(readable)} Again"
+            actions[tools.addAction(label)] = lambda: self.read_hardware_again(readable)
         if self.worker is None:
             actions[menu.addAction("Put at the Top")] = lambda: self.put_at_top(key)
         if self.current_view() is self.view and self.worker is None:
@@ -4191,6 +4274,7 @@ def device_html(network_map, key, state=None, live=None):
                     parts.append(f"<tr><td></td><td>&rarr; {escape(far)}: "
                                  f"{escape(tunnels.STATE_TEXT[tunnel.state])}</td></tr>")
         parts.append("</table>")
+    parts.append(device_hardware_html(device))
     parts.append(device_vlans_html(device))
     ports = network_map.hosts_by_port(key)
     if ports:
@@ -4220,6 +4304,42 @@ def device_html(network_map, key, state=None, live=None):
     if device.manual:
         parts.append("<p>Added by hand: right-click it to edit or delete it, or to draw a link from it. It's kept "
                      "when you map again, until the crawl finds it.</p>")
+    return "".join(parts)
+
+
+def device_hardware_html(device):
+    """Its chassis (each stack member's), model, serial number and software, and its parts, as last read."""
+    escape = html.escape
+    members = hardware.chassis(device.parts)
+    others = [part for part in device.parts if part.get("class") != hardware.CHASSIS]
+    if not members and not device.software and not device.serial and not device.mac:
+        return ""
+    parts = ["<h4>Hardware</h4><table>"]
+    if device.software:
+        parts.append(f"<tr><td><b>Software</b>&nbsp;</td><td>{escape(device.software)}</td></tr>")
+    for part in members:
+        name = part.get("name") if len(members) > 1 else "Chassis"
+        mac = part.get("mac", "")
+        mac = f"MAC {mac}" + (" (its management interface's)" if part.get("mac_source") == hardware.MANAGEMENT
+                              else "") if mac else ""
+        what = ", ".join(item for item in (part.get("model"), part.get("serial") or "no serial number", mac) if item)
+        parts.append(f"<tr><td><b>{escape(name or 'Chassis')}</b>&nbsp;</td><td>{escape(what)}</td></tr>")
+    if not members and device.serial:
+        parts.append(f"<tr><td><b>Serial</b>&nbsp;</td><td>{escape(device.serial)} (from a neighbor's CDP)</td></tr>")
+    if device.mac and not any(part.get("mac") for part in members):
+        name, said = "MAC", ""
+        if len(members) > 1:
+            name, said = "Stack MAC", " (the active member's, or one set by hand)"
+        elif not device.inventory_read:
+            said = " (from its neighbors' LLDP)"
+        parts.append(f"<tr><td><b>{name}</b>&nbsp;</td><td>{escape(device.mac)}{escape(said)}</td></tr>")
+    if others:
+        counts = {}
+        for part in others:
+            counts[part["class"]] = counts.get(part["class"], 0) + 1
+        listed = ", ".join(f"{count} {name}{'s' if count != 1 else ''}" for name, count in counts.items())
+        parts.append(f"<tr><td><b>Parts</b>&nbsp;</td><td>{escape(listed)} (on the Assets page)</td></tr>")
+    parts.append("</table>")
     return "".join(parts)
 
 

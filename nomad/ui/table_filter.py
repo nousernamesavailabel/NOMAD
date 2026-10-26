@@ -133,6 +133,7 @@ class TableFilter:
         self.table, self.changed = table, changed
         self.filters = {}  # Column -> set of allowed cell texts
         self.words = []  # From a quick filter box: rows must contain each of them, in any column
+        self.row_test = None  # Set by a page: row -> whether it's shown (on top of the filters), or None
         stretch_last = table.horizontalHeader().stretchLastSection()
         self.header = FilterHeader(table)
         table.setHorizontalHeader(self.header)  # Deletes the old header
@@ -150,6 +151,8 @@ class TableFilter:
 
     def passes(self, row, skip=None):
         if not all(self.text(row, column) in allowed for column, allowed in self.filters.items() if column != skip):
+            return False
+        if self.row_test is not None and not self.row_test(row):
             return False
         if self.words:
             line = " ".join(self.text(row, column) for column in range(self.table.columnCount())).lower()
@@ -187,7 +190,7 @@ class TableFilter:
 
     @property
     def active(self):
-        return bool(self.filters or self.words)
+        return bool(self.filters or self.words or self.row_test is not None)
 
     def values(self, column):
         """{text: count} for the column, over the rows the other columns' filters let through (as Excel does)."""

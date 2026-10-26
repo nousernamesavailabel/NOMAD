@@ -4,6 +4,16 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.32.0] - 2026-10-26
+
+- **New:** Assets (Network Management): every switch, stack member, router, firewall, access point, phone and server with its hostname, model, serial number and software version, brought in from each Network Map crawl by itself. Renames and upgrades go in its history; hardware swapped for other hardware (an RMA) is marked Replaced. Parts (modules, power supplies, fans, transceivers) too, if you want them. Shared with the tribe.
+- **New:** Read Server/Phone Details asks Windows servers (WMI), Linux servers (SSH) and Cisco phones (their web page) for their serial numbers.
+- **New:** assets keep MAC addresses: phones' and servers', and each switch's and stack member's base MAC. Paste any MAC into the Assets filter box, even one of a switch's ports', and it finds the hardware.
+- **Better:** the Network Map shows each device's serial number, MAC and software version, and can read just the hardware again (right-click > Tools).
+- **New:** Interfaces can give an adapter secondary IPs and more default gateways, each gateway with a metric.
+- **Better:** Latency says what's wrong with a target that isn't an address or host name.
+- **Better:** after the tribe server moves to another computer, the old one carries on in the tribe by itself.
+
 ## [1.31.1] - 2026-10-15
 
 - **Better:** a Network Map device checked from a router says "Via R5" instead of a red "Unreachable" when it's up. Monitor from a Router is also in the Map menu now.

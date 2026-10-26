@@ -1,6 +1,8 @@
 """Latency monitoring (formerly the Latenct tool): ping several targets continuously and keep their history."""
 import csv
+import ipaddress
 import os
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -16,6 +18,32 @@ AUTOSCALE_MIN_SPAN = 10.0
 GOOD_MS, FAIR_MS = 60, 150  # Below GOOD_MS is good, below FAIR_MS fair, otherwise poor
 CSV_HEADER = ["timestamp", "target_name", "target_host", "status", "rtt_ms", "ttl", "error"]
 DEFAULT_TARGETS = [("Google DNS", "8.8.8.8"), ("Cloudflare DNS", "1.1.1.1")]
+HOST_LABEL = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?")
+
+
+def host_problem(text):
+    """Why text can't be a target host (an IPv4 or IPv6 address or a host name), or "" when it can."""
+    host = text.strip()
+    if not host:
+        return "Enter a host name or IP address."
+    if ":" in host:
+        address, percent, scope = host.partition("%")
+        try:
+            ipaddress.IPv6Address(address)
+        except ValueError:
+            looks_ipv6 = all(character in "0123456789abcdefABCDEF:." for character in address)
+            return f"'{host}' is not a valid {'IPv6 address' if looks_ipv6 else 'host name or IP address'}."
+        return f"'{host}' has no zone after the %." if percent and not scope else ""
+    if all(character.isdigit() or character == "." for character in host):
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            return f"'{host}' is not a valid IPv4 address."
+        return ""
+    name = host[:-1] if host.endswith(".") else host
+    if len(name) > 253 or not all(HOST_LABEL.fullmatch(label) for label in name.split(".")):
+        return f"'{host}' is not a valid host name or IP address."
+    return ""
 
 
 def latency_level(ms):

@@ -1,10 +1,11 @@
 import pytest
 
-from nomad.ipconfig import IPConfig, build_apply_commands, validate_ip_config, validate_mtu
+from nomad.ipconfig import IPConfig, build_apply_commands, config_from_adapter, validate_ip_config, validate_mtu
 
 
-def validate(dhcp=False, address="", netmask="", gateway="", primary="", backup="", dns_auto=False):
-    return validate_ip_config(dhcp, address, netmask, gateway, primary, backup, dns_auto)
+def validate(dhcp=False, address="", netmask="", gateway="", primary="", backup="", dns_auto=False, secondary="",
+             extra_gateways=""):
+    return validate_ip_config(dhcp, address, netmask, gateway, primary, backup, dns_auto, secondary, extra_gateways)
 
 
 def test_static_with_cidr():
@@ -86,3 +87,100 @@ def test_revert_restores_previous_settings():
     assert ["netsh", "interface", "ipv4", "set", "address", "name=11", "source=dhcp"] in revert
     assert ["netsh", "interface", "ipv4", "set", "dnsservers", "name=11", "source=dhcp"] in revert
     assert not any("subinterface" in command for command in revert)  # MTU wasn't touched going forward
+
+
+def test_secondary_addresses_and_gateways():
+    config, errors, warnings = validate(address="192.168.1.10/24", gateway="192.168.1.1 metric 10",
+                                        secondary="192.168.1.11, 10.0.0.5 255.255.255.0; 172.16.0.1/32",
+                                        extra_gateways="192.168.1.2 metric 20, 10.0.0.1")
+    assert not errors and not warnings
+    assert config.secondary == ["192.168.1.11/24", "10.0.0.5/24", "172.16.0.1/32"]
+    assert (config.gateway, config.gateway_metric) == ("192.168.1.1", 10)
+    assert config.extra_gateways == [{"gateway": "192.168.1.2", "metric": 20}, {"gateway": "10.0.0.1", "metric": None}]
+    assert "192.168.1.11/24" in config.describe() and "192.168.1.2 metric 20" in config.describe()
+
+
+@pytest.mark.parametrize("kwargs, field", [
+    ({"secondary": "192.168.1.10"}, "secondary"),  # Same as the primary
+    ({"secondary": "192.168.1.0/24"}, "secondary"),  # Network address
+    ({"secondary": "banana"}, "secondary"),
+    ({"extra_gateways": "192.168.1.1"}, "gateways"),  # Same as the default gateway
+    ({"extra_gateways": "192.168.1.11", "secondary": "192.168.1.11"}, "gateways"),  # Own address
+    ({"extra_gateways": "192.168.1.2 metric 0"}, "gateways"),
+    ({"gateway": "192.168.1.1 metric x"}, "gateway"),
+    ({"gateway": "", "extra_gateways": "192.168.1.2"}, "gateway"),  # Extras without a first gateway
+])
+def test_invalid_secondary_and_gateways(kwargs, field):
+    _, errors, _ = validate(**{"address": "192.168.1.10/24", "gateway": "192.168.1.1", **kwargs})
+    assert field in errors
+
+
+def test_gateway_reachable_through_a_secondary_subnet():
+    _, errors, warnings = validate(address="192.168.1.10/24", secondary="10.0.0.5/24", gateway="10.0.0.1")
+    assert not errors and not warnings
+
+
+def test_dhcp_to_static_with_extras():
+    new = IPConfig(dhcp=False, address="10.0.0.5", netmask="255.255.255.0", gateway="10.0.0.1", gateway_metric=5,
+                   secondary=["10.0.0.6/24"], extra_gateways=[{"gateway": "10.0.0.2", "metric": None}],
+                   dns=["1.1.1.1"])
+    commands = build_apply_commands("11", new, IPConfig(dhcp=True, dns_auto=True))
+    assert commands[0][-2:] == ["gateway=10.0.0.1", "gwmetric=5"]
+    assert ["netsh", "interface", "ipv4", "add", "address", "name=11", "address=10.0.0.6",
+            "mask=255.255.255.0"] in commands
+    assert ["netsh", "interface", "ipv4", "add", "address", "name=11", "gateway=10.0.0.2", "gwmetric=0"] in commands
+
+
+def test_static_changes_add_before_removing():
+    old = IPConfig(dhcp=False, address="10.0.0.5", netmask="255.255.255.0", gateway="10.0.0.1",
+                   secondary=["10.0.0.6/24", "10.0.0.7/24"])
+    new = IPConfig(dhcp=False, address="10.0.0.5", netmask="255.255.255.0", gateway="10.0.0.1",
+                   secondary=["10.0.0.6/25", "10.0.0.8/24"], extra_gateways=[{"gateway": "10.0.0.2", "metric": 20}])
+    commands = [" ".join(command[3:]) for command in build_apply_commands("11", new, old)]
+    assert commands == ["delete address name=11 address=10.0.0.6",
+                        "add address name=11 address=10.0.0.6 mask=255.255.255.128",
+                        "add address name=11 address=10.0.0.8 mask=255.255.255.0",
+                        "delete address name=11 address=10.0.0.7",
+                        "add address name=11 gateway=10.0.0.2 gwmetric=20"]
+    # Going back undoes it the same way, and the primary is never set over (which drops every connection)
+    revert = [" ".join(command[3:]) for command in build_apply_commands("11", old, new)]
+    assert "delete address name=11 gateway=10.0.0.2" in revert and not any("set address" in c for c in revert)
+
+
+def test_new_primary_and_gateway_metric_change():
+    old = IPConfig(dhcp=False, address="10.0.0.5", netmask="255.255.255.0", gateway="10.0.0.1")
+    new = IPConfig(dhcp=False, address="10.0.0.9", netmask="255.255.255.0", gateway="10.0.0.1", gateway_metric=10)
+    commands = [" ".join(command[3:]) for command in build_apply_commands("11", new, old)]
+    assert commands == ["add address name=11 address=10.0.0.9 mask=255.255.255.0",
+                        "delete address name=11 address=10.0.0.5",
+                        "delete address name=11 gateway=10.0.0.1",
+                        "add address name=11 gateway=10.0.0.1 gwmetric=10"]
+
+
+def test_primary_and_secondary_order_doesnt_matter():
+    one = IPConfig(dhcp=False, address="10.0.0.5", netmask="255.255.255.0", secondary=["10.0.0.6/24"],
+                   gateway="10.0.0.1", extra_gateways=[{"gateway": "10.0.0.2", "metric": None}])
+    two = IPConfig(dhcp=False, address="10.0.0.6", netmask="255.255.255.0", secondary=["10.0.0.5/24"],
+                   gateway="10.0.0.2", extra_gateways=[{"gateway": "10.0.0.1", "metric": None}])
+    assert build_apply_commands("11", one, two) == []
+
+
+def test_static_to_dhcp_removes_extras_first():
+    old = IPConfig(dhcp=False, address="10.0.0.5", netmask="255.255.255.0", gateway="10.0.0.1",
+                   secondary=["10.0.0.6/24"], extra_gateways=[{"gateway": "10.0.0.2", "metric": None}])
+    commands = [" ".join(command[3:]) for command in build_apply_commands("11", IPConfig(dhcp=True), old)]
+    assert commands[:3] == ["delete address name=11 gateway=10.0.0.2", "delete address name=11 address=10.0.0.6",
+                            "set address name=11 source=dhcp"]
+
+
+def test_config_from_adapter_reads_extras():
+    import ipaddress
+    from nomad.snapshot import Adapter
+    adapter = Adapter(index="11", name="Ethernet", dhcp=False,
+                      ipv4=[ipaddress.ip_interface("10.0.0.5/24"), ipaddress.ip_interface("169.254.1.1/16"),
+                            ipaddress.ip_interface("10.0.0.6/24")],
+                      gateways4=["10.0.0.1", "10.0.0.2"], gateway_metrics4={"10.0.0.1": 0, "10.0.0.2": 20})
+    config = config_from_adapter(adapter)
+    assert (config.address, config.secondary) == ("10.0.0.5", ["10.0.0.6/24"])
+    assert (config.gateway, config.gateway_metric) == ("10.0.0.1", None)
+    assert config.extra_gateways == [{"gateway": "10.0.0.2", "metric": 20}]

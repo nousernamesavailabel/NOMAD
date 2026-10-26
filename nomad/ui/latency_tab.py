@@ -10,7 +10,8 @@ from PyQt5.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDoubleSpin
     QTableWidgetItem, QVBoxLayout, QWidget
 
 from ..icmp import IcmpClient, resolve_host
-from ..latency import DEFAULT_WINDOW_SECONDS, WINDOW_OPTIONS, CsvLog, LatencyTarget, autoscale, targets_from_dicts
+from ..latency import DEFAULT_WINDOW_SECONDS, WINDOW_OPTIONS, CsvLog, LatencyTarget, autoscale, \
+    host_problem, targets_from_dicts
 from ..system import log_dir
 from .common import ColumnFitter, StoppableThread, set_hint, set_invalid
 from .latency_charts import GaugePanel, LatencyGauge, LatencyGraph, series_color
@@ -75,6 +76,7 @@ class LatencyTab(QWidget):
         self.monitoring = False
         self.csv_log = None
         self.dirty = False
+        self.host_problem_shown = ""  # The bad-host message in the status line, cleared once a host is good
         self.init_ui()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.on_refresh_timer)
@@ -346,8 +348,18 @@ class LatencyTab(QWidget):
 
     def add_or_update_target(self):
         name, host = self.name_input.text().strip(), self.host_input.text().strip()
+        problem = host_problem(host)
         set_invalid(self.name_input, not name)
-        set_invalid(self.host_input, not host)
+        set_invalid(self.host_input, bool(problem))
+        if problem and host:
+            set_hint(self.status_label, problem, "error")
+            self.host_problem_shown = problem
+            self.host_input.setFocus()
+            self.host_input.selectAll()
+            return
+        if self.host_problem_shown and self.status_label.text() == self.host_problem_shown:
+            self.status_label.clear()
+        self.host_problem_shown = ""
         if name and host:
             self.add_target(name, host)
             self.name_input.clear()

@@ -122,6 +122,10 @@ class Neighbor:
     protocol: str = "cdp"
     chassis_mac: str = ""  # LLDP chassis ID when it's a MAC address
     port_mac: str = ""  # LLDP port ID when it's a MAC address, as a computer's LLDP agent sends it
+    version: str = ""  # CDP's version text (cdpCacheVersion), or the software an LLDP-MED neighbor gave
+    serial: str = ""  # From LLDP-MED inventory (phones)
+    model: str = ""  # LLDP-MED's model name, when it gave one
+    maker: str = ""  # LLDP-MED's manufacturer
 
 
 @dataclass
@@ -162,6 +166,11 @@ class DeviceTables:
     stp_root: object = None  # With that read: whether it's the root bridge of the VLAN's tree (None: unknown)
     port_status: dict = field(default_factory=dict)  # ifIndex -> {"oper", "speed" (Mb/s), "duplex"}: not shut down
     status_read: bool = False  # Its interfaces' status was read
+    parts: list = field(default_factory=list)  # Its chassis and parts (hardware.parts), from ENTITY-MIB
+    software: str = ""  # The software version it runs
+    inventory_read: bool = False  # Its hardware was asked about (parts may still be empty: no ENTITY-MIB)
+    base_mac: str = ""  # Its LLDP chassis ID or bridge address (hardware.base_mac): a stack's is no one member's
+    interface_macs: dict = field(default_factory=dict)  # ifIndex -> MAC, when read with its hardware
     tunnels: dict = field(default_factory=dict)  # ifIndex -> (local address, remote address or "", IPsec): TUNNEL-MIB
     ike_sessions: list = field(default_factory=list)  # [(local address, remote address)] of its IKE sessions up
     ike_read: bool = False  # Its IKE sessions were read (none up is then known, not just unread)
@@ -243,6 +252,16 @@ def own_macs(rows):
     return {mac for mac in (mac_text(value.value) for value in column(rows, IF_PHYS_ADDRESS).values()) if mac}
 
 
+def interface_macs(rows):
+    """{ifIndex: MAC} from a walk of ifPhysAddress (interfaces without one left out)."""
+    found = {}
+    for index, value in column(rows, IF_PHYS_ADDRESS).items():
+        mac = mac_text(value.value) if len(index) == 1 else ""
+        if mac:
+            found[index[0]] = mac
+    return found
+
+
 def cdp_capabilities(value):
     if value is None or not isinstance(value.value, bytes):
         return frozenset()
@@ -276,7 +295,8 @@ def cdp_neighbors(rows, interfaces):
             address = socket.inet_ntoa(raw.value)
         neighbors.append(Neighbor(local_port=interfaces.get(index[0], f"ifIndex {index[0]}"), name=name,
                                   port=text(row.get(7)), address=address, platform=text(row.get(8)),
-                                  capabilities=cdp_capabilities(row.get(9)), protocol="cdp"))
+                                  capabilities=cdp_capabilities(row.get(9)), protocol="cdp",
+                                  version=text(row.get(5))))
     return neighbors
 
 
@@ -304,8 +324,9 @@ def lldp_management_addresses(rows):
     return addresses
 
 
-def lldp_neighbors(rows, local_ports, interfaces, management_addresses):
-    """lldpRemTable: index is (time mark, local port number, remote index)."""
+def lldp_neighbors(rows, local_ports, interfaces, management_addresses, inventory=None):
+    """lldpRemTable: index is (time mark, local port number, remote index). inventory: what LLDP-MED neighbors said
+    they are ({(local port, remote index): {...}}, hardware.med_inventory's)."""
     neighbors = []
     for index, row in sorted(columns(rows, LLDP_REM_ENTRY).items()):
         if len(index) != 3:
@@ -328,11 +349,15 @@ def lldp_neighbors(rows, local_ports, interfaces, management_addresses):
             port = text(row.get(8)) or (text(port_id) if port_id is not None and is_printable(port_id.value) else "")
         local_port = local_ports.get(local) or interfaces.get(local, f"port {local}")
         descr = text(row.get(10))
+        med = (inventory or {}).get((local, remote), {})
         for address in management_addresses.get((local, remote), []) or [""]:
             neighbors.append(Neighbor(local_port=local_port, name=name, port=port, address=address,
                                       platform=descr.splitlines()[0][:80] if descr else "",
                                       capabilities=lldp_capabilities(row.get(12)), protocol="lldp",
-                                      chassis_mac=chassis_mac, port_mac=port_mac))
+                                      chassis_mac=chassis_mac, port_mac=port_mac,
+                                      version=med.get("software") or med.get("firmware", ""),
+                                      serial=med.get("serial", ""), model=med.get("model", ""),
+                                      maker=med.get("maker", "")))
     return neighbors
 
 

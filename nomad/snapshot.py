@@ -85,8 +85,9 @@ class Adapter:
     metric6: Optional[int] = None
     ipv4: list = field(default_factory=list)  # ipaddress.IPv4Interface
     ipv6: list = field(default_factory=list)  # ipaddress.IPv6Interface
-    gateways4: list = field(default_factory=list)
+    gateways4: list = field(default_factory=list)  # Lowest metric (preferred) first
     gateways6: list = field(default_factory=list)
+    gateway_metrics4: dict = field(default_factory=dict)  # {gateway: route metric}; 0 = automatic
     dns4: list = field(default_factory=list)
     dns6: list = field(default_factory=list)
     dns_static: Optional[bool] = None  # True if IPv4 DNS servers were entered manually
@@ -318,6 +319,11 @@ def parse_snapshot(data, dns_is_static=None):
             gateways = adapter.gateways4 if route.family == 4 else adapter.gateways6
             if route.gateway not in gateways:
                 gateways.append(route.gateway)
+            if route.family == 4:
+                adapter.gateway_metrics4[route.gateway] = route.route_metric or 0
+
+    for adapter in adapters.values():
+        adapter.gateways4.sort(key=lambda gateway: adapter.gateway_metrics4.get(gateway, 0))
 
     if dns_is_static:
         for adapter in adapters.values():

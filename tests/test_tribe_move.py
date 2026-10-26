@@ -101,6 +101,37 @@ def test_moved_without_an_address_works_as_offline(old, tmp_path):
         stop(signpost, thread)
 
 
+def test_old_server_computer_joins_the_new_one(old, tmp_path):
+    from nomad.ipam.client import TEAM, admin_key, adopt_moved_key, moved_server_key
+    from nomad.netmap.watch_service import _moved_server_key
+    old_admin_key = admin_key(old.directory)
+    assert old_admin_key is not None and moved_server_key(old.directory) is None
+    old.stop()
+    export_server(tmp_path / "tribe.nomadmove", "correct horse", ["127.0.0.1"], 0, old.directory)
+    new_dir = tmp_path / "new"
+    import_server(MoveFile(tmp_path / "tribe.nomadmove", "correct horse"), new_dir)
+    new, new_thread = start(new_dir)
+    try:
+        config = load_config(old.directory)
+        config["moved"]["port"] = new.port
+        (old.directory / "config.json").write_text(json.dumps(config))
+
+        # Its own admin key no longer counts (the server it opens is a signpost): it gets the new server's key
+        assert admin_key(old.directory) is None
+        saved = tmp_path / "server-computer-key.json"
+        key = adopt_moved_key(old.directory, saved)
+        assert (key.role, key.hosts, key.port) == (TEAM, ["127.0.0.1"], new.port)
+        assert load_saved_key(saved).secret == config["team_secret"]
+        assert TeamClient(load_saved_key(saved)).status()["server_id"] == config["server_id"]
+        assert adopt_moved_key(old.directory, saved) is None  # A key already saved is left alone
+
+        # A Map Watcher installed there with the admin key switches to the tribe key at the new address
+        assert _moved_server_key(old_admin_key, old.directory).secret == config["team_secret"]
+        assert _moved_server_key(load_saved_key(saved), old.directory) is None
+    finally:
+        stop(new, new_thread)
+
+
 def test_move_password_and_file_checks(old, tmp_path):
     old.stop()
     with pytest.raises(MoveError, match="at least"):

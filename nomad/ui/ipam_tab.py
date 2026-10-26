@@ -11,6 +11,7 @@ import csv
 import ipaddress
 import logging
 import os
+import shutil
 import threading
 import time
 
@@ -22,11 +23,12 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBo
 
 from ..ipam.history import network_as_of
 from ..ipam.client import OldServerError, ServerUnreachable, TeamKeyError, TeamStore, admin_key, \
-    load_saved_key
+    adopt_moved_key, copy_path, load_saved_key
 from ..ipam.server import ConflictError, server_dir
 from ..ipam.spreadsheet import SpreadsheetError, parse_page, read_pages
 from ..ipam.store import ANYWHERE, DESCRIPTION, MAC, NAME, RESERVED, STATUSES, USED, VALUE, IpamError, IpamStore, \
     Subnet
+from ..ipam.asset_team import TeamAssetStore
 from ..ipam.vlan_team import TeamVlanStore
 from ..oui import normalize_mac
 from ..sweep import SWEEP_PASSES
@@ -876,6 +878,8 @@ class IpamTab(QWidget):
             key = admin_key()
             path = log_dir() / ADMIN_COPY_FILE
         if key is None:
+            if getattr(self.window, "admin", False) and adopt_moved_key() is not None:
+                self.keep_admin_copy()
             key = load_saved_key()
             path = None
         if key is not None:
@@ -894,6 +898,17 @@ class IpamTab(QWidget):
             self.watcher.outdated.connect(self.on_server_outdated)
             self.watcher.rejected.connect(self.on_key_rejected)
             self.watcher.start()
+
+    @staticmethod
+    def keep_admin_copy():
+        """This computer's tribe server just moved away and it joined the tribe as a member: start the member's copy
+        from the admin one (same server), so changes still waiting to be sent go to the new server."""
+        admin_copy, member_copy = log_dir() / ADMIN_COPY_FILE, copy_path()
+        if admin_copy.exists() and not member_copy.exists():
+            try:
+                shutil.copy2(admin_copy, member_copy)
+            except OSError as error:
+                log.warning("Couldn't carry the server admin's copy of the IPAM data over: %s", error)
 
     def stop_watching(self):
         if self.watcher is not None:
@@ -945,11 +960,12 @@ class IpamTab(QWidget):
 
     def unsent_tribe_changes(self):
         """Changes made offline that haven't reached the server (waiting, or refused and not yet resolved),
-        addresses' and VLANs'."""
+        addresses', VLANs' and assets'."""
         if self.team is None:
             return 0
-        vlans = TeamVlanStore(self.team)
-        return self.team.pending_count() + len(self.team.refused()) + vlans.pending_count() + len(vlans.refused())
+        vlans, assets = TeamVlanStore(self.team), TeamAssetStore(self.team)
+        return self.team.pending_count() + len(self.team.refused()) + vlans.pending_count() + len(vlans.refused()) \
+            + assets.pending_count() + len(assets.refused())
 
     def forget_team_copy(self):
         """Empty and close the copy of the tribe's IPAM data (leaving the tribe)."""
@@ -969,6 +985,8 @@ class IpamTab(QWidget):
         sightings_out = self.team.outgoing_sightings()
         vlans = TeamVlanStore(self.team)
         vlans_out = vlans.outgoing()
+        assets = TeamAssetStore(self.team)
+        assets_out = assets.outgoing()
         if announce:
             set_hint(self.team_label, "Tribe: syncing...", "info")
 
@@ -977,6 +995,7 @@ class IpamTab(QWidget):
             try:
                 sent = team.send_pending(outgoing) if outgoing else []  # Only talks to the server: thread-safe
                 sent = (sent, vlans.send_pending(vlans_out) if vlans_out else [])  # And VLANs changed offline
+                sent += (assets.send_pending(assets_out) if assets_out else [],)  # And assets
                 changes = client.fetch_all_changes(revision)
                 try:
                     changes += (client.fetch_log(history_revision),)  # History, kept for offline use
@@ -1002,10 +1021,15 @@ class IpamTab(QWidget):
             self.sync_again = False
             QTimer.singleShot(0, self.sync_now)
         sent_results, result = result
-        sent_results, vlan_results = sent_results if isinstance(sent_results, tuple) else (sent_results, [])
+        # (addresses', VLANs', assets'): as far as it got before the server went
+        sent_parts = sent_results if isinstance(sent_results, tuple) else (sent_results,)
+        sent_results, vlan_results, asset_results = (tuple(sent_parts) + ([], []))[:3]
         if vlan_results:
             sent, refused = TeamVlanStore(self.team).apply_sent(vlan_results)
             log.info("Sent %d VLAN changes made offline to the IPAM server; %d refused", sent, refused)
+        if asset_results:
+            sent, refused = TeamAssetStore(self.team).apply_sent(asset_results)
+            log.info("Sent %d asset changes made offline to the IPAM server; %d refused", sent, refused)
         if sent_results:
             sent, refused = self.team.apply_sent(sent_results)
             log.info("Sent %d offline changes to the IPAM server; %d refused", sent, refused)

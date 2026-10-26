@@ -307,6 +307,21 @@ class WatchEngine:
         self.stop_event.set()
 
 
+def _moved_server_key(key, server_directory=None):
+    """The new server's key, when `key` is the admin key of this computer's tribe server and that server has been
+    moved to another computer (the admin key only works on the server itself); else None."""
+    from ..ipam.client import moved_server_key
+    from ..ipam.server import load_config as load_server_config
+    try:
+        admin_secret = load_server_config(server_directory).get("admin_secret")
+    except (OSError, ValueError):
+        return None
+    moved = moved_server_key(server_directory)
+    if moved is None or moved.server_id != key.server_id or key.secret != admin_secret:
+        return None
+    return moved
+
+
 def make_engine(directory=None):
     """The engine as the service runs it, from its folder's config."""
     from ..ipam.client import TeamClient
@@ -315,6 +330,12 @@ def make_engine(directory=None):
     directory = Path(directory or watcher_dir())
     config = load_config(directory)
     key = key_from_config(config)
+    moved = _moved_server_key(key)
+    if moved is not None:  # Installed on the tribe server with its admin key, and the server has moved away since
+        log.info("The tribe server on this computer moved to %s: watching through it", ", ".join(moved.hosts))
+        config.update(hosts=list(moved.hosts), port=moved.port, secret=protect(moved.secret, machine=True))
+        save_config(config, directory)
+        key = moved
 
     def remember_moved(moved_key):  # The tribe server moved to another computer: keep its new address
         latest = load_config(directory)

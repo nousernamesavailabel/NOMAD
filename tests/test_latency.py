@@ -1,7 +1,7 @@
 import csv
 
 from nomad.latency import CSV_HEADER, DEFAULT_TARGETS, HISTORY_SECONDS, CsvLog, LatencyTarget, autoscale, \
-    latency_level, targets_from_dicts
+    host_problem, latency_level, targets_from_dicts
 
 
 def test_stats_cover_only_the_window():
@@ -71,3 +71,20 @@ def test_csv_log(tmp_path):
     assert rows[0] == CSV_HEADER and len(rows) == 5
     assert rows[1][1:] == ["Google", "8.8.8.8", "OK", "12.0", "117", ""]
     assert rows[2][3:] == ["FAIL", "", "", "Request timed out."]
+
+
+def test_host_problem_accepts_addresses_and_names():
+    for host in ("8.8.8.8", " 10.0.0.1 ", "2001:4860:4860::8888", "fe80::1%12", "dns.google", "dns.google.",
+                 "core-sw1", "3com.com", "_gateway"):
+        assert host_problem(host) == "", host
+
+
+def test_host_problem_rejects_bad_hosts():
+    assert host_problem("  ") == "Enter a host name or IP address."
+    for host in ("10.1.1.256", "10.1.1", "10.1.1.1.1", "10..1.1", "192.168.001.1"):
+        assert "not a valid IPv4 address" in host_problem(host), host
+    for host in ("2001:db8::1::2", "fe80::12345", "1.2.3.4:80"):
+        assert "not a valid IPv6 address" in host_problem(host), host
+    assert "no zone" in host_problem("fe80::1%")
+    for host in ("bad host", "-router", "router-", "a..b", "http://x", "x" * 64):
+        assert "not a valid host name" in host_problem(host), host

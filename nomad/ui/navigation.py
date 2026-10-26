@@ -507,7 +507,8 @@ class Navigator(SidebarNavigator):
                    "Network Map": "topology snmp", "Interfaces": "adapter nic ip configuration",
                    "ARP": "neighbors mac",
                    "MAC Finder": "mac address table locate trace switch port find where plugged", "Ports": "scan tcp", "DNS Servers": "dns benchmark",
-                   "Ansible Inventory": "ansible playbook hosts yaml ini export automation"}
+                   "Ansible Inventory": "ansible playbook hosts yaml ini export automation",
+                   "Assets": "inventory hardware serial numbers models ios versions software rma asset tags"}
         self.drawer_list.clear()
         if not query:
             for heading, titles in (("Favorites", self.favorites), ("Recent", self.recent)):

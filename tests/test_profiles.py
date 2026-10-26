@@ -40,3 +40,12 @@ def test_export_round_trip(tmp_path):
     other = ProfileStore(tmp_path / "other.json")
     assert other.import_file(tmp_path / "export.json") == (1, 0, [])
     assert other.get("Lab").config.dns == ["9.9.9.9"]
+
+
+def test_secondary_addresses_and_gateways_round_trip(tmp_path):
+    store = ProfileStore(tmp_path / "profiles.json")
+    config = IPConfig(dhcp=False, address="10.0.0.5", netmask="255.255.255.0", gateway="10.0.0.1", gateway_metric=5,
+                      secondary=["10.0.0.6/24", "172.16.0.1/32"],
+                      extra_gateways=[{"gateway": "10.0.0.2", "metric": 20}, {"gateway": "10.0.0.3", "metric": None}])
+    store.put(Profile("Multi", config))
+    assert ProfileStore(tmp_path / "profiles.json").get("Multi").config == config

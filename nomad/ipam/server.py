@@ -23,6 +23,7 @@ VLANs (API 7; see vlans.py) are rows like the rest, so they come with /api/chang
 add_vlan_domain, update_vlan_domain, delete_vlan_domain, set_vlan, delete_vlan and set_vlans (several at once).
 Subnet placement (API 8; see placement.py): set_placement, plan_move, update_move and complete_move; set_role (API 9).
 Moving subnets between networks (API 10; see network_move.py): move_subnet, and take_subnets (from a laptop's own).
+Assets (API 11; see assets.py): set_asset, set_assets (several at once) and delete_asset.
 
 A server moved to another computer (see migrate.py) answers every request with HTTP 410 and {"hosts", "port"}: the
 new server's address, which laptops switch to by themselves.
@@ -62,6 +63,7 @@ from .. import __version__
 from ..system import replace_file
 from ..netmap.shared import MapError, MapStore
 from .store import IpamError, IpamStore
+from .assets import AssetStore, label as asset_label
 from .placement import PlacementStore
 from .vlans import VlanStore, check_number
 
@@ -77,8 +79,8 @@ TEAM, ADMIN = "team", "admin"
 ADMIN_ONLY_ACTIONS = {"add_network", "delete_network"}
 CERTIFICATE_YEARS = 20
 MAX_WAIT_SECONDS = 55
-API_LEVEL = 10  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
-# 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks.
+API_LEVEL = 11  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
+# 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks, 11 assets.
 # Clients cope with servers below this
 
 
@@ -600,6 +602,47 @@ class IpamServer:
     def _edit_complete_move(self, request):
         self._check_version("subnet_moves", request["move_id"], request.get("expected_version"), "move")
         PlacementStore(self.store).complete_move(request["move_id"])
+
+    # ----------------------------------------------------------------- Assets
+
+    def _check_asset(self, asset_id, expected, values=None):
+        """Like _check_vlan: an asset recorded since the client last synced, or changed or deleted, is a conflict, and
+        so is a serial number already recorded as another asset."""
+        row = self.store.db.execute("SELECT * FROM assets WHERE id = ?", (str(asset_id),)).fetchone()
+        live = row is not None and not row["deleted"]
+        if expected is None and live:
+            raise ConflictError(f"That asset ({row['hostname'] or row['serial'] or row['model']}) was just recorded by "
+                                f"{row['modified_by']} ({self._when(row)}).")
+        if expected is not None and not live:
+            who = f" by {row['modified_by']} ({self._when(row)})" if row is not None else ""
+            raise ConflictError(f"That asset was deleted{who} since you last synced.")
+        if expected is not None and row["version"] != expected:
+            name = row["hostname"] or row["serial"] or row["model"] or "That asset"
+            raise ConflictError(f"{name} was changed by {row['modified_by']} ({self._when(row)}) since you last synced. "
+                                "Check it again, then make your change.")
+        serial = (values or {}).get("serial")
+        if serial:
+            other = AssetStore(self.store).by_serial(serial)
+            if other is not None and other.id != asset_id:
+                raise ConflictError(f"Serial number {other.serial} was recorded as {asset_label(other)} by "
+                                    f"{other.modified_by} ({other.modified[:16].replace('T', ' ')} UTC).")
+
+    def _edit_set_asset(self, request):
+        values = request.get("values") or {}
+        self._check_asset(request["asset_id"], request.get("expected_version"), values)
+        AssetStore(self.store).set_asset(request["asset_id"], **values)
+
+    def _edit_set_assets(self, request):
+        """Several assets at once (bringing in a network map's): all, or none if any conflicts."""
+        assets = AssetStore(self.store)
+        for item in request["assets"]:
+            values = item.get("values") or {}
+            self._check_asset(item["asset_id"], item.get("expected_version"), values)
+            assets.set_asset(item["asset_id"], **values)
+
+    def _edit_delete_asset(self, request):
+        self._check_asset(request["asset_id"], request.get("expected_version", -1))
+        AssetStore(self.store).delete_asset(request["asset_id"])
 
     # ----------------------------------------------------------------- Backups
 

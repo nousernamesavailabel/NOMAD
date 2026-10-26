@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout
 
 from ..ipam import service
-from ..ipam.client import admin_key, load_saved_key
+from ..ipam.client import admin_key, adopt_moved_key, forget_key, load_saved_key, moved_server_key
 from ..ipam.migrate import MOVE_FILE_SUFFIX, MoveFile, existing_server, export_server, import_server, moved, \
     undo_move
 from ..ipam.server import DEFAULT_PORT, KEY_FILE_SUFFIX, change_team_secret, fingerprint_of_file, load_config, \
@@ -174,6 +174,8 @@ class TribeDialog(QDialog):
                                        "Administrator, then open this again.", "warning")
 
     def refresh_membership(self, admin, state):
+        if admin:
+            adopt_moved_key()  # This computer's server moved away: it carries on as a member of the tribe
         saved = load_saved_key()
         if admin and admin_key() is not None:
             set_hint(self.member_label, "This computer is the tribe server, and uses the server's own key.", "success")
@@ -341,11 +343,16 @@ class TribeDialog(QDialog):
                                 "changes made there stay there, and laptops that switched to it need this server's "
                                 "tribe key file again.") != QMessageBox.Yes:
             return
+        adopted = moved_server_key()
         try:
             undo_move()
         except OSError as error:
             set_hint(self.message_label, f"Couldn't change it: {error.strerror or error}", "error")
             return
+        saved = load_saved_key()
+        if adopted is not None and saved is not None and (saved.server_id, saved.hosts, saved.secret) == \
+                (adopted.server_id, adopted.hosts, adopted.secret):
+            forget_key()  # Saved by adopt_moved_key: this computer is the server again
         if service.status() == service.RUNNING:
             self.run("Restarting the service...", lambda: (service.stop(), service.start()),
                      "This server is back in service.", lambda _: self.window.tribe_key_changed())

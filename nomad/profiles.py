@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from .ipconfig import IPConfig, validate_ip_config, validate_mtu
+from .ipconfig import IPConfig, format_gateway, validate_ip_config, validate_mtu
 from .system import app_data_dir, replace_file
 
 log = logging.getLogger(__name__)
@@ -28,8 +28,10 @@ class Profile:
             raise ValueError("Profile has no name.")
         raw = IPConfig.from_dict(data)
         dns = raw.dns + ["", ""]
-        config, errors, _ = validate_ip_config(raw.dhcp, raw.address, raw.netmask, raw.gateway, dns[0], dns[1],
-                                               raw.dns_auto)
+        extra_gateways = ", ".join(format_gateway(entry["gateway"], entry["metric"]) for entry in raw.extra_gateways)
+        config, errors, _ = validate_ip_config(raw.dhcp, raw.address, raw.netmask,
+                                               format_gateway(raw.gateway, raw.gateway_metric), dns[0], dns[1],
+                                               raw.dns_auto, ", ".join(raw.secondary), extra_gateways)
         if errors:
             raise ValueError(f"Profile '{name}': {' '.join(errors.values())}")
         if raw.mtu is not None:

@@ -7,6 +7,7 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QComboBox, QDateTimeEdit, QDialog, QDialogButtonBox, QFormLayout, \
     QHBoxLayout, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout
 
+from ..ipam.assets import all_asset_history, asset_history, label as asset_label
 from ..ipam.history import CREATED, DELETED, address_history, network_history, subnet_history
 from ..ipam.vlans import domain_history, vlan_history
 from .common import set_hint
@@ -18,7 +19,8 @@ ACTION_COLORS = {CREATED: "success", DELETED: "error"}
 
 class HistoryDialog(QDialog):
     """kind: "address" (subject: the IP), "subnet" (a Subnet) or "network" (a Network); or for VLANs, "vlan"
-    (subject: the VLAN number, network_id: its domain's id) or "vlan_domain" (a VlanDomain)."""
+    (subject: the VLAN number, network_id: its domain's id) or "vlan_domain" (a VlanDomain); or "asset" (an Asset), or
+    "assets" (every asset's)."""
 
     def __init__(self, parent, store, network_id, kind, subject, note=""):
         super().__init__(parent)
@@ -27,8 +29,10 @@ class HistoryDialog(QDialog):
         self.resize(1000, 560)
         title = {"address": f"History of {subject}", "subnet": f"History of {getattr(subject, 'cidr', '')}",
                  "network": f"History of {getattr(subject, 'name', '')}", "vlan": f"History of VLAN {subject}",
-                 "vlan_domain": f"History of {getattr(subject, 'name', '')}"}[kind]
-        listing = kind in ("network", "vlan_domain")  # Changes to several things: say which each was
+                 "vlan_domain": f"History of {getattr(subject, 'name', '')}",
+                 "asset": f"History of {asset_label(subject) if kind == 'asset' else ''}",
+                 "assets": "Changes to the Assets"}[kind]
+        listing = kind in ("network", "vlan_domain", "assets")  # Changes to several things: say which each was
         self.setWindowTitle(title)
         layout = QVBoxLayout(self)
         heading = QLabel(f"<b>{title}</b>, newest first. Times are this computer's local time.")
@@ -77,6 +81,10 @@ class HistoryDialog(QDialog):
             events = vlan_history(self.store, self.network_id, self.subject)
         elif self.kind == "vlan_domain":
             events = domain_history(self.store, self.subject.id)
+        elif self.kind == "asset":
+            events = asset_history(self.store, self.subject.id)
+        elif self.kind == "assets":
+            return all_asset_history(self.store, since)
         else:
             return network_history(self.store, self.network_id, since)
         return [event for event in events if not since or event.when >= since]
@@ -86,7 +94,7 @@ class HistoryDialog(QDialog):
         self.table.setRowCount(len(events))
         for row, event in enumerate(events):
             values = [event.local_time, event.who]
-            if self.kind in ("network", "vlan_domain"):
+            if self.kind in ("network", "vlan_domain", "assets"):
                 values.append(event.subject)
             values += [event.action, event.details]
             for column, value in enumerate(values):

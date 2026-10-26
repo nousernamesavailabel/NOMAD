@@ -6,6 +6,19 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.32.0] - 2026-10-26
+
+### Added
+
+- **Assets** (Network Management > Assets): an inventory of the hardware on the network, with hostname, model, serial number and software version kept together. Each asset is its serial number. Every Network Map crawl now reads each device's chassis (one per stack member) and parts over SNMP (ENTITY-MIB: class, containment and serial columns walked, the rows worth having then asked for by GET), and its software version (sysDescr; PAN-COMMON-MIB and FORTINET-FORTIGATE-MIB where those keep it); phones' firmware (CDP) and serial numbers (LLDP-EXT-MED-MIB) come from their switch. With **Bring in after each crawl** on (the default), each crawl brings that in by itself: new hardware is added, renames and upgrades change the asset (and go in its history), and a hostname, stack member or slot with a different serial number marks the old hardware **Replaced**, pointing at the new one. Changes that might undo what was said by hand wait for **Review**; a serial number on two devices is a conflict, never brought in. **Track parts** brings modules, power supplies, fans and transceivers in as their own assets. **Read Server/Phone Details...** asks Windows servers (WMI over WinRM or DCOM), Linux servers (SSH) and Cisco IP phones (their web page) for their maker, model, serial number and software. Statuses (In service, Spare, In repair (RMA), Replaced, Retired), asset tags, owners, locations and purchase, warranty and end-of-life dates by hand; a Problems column (no serial number, not seen for 30 days, other software than most of its model, warranty or end of life past); history; export to Excel or CSV. Shared with the tribe through the IPAM server (API 11) and changeable offline, like VLANs. MAC addresses too: a phone's or server's, and each switch's and router's base MAC (a stack's members' from CISCO-STACKWISE-MIB, a device's own from its LLDP chassis ID or BRIDGE-MIB address, else its management interface's); a whole MAC typed in the filter box (any usual way of writing it) finds the asset it's the MAC of, including one of a chassis' ports' or VLAN interfaces' MACs, by the open map.
+- **Network Map**: the Devices table has **Serial**, **MAC** and **Software** columns, a device's details a **Hardware** section (each stack member's model and serial number, its software, its parts), and right-click devices > **Tools** > **Read Hardware Again** reads just their hardware; **Show In** > **Assets** goes to their assets.
+- **Interfaces** (This Computer): **Secondary IPs** (more static addresses on the adapter, separated by commas, each with a /prefix or a mask, or taking the subnet mask above) and **More gateways** (more default gateways, each with an optional metric: Windows prefers the lowest and falls back to the others). The **Gateway** box takes a metric too (`192.168.1.1 metric 10`). The adapter's details show each gateway's metric, its link-local address is no longer taken for its static address, and saved profiles keep the secondary addresses, gateways and metrics.
+
+### Changed
+
+- **Latency**: a target that isn't an IPv4 or IPv6 address or a host name is pointed out as you add it (what's wrong with it, in the status line) rather than pinged.
+- **Moving the tribe server**: the computer the server moved away from carries on as a member of the tribe by itself. NOMAD saves the new server's tribe key there and starts its copy of the tribe's data from the server admin's, so changes still waiting to be sent go to the new server. A Map Watcher service installed with the old server's admin key watches through the new one. Connect Tribe forgets that key if this computer becomes the server again.
+
 ## [1.31.1] - 2026-10-15
 
 ### Changed

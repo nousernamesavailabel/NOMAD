@@ -92,3 +92,14 @@ def test_awaiting_dhcp(status, dhcp, addresses, expected):
     adapter = Adapter("1", "Ethernet", status=status, dhcp=dhcp,
                       ipv4=[ipaddress.ip_interface(address) for address in addresses])
     assert adapter.awaiting_dhcp is expected
+
+
+def test_gateways_preferred_first_with_metrics():
+    route = {"InterfaceIndex": 7, "DestinationPrefix": "0.0.0.0/0", "AddressFamily": 2}
+    snapshot = parse_snapshot({
+        "ipInterfaces": [{"InterfaceIndex": 7, "InterfaceAlias": "Lab", "AddressFamily": 2, "Dhcp": 0}],
+        "routes": [{**route, "NextHop": "10.0.0.2", "RouteMetric": 20},
+                   {**route, "NextHop": "10.0.0.1", "RouteMetric": 0}]})
+    adapter = snapshot.adapters["7"]
+    assert adapter.gateways4 == ["10.0.0.1", "10.0.0.2"]
+    assert adapter.gateway_metrics4 == {"10.0.0.1": 0, "10.0.0.2": 20}

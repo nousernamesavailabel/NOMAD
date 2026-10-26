@@ -14,8 +14,15 @@ from .store import STATUSES, IpamStore, ip_key, parse_address, parse_subnet, sub
 
 FIELD_LABELS = {"name": "Name", "status": "Status", "mac": "MAC", "description": "Description",
                 "gateway": "Gateway", "loopbacks": "Loopbacks", "subnets": "Subnets", "vtp_domain": "VTP domain",
-                "ranges": "Ranges", "fields": "Details"}
-SHOWN_STATUSES = dict(STATUSES, active="Active", planned="Planned")  # Addresses' and VLANs' (vlans.STATUSES)
+                "ranges": "Ranges", "fields": "Details",
+                # Assets'
+                "hostname": "Hostname", "serial": "Serial", "kind": "Kind", "model": "Model", "maker": "Maker",
+                "software": "Software", "mgmt_ip": "Management IP", "slot": "Slot", "location": "Location",
+                "asset_tag": "Asset tag", "owner": "Owner", "purchased": "Purchased", "warranty_end": "Warranty ends",
+                "eol": "End of life"}
+# Addresses', VLANs' (vlans.STATUSES) and assets' (assets.STATUSES)
+SHOWN_STATUSES = dict(STATUSES, active="Active", planned="Planned", in_service="In service", spare="Spare",
+                      repair="In repair (RMA)", replaced="Replaced", retired="Retired")
 CREATED, CHANGED, DELETED = "create", "update", "delete"
 
 
@@ -50,6 +57,10 @@ class Event:
             return f"VLAN {row.get('vlan', '')}" + (f" ({name})" if name else "")
         if self.entity == "vlan_domains":
             return f"VLAN domain {row.get('name', '')}"
+        if self.entity == "assets":
+            name = " ".join(part for part in (row.get("hostname"), row.get("slot")) if part)
+            what = " ".join(part for part in (row.get("model"), row.get("serial")) if part)
+            return f"{name} ({what})" if name and what else name or what or "Asset"
         return f"Network {row.get('name', '')}"
 
     @property
@@ -99,6 +110,10 @@ def describe_row(entity, row):
             parts.append(f"gateway {row['gateway']}")
         if row.get("loopbacks"):
             parts.append("loopbacks")
+        return ", ".join(parts)
+    if entity == "assets":
+        parts = [SHOWN_STATUSES.get(row.get("status"), row.get("status", ""))]
+        parts += [row[name] for name in ("model", "serial", "software", "mgmt_ip", "location") if row.get(name)]
         return ", ".join(parts)
     if entity == "vlans":
         parts = [SHOWN_STATUSES.get(row.get("status"), row.get("status", ""))]

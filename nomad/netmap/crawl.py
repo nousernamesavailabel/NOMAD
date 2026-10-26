@@ -15,9 +15,9 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from ..oui import format_mac, vendor
-from ..snmp import V2C, SnmpClient, SnmpError, parse_oid
+from ..snmp import V2C, SnmpClient, SnmpError, oid_text, parse_oid
 from ..snmpv3 import credential_from_json, credential_to_json, is_v3, users_from_json
-from . import collect, l3, vlans
+from . import collect, hardware, l3, vlans
 from .model import AP, HOST, KIND_NAMES, NEIGHBOR, NETWORK_KINDS, NO_SNMP, PHONE, ROUTER, SERVER, SNMP, UNKNOWN, \
     UNREACHABLE, Device, Host, Link, NetworkMap, Trace, display_name, normalize_name, port_key, \
     port_sort_key, short_port
@@ -53,6 +53,7 @@ class CrawlSettings:
     trace: bool = True  # Traceroute to what SNMP couldn't show (for the logical view)
     max_traces: int = l3.MAX_TRACES
     workers: int = WORKERS
+    read_inventory: bool = True  # Each device's chassis, parts, serial numbers and software version (ENTITY-MIB)
     # Device key -> {attribute: value} corrected by hand on the map before: an address to ask it at (CDP gave none,
     # or the wrong one), what kind it is (asked if a network device), its name. Kept over what the crawl finds.
     corrections: dict = field(default_factory=dict)
@@ -383,18 +384,26 @@ class Crawler:
                                                              timing="Neighbors"))
             addresses = collect.lldp_management_addresses(
                 self.walk(client, collect.LLDP_REM_MAN_ADDR_IF_SUBTYPE, tables, "LLDP", timing="Neighbors"))
-            tables.neighbors += collect.lldp_neighbors(lldp_rows, local_ports, tables.interfaces, addresses)
+            inventory = hardware.med_inventory(self.walk(client, hardware.LLDP_MED_INVENTORY_ENTRY, tables,
+                                                         "LLDP-MED inventory", timing="Neighbors"))
+            tables.neighbors += collect.lldp_neighbors(lldp_rows, local_ports, tables.interfaces, addresses,
+                                                       inventory)
         tables.arp = collect.arp(self.walk(client, collect.ARP_PHYS_ADDRESS, tables, "ARP", timing="ARP table"))
         self.read_port_status(client, tables)
         self.read_tunnels(client, tables)
         self.read_routes(client, tables)
         self.read_vlans(client, tables)
+        if self.settings.read_inventory:
+            self.read_inventory(client, tables)
         tables.lag_parents = collect.lag_parents(
             self.walk(client, collect.IF_STACK_STATUS, tables, "Port-channels", timing="Interfaces"),
             self.walk(client, collect.LAG_ATTACHED, tables, "Port-channels", timing="Interfaces"))
         if not self.settings.collect_hosts:
             return
-        tables.own_macs = collect.own_macs(self.walk(client, collect.IF_PHYS_ADDRESS, tables, "Interfaces"))
+        if tables.interface_macs:  # Read with its hardware
+            tables.own_macs = set(tables.interface_macs.values())
+        else:
+            tables.own_macs = collect.own_macs(self.walk(client, collect.IF_PHYS_ADDRESS, tables, "Interfaces"))
         info = tables.info
         vlan_list = sorted(tables.vlan_names) if info.object_id.startswith(collect.CISCO + ".") else []
         if vlan_list and "nx-os" not in info.descr.lower():
@@ -403,6 +412,93 @@ class Crawler:
             tables.notes.append("No per-VLAN MAC tables (community@vlan or SNMPv3 vlan- contexts): read its one "
                                 "MAC table instead")
         self.read_mac_table(client, tables)
+
+    def read_inventory(self, client, tables):
+        """Its chassis (each stack member's) and parts, with their models and serial numbers, from ENTITY-MIB, and
+        the software version it runs. Only the class, containment and serial columns are walked: the rows worth
+        having (chassis, and parts with a serial) are then asked for by GET, unless there are so many that walking
+        the other columns is quicker."""
+        tables.inventory_read = True
+        entry = hardware.ENT_PHYSICAL_ENTRY
+        class_rows = self.walk(client, f"{entry}.{hardware.CLASS}", tables, "Hardware", timing="Inventory")
+        contained_rows, serial_rows, detail_rows = [], [], []
+        if class_rows:
+            contained_rows = self.walk(client, f"{entry}.{hardware.CONTAINED_IN}", tables, "Hardware",
+                                       timing="Inventory")
+            serial_rows = self.walk(client, f"{entry}.{hardware.SERIAL}", tables, "Serial numbers",
+                                    timing="Inventory")
+            chosen = hardware.chosen_indexes(class_rows, serial_rows, contained_rows)
+            requests = -(-len(chosen) * len(hardware.DETAIL_COLUMNS) // hardware.GET_BATCH)
+            walks = len(hardware.DETAIL_COLUMNS) * -(-len(class_rows) // BULK_ROWS)
+            if chosen and walks < requests:
+                for number in hardware.DETAIL_COLUMNS:
+                    detail_rows += self.walk(client, f"{entry}.{number}", tables, "Models", timing="Inventory")
+            elif chosen:
+                detail_rows = self.get_many(client, hardware.detail_oids(chosen), tables, "Models",
+                                            timing="Inventory")
+        tables.parts = hardware.parts(class_rows, contained_rows, serial_rows, detail_rows)
+        vendor_version = ""
+        scalars = hardware.vendor_scalars(tables.info.object_id)
+        if scalars is not None:
+            found = {oid_text(oid): value for oid, value in
+                     self.get_many(client, [parse_oid(oid) for oid in scalars], tables, "Software version",
+                                   timing="Inventory")}
+            vendor_version = collect.text(found.get(scalars[0]))
+            serial = hardware.clean(collect.text(found.get(scalars[1])))
+            if serial and not any(part["serial"] for part in hardware.chassis(tables.parts)):
+                tables.parts.insert(0, hardware.blank_chassis(serial))
+        tables.software = hardware.device_software(tables.info.descr, tables.parts, vendor_version)
+        self.read_base_macs(client, tables)
+
+    def read_base_macs(self, client, tables):
+        """Each chassis' MAC (hardware.set_chassis_macs) and the device's base MAC: a stack's members' from
+        CISCO-STACKWISE-MIB, a device's own from its LLDP chassis ID or bridge address, or (with neither) the MAC of
+        the interface it was asked on."""
+        members = hardware.chassis(tables.parts)
+        stack = {}
+        if len(members) > 1 and tables.info.object_id.startswith(collect.CISCO + "."):
+            stack = hardware.stack_macs(self.walk(client, hardware.STACK_MAC, tables, "Base MACs", timing="Inventory"))
+        oids = [hardware.LLDP_LOC_CHASSIS_SUBTYPE, hardware.LLDP_LOC_CHASSIS_ID]
+        values = {oid_text(oid): value for oid, value in
+                  self.get_many(client, [parse_oid(oid) for oid in oids], tables, "Base MAC", timing="Inventory")}
+        tables.base_mac = hardware.base_mac(values)
+        if not tables.base_mac:
+            values.update((oid_text(oid), value) for oid, value in
+                          self.get_many(client, [parse_oid(hardware.BRIDGE_ADDRESS)], tables, "Base MAC",
+                                        timing="Inventory"))
+            tables.base_mac = hardware.base_mac(values)
+        if not members:
+            return
+        tables.interface_macs = collect.interface_macs(self.walk(client, collect.IF_PHYS_ADDRESS, tables,
+                                                                 "Interfaces", timing="Inventory"))
+        management = ""
+        if not tables.base_mac and len(members) == 1:
+            addresses = tables.addresses or collect.ip_addresses(
+                self.walk(client, collect.IP_ADDR_ENTRY, tables, "IP addresses", timing="Inventory"))
+            management = hardware.management_mac(client.host, addresses, tables.interface_macs)
+        hardware.set_chassis_macs(tables.parts, stack, tables.base_mac, management,
+                                  set(tables.interface_macs.values()))
+
+    def get_many(self, client, oids, tables, what, timing=None):
+        """GET a list of OIDs a few at a time. Values a device doesn't have come back as exceptions (and are skipped
+        by the parsers); a batch it refuses is noted and left out."""
+        self.events("step", client.host, what)
+        started = time.monotonic()
+        rows = []
+        try:
+            for at in range(0, len(oids), hardware.GET_BATCH):
+                if self.should_stop():
+                    break
+                try:
+                    rows += client.get(oids[at:at + hardware.GET_BATCH])
+                except SnmpError as problem:  # SNMPv1 refuses a whole GET for one OID it doesn't have
+                    tables.warnings.append(f"{what}: {problem}")
+        except OSError as problem:
+            tables.warnings.append(f"{what}: {problem}")
+        finally:
+            step = timing or what
+            tables.timings[step] = tables.timings.get(step, 0) + time.monotonic() - started
+        return rows
 
     def read_port_status(self, client, tables):
         """Whether each interface is up, its speed and duplex (only those not shut down are kept)."""
@@ -762,7 +858,7 @@ class Crawler:
         """Fold device old into new: its links, addresses and anything new doesn't know yet."""
         gone = self.map.devices.pop(old)
         target = self.map.devices[new]
-        for attribute in ("name", "mgmt_ip", "platform"):
+        for attribute in ("name", "mgmt_ip", "platform", "software", "serial", "mac"):
             if not getattr(target, attribute):
                 setattr(target, attribute, getattr(gone, attribute))
         links, self.map.links = self.map.links, []
@@ -850,6 +946,7 @@ class Crawler:
         device.port_status = port_status_of(tables)
         apply_vrfs(device, tables)
         apply_tunnels(device, tables)
+        apply_inventory(device, tables)
         for ip in device.addresses:
             self.aliases.setdefault(ip, key)
         device.kind = collect.classify(info.object_id, info.descr, frozenset(self.capabilities.get(key, ())),
@@ -894,7 +991,10 @@ class Crawler:
             if address != neighbor.address:
                 self.aliases.setdefault(address, other)
             other_device = self.add_device(other, name=display_name(neighbor.name), mgmt_ip=neighbor.address,
-                                           platform=neighbor.platform)
+                                           platform=neighbor.platform,
+                                           software=hardware.neighbor_software(neighbor.version),
+                                           serial=neighbor.serial or hardware.serial_in_name(neighbor.name),
+                                           mac=neighbor.chassis_mac)
             if neighbor.address:
                 self.aliases.setdefault(neighbor.address, other)
                 if other_device.source != SNMP and neighbor.address not in other_device.addresses:
@@ -955,7 +1055,9 @@ class Crawler:
             for neighbor in tables.neighbors:
                 kind = collect.neighbor_kind(neighbor)
                 if kind in END_DEVICE_KINDS:
-                    end_devices[(key, port_key(neighbor.local_port))] = neighbor
+                    place = (key, port_key(neighbor.local_port))
+                    # A phone's CDP gives its model and firmware, its LLDP-MED its serial: one of each per port
+                    end_devices[place] = combined(end_devices[place], neighbor) if place in end_devices else neighbor
                 elif neighbor.chassis_mac and kind in NETWORK_KINDS:
                     network_macs.add(neighbor.chassis_mac)
         arp_table = {}
@@ -982,7 +1084,8 @@ class Crawler:
             host = Host(mac=mac, device=key, port=port, ip=arp_table.get(mac, ""), vendor=vendor(mac), vlan=vlan)
             neighbor = end_devices.get((key, port_key(port)))
             if neighbor is not None and mac in (end_device_mac(neighbor), neighbor.port_mac):
-                host.name, host.platform = neighbor.name, neighbor.platform
+                host.name, host.platform = neighbor.name, neighbor.platform or neighbor.model
+                host.software, host.serial = hardware.neighbor_software(neighbor.version), neighbor.serial
                 host.ip = host.ip or neighbor.address
                 named.add((key, port_key(port)))
             hosts.append(host)
@@ -990,7 +1093,9 @@ class Crawler:
             if (key, port) not in named:  # Its MAC wasn't in the table (or the table couldn't be read)
                 mac = end_device_mac(neighbor)
                 hosts.append(Host(mac=mac, device=key, port=short_port(neighbor.local_port), ip=neighbor.address,
-                                  vendor=vendor(mac) if mac else "", name=neighbor.name, platform=neighbor.platform))
+                                  vendor=vendor(mac) if mac else "", name=neighbor.name,
+                                  platform=neighbor.platform or neighbor.model,
+                                  software=hardware.neighbor_software(neighbor.version), serial=neighbor.serial))
         hosts.sort(key=lambda host: (devices[host.device].label.lower(), port_key(host.port), host.mac))
         self.map.hosts = hosts
 
@@ -1030,6 +1135,7 @@ class Check:
         if self.info is not None:
             device.name = device.name or self.info.name
             device.sys_descr, device.sys_object_id = self.info.descr, self.info.object_id
+            device.software = hardware.software_version(self.info.descr) or device.software
             if device.kind == UNKNOWN:
                 device.kind = collect.classify(self.info.object_id, self.info.descr, platform=device.platform)
 
@@ -1060,6 +1166,32 @@ def read_vlans_of(settings, address, client_factory=SnmpClient, routes=False, st
         crawler.read_tunnels(client, tables)
         tables.routes_read = True
     return tables, community
+
+
+def read_inventory_of(settings, address, client_factory=SnmpClient):
+    """Read just a device's hardware and software (its chassis, parts, serial numbers and software version), not its
+    neighbors or tables: Read Inventory Again. Returns (DeviceTables, the community or V3User it answered to), or
+    (None, None) when it answers none."""
+    crawler = Crawler(settings, client_factory=client_factory)
+    client, info, community = crawler.connect(address)
+    if client is None:
+        return None, None
+    tables = collect.DeviceTables(info=info)
+    crawler.read_inventory(client, tables)
+    return tables, community
+
+
+def apply_inventory(device, tables):
+    """Put what was read of a device's hardware on it (a crawl's, or Read Inventory Again's)."""
+    if tables.inventory_read:
+        device.parts = [dict(part) for part in tables.parts]
+        device.inventory_read = True
+        members = hardware.chassis(device.parts)
+        own = members[0].get("mac", "") if len(members) == 1 else ""
+        device.mac = tables.base_mac or own or device.mac
+    device.software = tables.software or hardware.software_version(tables.info.descr) or device.software
+    if tables.info.descr:
+        device.sys_descr = tables.info.descr
 
 
 def apply_vlans(device, tables):
@@ -1171,6 +1303,14 @@ def collect_summary(device, tables):
         parts.append(f"{len(tables.fdb)} MAC table entries")
     if tables.routes:
         parts.append(f"{len(tables.routes)} routes")
+    chassis = hardware.chassis(tables.parts)
+    if chassis:
+        models = ", ".join(sorted({part["model"] for part in chassis if part["model"]}))
+        text = f"{len(chassis)} chassis" if len(chassis) > 1 else "chassis"
+        text += f" {models}" if models else ""
+        parts.append(text + ("" if all(part["serial"] for part in chassis) else " (no serial number)"))
+    if tables.software:
+        parts.append(f"software {tables.software}")
     return ", ".join(parts)
 
 
@@ -1179,6 +1319,16 @@ def prefix_length(mask):
         return ipaddress.ip_network(f"0.0.0.0/{mask}").prefixlen
     except ValueError:
         return 32
+
+
+def combined(first, second):
+    """Two neighbors on one port that are one end device (its CDP and LLDP): the first, with what only the second
+    said filled in."""
+    merged = copy.copy(first)
+    for attribute in ("address", "platform", "chassis_mac", "port_mac", "version", "serial", "model", "maker"):
+        if not getattr(merged, attribute):
+            setattr(merged, attribute, getattr(second, attribute))
+    return merged
 
 
 def end_device_mac(neighbor):

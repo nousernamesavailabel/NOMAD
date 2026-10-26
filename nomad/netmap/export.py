@@ -2,11 +2,13 @@
 import csv
 from xml.sax.saxutils import quoteattr
 
+from .hardware import chassis
 from .layout import NODE_HEIGHT, NODE_WIDTH
 from .model import KIND_NAMES
 
-DEVICE_COLUMNS = ["Name", "Status", "Management IP", "Kind", "Group", "Platform", "Found by", "Links", "Hosts",
-                  "Addresses", "Description", "Problem", "New"]
+DEVICE_COLUMNS = ["Name", "Status", "Management IP", "Kind", "Group", "Platform", "Serial", "MAC", "Software",
+                  "Found by",
+                  "Links", "Hosts", "Addresses", "Description", "Problem", "New"]
 LINK_COLUMNS = ["Device", "Port", "Neighbor", "Neighbor Port", "Seen by"]
 HOST_COLUMNS = ["MAC Address", "IP Address", "Vendor", "Name", "Switch", "Port", "VLAN", "Found by", "Note", "New"]
 
@@ -32,12 +34,25 @@ def device_rows(network_map, status_of=lambda key: ""):
     rows = []
     for device in sorted(network_map.devices.values(), key=lambda device: device.label.lower()):
         rows.append([device.label, status_of(device.key), device.mgmt_ip, KIND_NAMES.get(device.kind, device.kind),
-                     network_map.device_group_label(device.key), device.platform,
-                     device.found_by,
+                     network_map.device_group_label(device.key), device.platform, serial_text(device),
+                     mac_text(device), device.software, device.found_by,
                      str(len(network_map.links_of(device.key))), str(hosts.get(device.key, "")),
                      ", ".join(device.addresses), device.sys_descr.splitlines()[0] if device.sys_descr else "",
                      device.error, news_text(network_map, f"device:{device.key}")])
     return rows
+
+
+def serial_text(device):
+    """Its serial number (a stack's members' in order), as read from it or a neighbor's CDP gave it."""
+    serials = [part["serial"] for part in chassis(device.parts) if part.get("serial")]
+    return ", ".join(serials) or device.serial
+
+
+def mac_text(device):
+    """Its MAC: a stack's members' base MACs in order, else its own (its base MAC, or what its neighbors' LLDP
+    gave)."""
+    macs = [part["mac"] for part in chassis(device.parts) if part.get("mac")]
+    return ", ".join(macs) or device.mac
 
 
 def sorted_links(network_map):
