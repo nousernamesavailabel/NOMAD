@@ -8,5 +8,7 @@ dist/
 .idea/workspace.xml
 *.log
 *.xlsx
+*.zip
+/NOMAD-*/
 
 /.claude/settings.local.json
