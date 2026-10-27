@@ -32,8 +32,9 @@ from ..netmap.layout import BOTTOM, CENTER, GROUP_PAD, GROUP_TITLE, HORIZONTAL, 
     arrange_boxes_in_place, arrange_in_place, distribute, merge_positions, nearest_spacing, respace, spacing_of
 from ..netmap.placement import places as subnet_places
 from ..netmap.tribe import SECRETS
-from ..netmap.model import BUILDING, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIND_NAMES, NO_SNMP, PARENT_KIND, \
-    ROUTER, SNMP, SWITCH, UNCHECKED, UNREACHABLE, Group, Link, NetworkMap, display_name, port_key, short_port
+from ..netmap.model import AP_DOWN, AP_UP, BUILDING, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIND_NAMES, NO_SNMP, \
+    PARENT_KIND, ROUTER, SNMP, SWITCH, UNCHECKED, UNREACHABLE, WLC, Group, Link, NetworkMap, display_name, port_key, \
+    short_port
 from ..snmp import V2C
 from ..snmpv3 import is_v3
 from ..terminal.credentials import CredentialError, protect, unprotect
@@ -62,7 +63,7 @@ from .tribe_join_dialog import connect_to_tribe
 log = logging.getLogger(__name__)
 
 MAP_FILTER = f"Network maps (*{store.EXTENSION})"
-KIND_WEIGHTS = {FIREWALL: 3, ROUTER: 2, SWITCH: 1}  # Breaks ties when choosing the top device
+KIND_WEIGHTS = {FIREWALL: 3, ROUTER: 2, SWITCH: 1, WLC: 1}  # Breaks ties when choosing the top device
 SAVE_DELAY_MS = 1000
 UNDO_LIMIT = 100  # Layout changes Undo can go back through
 ROUTES_SHOWN = 50
@@ -1103,7 +1104,7 @@ class NetworkMapTab(QWidget):
             self.live_positions = snapshot.positions
             first = False  # Keep the view where it is: the map's already on screen
         nodes = list(snapshot.devices)
-        edges = [(link.a, link.b) for link in snapshot.links]
+        edges = snapshot.layout_edges()
         root = self.network_map.root if self.network_map and self.network_map.root in snapshot.devices else None
         self.live_positions = merge_positions(nodes, edges, self.live_positions, root=root,
                                               weight=lambda key: KIND_WEIGHTS.get(snapshot.devices[key].kind, 0))
@@ -1225,7 +1226,7 @@ class NetworkMapTab(QWidget):
             self.undo_stack, self.redo_stack, self.layout_now = [], [], None
         self.network_map, self.map_path = network_map, path
         nodes = list(network_map.devices)
-        edges = [(link.a, link.b) for link in network_map.links]
+        edges = network_map.layout_edges()
         positions = merge_positions(nodes, edges, network_map.positions, root=network_map.root or None,
                                     weight=lambda key: KIND_WEIGHTS.get(network_map.devices[key].kind, 0))
         network_map.positions = positions
@@ -1292,7 +1293,7 @@ class NetworkMapTab(QWidget):
                     "weight": lambda key: 1 if self.l3_nodes[key].kind == l3.DEVICE else 0,
                     "spacing": SPACINGS[self.arrange_spacing]}
         network_map = self.network_map
-        options = {"edges": [(link.a, link.b) for link in network_map.links], "root": network_map.root or None,
+        options = {"edges": network_map.layout_edges(), "root": network_map.root or None,
                    "weight": lambda key: KIND_WEIGHTS.get(network_map.devices[key].kind, 0)}
         if self.keep_groups and network_map.groups:
             options["path_of"] = {key: [group.key for group in network_map.group_path(key)] for key in keys}
@@ -1875,6 +1876,12 @@ class NetworkMapTab(QWidget):
                           "over SNMP, and by the VPNs page when it has read them.")
         action.setCheckable(True)
         action.setChecked(shown is not None and shown[0] == overlays.VPNS)
+        action.setEnabled(usable)
+        action = menu.addAction("Wireless", lambda: self.show_overlay(overlays.WIRELESS))
+        action.setToolTip("The wireless controllers and their access points: each AP green when its controller has "
+                          "it up, red when it's down, with a dashed line to its controller.")
+        action.setCheckable(True)
+        action.setChecked(shown is not None and shown[0] == overlays.WIRELESS)
         action.setEnabled(usable)
         menu.addMenu(stp_menu)
         if usable:
@@ -4300,6 +4307,25 @@ def fill_table(table, rows, ip_columns=(), keys=None):
     table.setSortingEnabled(True)
 
 
+def wireless_rows(network_map, key):
+    """[(label, value)] for a device's details: an access point's controller, AP group and status, or a wireless
+    controller's access points and Wi-Fi clients."""
+    device = network_map.devices[key]
+    rows = []
+    if device.ap_status:
+        controller = network_map.devices.get(device.controller)
+        rows += [("Access point", f"{'Up' if device.ap_status == AP_UP else 'Down'}, as its controller says"),
+                 ("Controller", controller.label if controller is not None else device.controller),
+                 ("AP group", device.ap_group)]
+    aps = network_map.access_points_of(key)
+    if aps:
+        down = sum(1 for other in aps if network_map.devices[other].ap_status == AP_DOWN)
+        clients = sum(1 for host in network_map.hosts if host.controller == key)
+        rows += [("Access points", f"{len(aps)}" + (f" ({down} down)" if down else "")),
+                 ("Wi-Fi clients", str(clients))]
+    return rows
+
+
 def device_html(network_map, key, state=None, live=None):
     """state: the device's monitor.DeviceStatus while it's monitored; live: the tunnels as monitoring last read
     them."""
@@ -4316,6 +4342,7 @@ def device_html(network_map, key, state=None, live=None):
             ("Addresses", ", ".join(device.addresses)), ("Problem", device.error), ("Note", device.note),
             ("Corrected", "; ".join(f"{CORRECTED_NAMES[attribute]} (the crawl found {shown_value(attribute, found)})"
                                     for attribute, (found, _) in device.corrected.items()))]
+    rows[1:1] = wireless_rows(network_map, key)
     for label, value in rows:
         if value:
             parts.append(f"<tr><td><b>{escape(label)}</b>&nbsp;</td><td>{escape(value)}</td></tr>")

@@ -7,7 +7,9 @@ added, and the hosts on its ports and its VLANs are refreshed (VLANs added, gone
 another VLAN, subnets that appear, go or move between devices, and devices upgraded or with hardware swapped,
 added or taken out are noted in the watch log). Every so often every switch is read like that, to catch hosts
 plugged in where nothing announced it. What turns up is added to the map straight away and noted in its news, so it's
-drawn as new until someone looks at it.
+drawn as new until someone looks at it. A wireless controller is asked for its access points' status too, so an AP
+going down (or coming back) has it read again, and noted in the watch log; its Wi-Fi clients come and go, roaming
+between APs, so they aren't news.
 
 Qt-free: NOMAD's map page and the Map Watcher service both use it. Reading runs on a worker thread; what changes the
 map (apply_refresh) runs wherever the map is owned.
@@ -17,11 +19,11 @@ import logging
 from dataclasses import dataclass, field, replace
 
 from ..snmp import SnmpError, parse_oid
-from . import collect, hardware
+from . import aruba, collect, hardware
 from .placement import places, vrf_text
 from .vlans import vlan_names
 from .crawl import CrawlSettings, Crawler, in_scope, parse_networks
-from .model import NETWORK_KINDS, SNMP, normalize_name
+from .model import AP_DOWN, AP_UP, NETWORK_KINDS, SNMP, WLC, normalize_name
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ PORTS_LISTED = 4  # Ports moved to another VLAN named in one line of the watch l
 CDP_DEVICE_ID = f"{collect.CDP_CACHE_ENTRY}.6"
 LLDP_SYS_NAME = f"{collect.LLDP_REM_ENTRY}.9"
 LLDP_CHASSIS_ID = f"{collect.LLDP_REM_ENTRY}.5"
+AP_STATUS = f"{aruba.AP_ENTRY}.{aruba.AP_STATUS}"
 DEVICE, HOST = "device", "host"
 
 
@@ -95,7 +98,12 @@ def switches(network_map):
             if device.source == SNMP and device.mgmt_ip and device.kind in NETWORK_KINDS and not device.manual}
 
 
-def neighbor_signature(cdp_rows, lldp_name_rows, lldp_chassis_rows):
+def controllers(network_map):
+    """Keys of the wireless controllers among switches(): their access points' status is part of what's watched."""
+    return {key for key in switches(network_map) if network_map.devices[key].kind == WLC}
+
+
+def neighbor_signature(cdp_rows, lldp_name_rows, lldp_chassis_rows, ap_rows=()):
     """What a switch's neighbors are, from three short columns: {(local port index, neighbor name)}. The port is the
     table's own index (ifIndex for CDP, LLDP's port number), so interface names needn't be read."""
     signature = set()
@@ -120,32 +128,37 @@ def neighbor_signature(cdp_rows, lldp_name_rows, lldp_chassis_rows):
                 names[(index[1], index[2])] = name  # The system name over the chassis ID
     for (port, _), name in names.items():
         signature.add(("lldp", port, normalize_name(name)))
+    for index, value in collect.column(ap_rows, AP_STATUS).items():  # A wireless controller's APs: up or down
+        if len(index) == 6:
+            signature.add(("ap", collect.mac_text(bytes(index)), AP_UP if value.value == aruba.AP_UP else AP_DOWN))
     return frozenset(signature)
 
 
-def read_signature(address, options, client_factory, should_stop=lambda: False):
-    """A switch's neighbor signature, or None if it didn't answer any community string. Runs on a worker thread."""
+def read_signature(address, options, client_factory, should_stop=lambda: False, wireless=False):
+    """A switch's neighbor signature, or None if it didn't answer any community string. wireless: it's a wireless
+    controller, whose APs' status is in it too. Runs on a worker thread."""
     from .crawl import communities_for, parse_overrides
     for community in communities_for(address, options.communities, parse_overrides(options.overrides)):
         if should_stop():
             return None
         try:
             client = client_factory(address, community, options.version, timeout=options.timeout, retries=1)
-            columns = [list(client.walk(parse_oid(root), should_stop=should_stop))
-                       for root in (CDP_DEVICE_ID, LLDP_SYS_NAME, LLDP_CHASSIS_ID)]
+            roots = (CDP_DEVICE_ID, LLDP_SYS_NAME, LLDP_CHASSIS_ID) + ((AP_STATUS,) if wireless else ())
+            columns = [list(client.walk(parse_oid(root), should_stop=should_stop)) for root in roots]
             return neighbor_signature(*columns)
         except (SnmpError, OSError) as problem:
             log.debug("Neighbors of %s with a community: %s", address, problem)
     return None
 
 
-def read_signatures(targets, options, client_factory, should_stop=lambda: False, workers=16):
-    """{key: signature or None} for {key: address}, several at once."""
+def read_signatures(targets, options, client_factory, should_stop=lambda: False, workers=16, wireless=()):
+    """{key: signature or None} for {key: address}, several at once. wireless: the keys of wireless controllers."""
     from concurrent.futures import ThreadPoolExecutor
     if not targets:
         return {}
     with ThreadPoolExecutor(max_workers=min(workers, len(targets))) as executor:
-        futures = {key: executor.submit(read_signature, address, options, client_factory, should_stop)
+        futures = {key: executor.submit(read_signature, address, options, client_factory, should_stop,
+                                        key in wireless)
                    for key, address in targets.items()}
         return {key: future.result() for key, future in futures.items()}
 
@@ -203,12 +216,12 @@ def fallback_addresses(network_map, keys, scope):
     return result
 
 
-def read_switches(targets, fallbacks, options, client_factory, should_stop=lambda: False, workers=16):
+def read_switches(targets, fallbacks, options, client_factory, should_stop=lambda: False, workers=16, wireless=()):
     """read_signatures, then, for switches that didn't answer at their management address, their other addresses
-    (fallbacks, from fallback_addresses) in turn. Returns ({key: signature or None}, {key: (old address, address
-    it answers at now)}). Runs on a worker thread."""
+    (fallbacks, from fallback_addresses) in turn. wireless: the keys of wireless controllers (controllers()).
+    Returns ({key: signature or None}, {key: (old address, address it answers at now)}). Runs on a worker thread."""
     from concurrent.futures import ThreadPoolExecutor
-    signatures = read_signatures(targets, options, client_factory, should_stop, workers)
+    signatures = read_signatures(targets, options, client_factory, should_stop, workers, wireless)
     silent = [key for key, signature in signatures.items() if signature is None and fallbacks.get(key)]
     moved = {}
     if not silent or should_stop():
@@ -218,7 +231,7 @@ def read_switches(targets, fallbacks, options, client_factory, should_stop=lambd
         for address in fallbacks[key]:
             if should_stop():
                 return None
-            signature = read_signature(address, options, client_factory, should_stop)
+            signature = read_signature(address, options, client_factory, should_stop, key in wireless)
             if signature is not None:
                 return address, signature
         return None
@@ -272,11 +285,12 @@ class NeighborBaseline:
             before = self.signatures.get(key)
             if before is None:
                 names = known_names(network_map) if names is None else names
-                if any(name not in names for _, _, name in signature):
+                if any(name not in names for kind, _, name in signature if kind != "ap"):
                     changed.append(key)
                 self.signatures[key] = signature
             elif before != signature:
-                if signature - before:  # Something appeared (one that's gone is noted, not read again)
+                # Something appeared, or an AP went up or down (one that's gone is noted, not read again)
+                if signature - before:
                     changed.append(key)
                 self.signatures[key] = signature
         return changed
@@ -307,9 +321,11 @@ class WatchResult:
     vlans: list = field(default_factory=list)  # Device keys whose VLANs changed
     subnets: list = field(default_factory=list)  # (VRF, CIDR) of subnets that appeared, went or moved
     hardware: list = field(default_factory=list)  # Device keys whose software or hardware changed
+    access_points: list = field(default_factory=list)  # Keys of access points that went down or came back up
 
     def __bool__(self):
-        return bool(self.devices or self.hosts or self.moved or self.vlans or self.subnets or self.hardware)
+        return bool(self.devices or self.hosts or self.moved or self.vlans or self.subnets or self.hardware
+                    or self.access_points)
 
 
 def place_text(network_map, device_key, port):
@@ -351,6 +367,7 @@ def apply_refresh(network_map, crawled, now=None, by=""):
     before_vlans = {key: (vlan_names(device), dict(device.port_vlans)) for key, device in network_map.devices.items()}
     before_places = places(network_map)
     before_hardware = {key: hardware_snapshot(device) for key, device in network_map.devices.items()}
+    before_aps = {key: device.ap_status for key, device in network_map.devices.items() if device.ap_status}
     recent = (now - datetime.timedelta(days=HOST_NEW_DAYS)).date().isoformat()
     added, read = network_map.merge_crawl(crawled)
     network_map.fold_manual_devices(new=set(added))
@@ -367,7 +384,7 @@ def apply_refresh(network_map, crawled, now=None, by=""):
         result.lines.append(f"New device: {device.label}{address}" + (f" on {where}" if where else ""))
     for host in network_map.hosts:
         if not host.mac or host.device not in read:
-            continue
+            continue  # (Wi-Fi clients are on access points, which aren't read: they roam, so aren't news)
         before = before_hosts.get(host.mac)
         where = place_text(network_map, host.device, host.port)
         name = host.name or host.ip or host.mac
@@ -395,6 +412,14 @@ def apply_refresh(network_map, crawled, now=None, by=""):
             if lines:
                 result.hardware.append(key)
                 result.lines += lines
+    for key, device in sorted(network_map.devices.items()):
+        if device.controller not in read or key not in before_aps or key not in crawled.devices:
+            continue
+        if device.ap_status != before_aps[key]:
+            controller = network_map.devices[device.controller].label
+            result.access_points.append(key)
+            result.lines.append(f"Access point {device.label} " + ("went down" if device.ap_status == AP_DOWN
+                                                                   else "is up again") + f" ({controller})")
     for subnet, line in subnet_changes(network_map, before_places, places(network_map), read):
         result.subnets.append(subnet)
         result.lines.append(line)

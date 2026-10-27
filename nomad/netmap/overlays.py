@@ -1,6 +1,7 @@
 """Overlays on the network map's physical view, beside Highlight VLAN: what one failure would cut off (and the
 single points of failure), links whose two ends are set up differently, a VRF, a subnet, coloring devices by what
-they run or where they are, and whether they run their model's software target (the Assets page's).
+they run or where they are, whether they run their model's software target (the Assets page's), and the wireless
+controllers with their access points.
 
 Each is an Overlay worked out from the map alone: marks for devices (by key) and links (by id(Link), as the view
 draws the map's own Link objects), the rest fading when it fades, and a legend.
@@ -11,19 +12,21 @@ from dataclasses import dataclass, field
 
 from . import vlans as vlan_info
 from .collect import BLOCKING, DISABLED, FORWARDING
-from .model import AP, FIREWALL, KIND_NAMES, NETWORK_KINDS, ROUTER, SOURCE_NAMES, SWITCH, port_key
+from .model import AP, AP_DOWN, AP_UP, FIREWALL, KIND_NAMES, NETWORK_KINDS, ROUTER, SOURCE_NAMES, SWITCH, WLC, \
+    port_key
 
 # Kinds of overlay
 IMPACT, SPOF, TRUNKS, VRF, SUBNET, COLOR = "impact", "spof", "trunks", "vrf", "subnet", "color"
 SPEED, STP, UTIL = "speed", "stp", "util"  # From what's read over SNMP: ports' status, a VLAN's tree, counters
 VPNS = "vpns"  # The tunnels between the map's routers: the crawl's, and the VPNs page's
 SOFTWARE = "software"  # Each device against its model's software target (ipam.targets)
+WIRELESS = "wireless"  # Wireless controllers, their access points (up or down) and the line from each AP to its own
 # How a link's drawn
 SOLID, DASH, DOT = "solid", "dash", "dot"
 # Color By: what devices can be colored by, and what each is called
 COLOR_BY = [("kind", "Kind"), ("platform", "Model"), ("version", "Software Version"), ("site", "Site"),
              ("vtp_domain", "VTP Domain"), ("vtp_mode", "VTP Mode"), ("stp_mode", "Spanning Tree"),
-             ("source", "How It Was Found")]
+             ("ap_group", "AP Group"), ("source", "How It Was Found")]
 COLOR_NAMES = dict(COLOR_BY)
 # Distinct colors for Color By's values, most devices first; the rest share OTHER
 PALETTE = ["#58a6ff", "#35f28b", "#f0b429", "#c792ea", "#ff6b6b", "#4ecdc4", "#ff9f43", "#f78fb3", "#a3e635",
@@ -488,7 +491,9 @@ def color_by(network_map, attribute):
     values = {key: attribute_value(network_map, device, attribute) for key, device in network_map.devices.items()}
     if attribute in ("vtp_domain", "vtp_mode", "stp_mode", "version"):  # Only means something for switches etc.
         values = {key: value for key, value in values.items()
-                  if value or network_map.devices[key].kind in (SWITCH, ROUTER, FIREWALL, AP)}
+                  if value or network_map.devices[key].kind in (SWITCH, ROUTER, FIREWALL, WLC, AP)}
+    elif attribute == "ap_group":
+        values = {key: value for key, value in values.items() if network_map.devices[key].kind == AP}
     counts = {}
     for value in values.values():
         if value:
@@ -819,6 +824,57 @@ def vpn_tunnels(network_map, lines):
     return overlay
 
 
+# ----------------------------------------------------------------- Wireless
+
+AP_COLORS = {AP_UP: "success", AP_DOWN: "error", "": "muted"}
+
+
+def wireless(network_map):
+    """The wireless controllers and their access points: each AP green when its controller has it up, red when down
+    (gray when no controller lists it), with a dashed line to its controller; what's not wireless fades."""
+    overlay = Overlay(WIRELESS, "Wireless")
+    devices = network_map.devices
+    clients = {}
+    for host in network_map.hosts:
+        if host.wireless:
+            clients[host.device] = clients.get(host.device, 0) + 1
+    aps = {key: device for key, device in devices.items() if device.kind == AP}
+    for key, device in devices.items():
+        if device.kind != WLC:
+            continue
+        listed = [other for other, ap in aps.items() if ap.controller == key]
+        down = sum(1 for other in listed if aps[other].ap_status == AP_DOWN)
+        overlay.devices[key] = Mark("accent", f"{count_text(len(listed), 'access point')}"
+                                              + (f", {down} down" if down else ""))
+    for key, device in aps.items():
+        state = device.ap_status if device.controller in devices else ""
+        parts = [{AP_UP: "Up", AP_DOWN: "Down"}.get(state, "Not listed by a controller on this map")]
+        if device.ap_group:
+            parts.append(f"AP group {device.ap_group}")
+        if clients.get(key):
+            parts.append(count_text(clients[key], "Wi-Fi client"))
+        mark = Mark(AP_COLORS[state], ", ".join(parts))
+        overlay.devices[key] = mark
+        if state:
+            overlay.extra_lines.append((key, device.controller, Mark(mark.color, f"{device.label}: controller "
+                                                                                 f"{devices[device.controller].label}",
+                                                                     DASH, 1.5)))
+    controllers = sum(1 for device in devices.values() if device.kind == WLC)
+    down = sum(1 for device in aps.values() if device.ap_status == AP_DOWN and device.controller in devices)
+    if aps or controllers:
+        overlay.summary = [count_text(controllers, "controller"), count_text(len(aps), "access point")]
+        if down:
+            overlay.summary.append(f"{down} down")
+        if clients:
+            overlay.summary.append(count_text(sum(clients.values()), "Wi-Fi client"))
+    else:
+        overlay.summary = ["no wireless controllers or access points on this map"]
+    overlay.tone = "error" if down else ""
+    overlay.legend = [("accent", "wireless controller"), ("success", "AP up"), ("error", "AP down"),
+                      ("muted", "AP no controller lists")]
+    return overlay
+
+
 # ----------------------------------------------------------------- What a menu offers
 
 def build(network_map, kind, argument=None, rates=None, monitoring=False):
@@ -834,6 +890,8 @@ def build(network_map, kind, argument=None, rates=None, monitoring=False):
             return vpn_tunnels(network_map, argument or [])
         if kind == SOFTWARE:
             return software_targets(network_map, argument or [])
+        if kind == WIRELESS:
+            return wireless(network_map)
         if kind == STP:
             vlan, views, unread = argument
             return spanning_tree(network_map, vlan, views, unread)

@@ -84,9 +84,9 @@ MAX_WAIT_SECONDS = 55
 STOP_WAIT_SECONDS = 10  # How long stop() waits for the listener to close
 HANDSHAKE_SECONDS = 15  # A connection that hasn't finished its TLS handshake by then is dropped
 IDLE_SECONDS = MAX_WAIT_SECONDS + 30  # A connection that sends nothing for this long is closed (past /api/wait's)
-API_LEVEL = 12  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
+API_LEVEL = 13  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
 # 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks, 11 assets,
-# 12 software targets.
+# 12 software targets, 13 wireless controller assets.
 # Clients cope with servers below this
 
 

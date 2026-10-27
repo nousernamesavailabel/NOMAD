@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDialog, QD
 from ..netmap import diff
 from ..netmap.crawl import MAX_WORKERS, WORKERS, parse_networks
 from ..netmap.model import AP, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIND_NAMES, PARENT_KIND, ROUTER, SERVER, \
-    SITE, SWITCH, UNCHECKED, UNKNOWN, Device, Host, Link, normalize_name, port_sort_key, short_port
+    SITE, SWITCH, UNCHECKED, UNKNOWN, WLC, Device, Host, Link, normalize_name, port_sort_key, short_port
 from ..oui import format_mac, vendor
 from ..snmp import VERSIONS, community_is_valid
 from ..snmpv3 import AUTH_NAMES, PRIV_NAMES, V3User, is_v3
@@ -571,7 +571,7 @@ class DeviceDialog(QDialog):
         self.ip_input = QLineEdit(device.mgmt_ip if device else address)
         self.ip_input.setPlaceholderText("To ping and check over SNMP (optional)")
         self.kind_combo = QComboBox()
-        for kind in (SWITCH, ROUTER, FIREWALL, AP, SERVER, UNKNOWN):
+        for kind in (SWITCH, ROUTER, FIREWALL, WLC, AP, SERVER, UNKNOWN):
             self.kind_combo.addItem(KIND_NAMES[kind], kind)
         if device is not None and self.kind_combo.findData(device.kind) < 0:  # Kept as it is unless changed
             self.kind_combo.addItem(KIND_NAMES.get(device.kind, device.kind), device.kind)

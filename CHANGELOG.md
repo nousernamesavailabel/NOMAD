@@ -6,6 +6,18 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.34.0] - 2026-10-27
+
+### Added
+
+- **Aruba wireless controllers (ArubaOS 8)** on the **Network Map**: a controller the crawl reaches (from its own address, or through a switch's LLDP) is a new kind of device, **Wireless controller** (WLC), read over SNMP like a switch, with its model (from sysDescr) and serial number (WLSX-SYSTEMEXT-MIB). It's asked for its **access points** (WLSX-WLAN-MIB's AP table: each one's name, address, AP group, model, serial number, software and whether it's up), and each goes on the map: an AP a switch's LLDP has found already (matched by its MAC, which is its LLDP chassis ID) gets the rest from the controller, and one no switch on the map has is laid out beside its controller. An AP the controller has **down** is drawn red ("Down (its controller says)"), and a device's details say an AP's controller, group and status, or a controller's APs and how many are down. Read-only SNMP; tested against walks of an ArubaOS 8.10 Mobility Controller (MC-VA).
+- **Wi-Fi clients**: each controller's clients (its station and user tables: MAC, IP address, the computer's name or the user's, the AP, the SSID and the VLAN) are hosts on their access point, a box per SSID, whatever port a switch learned their MAC on (the controller's uplink, when their traffic is tunneled there). A controller read again replaces its clients; they roam and come and go, so Watch doesn't make news of them.
+- **Network Map** > **Overlay** > **Wireless**: the controllers and their APs, each AP green when up and red when down, with a dashed line to its controller. **Color By** > **AP Group**.
+- **MAC Finder**: a Wi-Fi client is found on its access point and SSID, with the way to it through the switch port the AP is on. Live searches ask the map's wireless controllers first (one GET for the MAC in each one's station table) before the switches, and a search for part of a MAC (or a long list) reads each controller's Wi-Fi clients along with the switches' MAC tables; the controllers' ARP tables help turn an IP address into its MAC; a name search finds a Wi-Fi client by the user it signed in as.
+- **Assets**: wireless controllers and access points come in with each crawl, with their serial numbers, models and software (so Software Targets work for APs too). Shared through the tribe server, API 13 (an older server keeps a controller as Other).
+- **Watch** asks each wireless controller for its APs' status with its neighbors, so an AP going down or coming back has the controller read again and is noted in the watch log ("Access point ap1 went down (wlc1)").
+- **Ansible Inventory**: wireless controllers get a `wireless_controllers` group.
+
 ## [1.33.0] - 2026-10-26
 
 ### Added

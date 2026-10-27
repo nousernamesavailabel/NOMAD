@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from ..oui import format_mac
 from ..snmp import IP_ADDRESS, OBJECT_ID, oid_text, parse_oid
-from .model import AP, FIREWALL, HOST, PHONE, ROUTER, SWITCH, UNKNOWN, normalize_vtp_domain
+from .model import AP, FIREWALL, HOST, PHONE, ROUTER, SWITCH, UNKNOWN, WLC, normalize_vtp_domain
 
 SYS_DESCR, SYS_OBJECT_ID, SYS_NAME = "1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.2.0", "1.3.6.1.2.1.1.5.0"
 IF_DESCR = "1.3.6.1.2.1.2.2.1.2"
@@ -92,9 +92,12 @@ ROUTE_PROTOCOLS = {1: "other", 2: "connected", 3: "static", 4: "icmp", 8: "rip",
 
 CISCO = "1.3.6.1.4.1.9"
 PALO_ALTO = "1.3.6.1.4.1.25461"
+ARUBA = "1.3.6.1.4.1.14823"
+ARUBA_CONTROLLERS, ARUBA_APS = ARUBA + ".1.1", ARUBA + ".1.2"  # sysObjectIDs of ArubaOS controllers, and APs
 RESERVED_VLANS = range(1002, 1006)  # FDDI/Token Ring defaults every Catalyst lists
 FDB_LEARNED = 3
-AP_WORDS = ("air-", "access point", "c9105", "c9115", "c9120", "c9130", "c9136", "c9162", "c9164", "c9166", "cw916")
+AP_WORDS = ("air-", "access point", "aruba ap", "c9105", "c9115", "c9120", "c9130", "c9136", "c9162", "c9164", "c9166",
+            "cw916")
 # IOL and vIOS lab images name no model: their image names say which is the router (I86BI_LINUX-, VIOS-) and which
 # the switch (I86BI_LINUXL2-, VIOS_L2-)
 ROUTER_WORDS = ("isr", "asr1", "asr9", "csr1000", "c8200", "c8300", "c8500", "c8000", "c1100", "c1111", "c1121",
@@ -174,6 +177,7 @@ class DeviceTables:
     tunnels: dict = field(default_factory=dict)  # ifIndex -> (local address, remote address or "", IPsec): TUNNEL-MIB
     ike_sessions: list = field(default_factory=list)  # [(local address, remote address)] of its IKE sessions up
     ike_read: bool = False  # Its IKE sessions were read (none up is then known, not just unread)
+    wireless: object = None  # A wireless controller's access points and their clients (aruba.Controller)
 
 
 @dataclass
@@ -756,9 +760,10 @@ def port_status(admin_rows, oper_rows, high_speed_rows=(), speed_rows=(), duplex
 
 
 def classify(object_id="", descr="", capabilities=frozenset(), platform="", switchports=False):
-    """Switch, router, firewall, access point, phone or host, from what the device says about itself. switchports: a
-    Cisco device's own tables have access or trunk ports, which makes it a switch unless its model is a router's (an
-    ISR with a switch module): its neighbors' CDP says "Router Switch" for any multilayer box."""
+    """Switch, router, firewall, wireless controller, access point, phone or host, from what the device says about
+    itself. switchports: a Cisco device's own tables have access or trunk ports, which makes it a switch unless its
+    model is a router's (an ISR with a switch module): its neighbors' CDP says "Router Switch" for any multilayer
+    box."""
     words = f"{descr} {platform}".lower()
     if object_id.startswith(PALO_ALTO + ".") or "palo alto" in words or "pan-os" in words:
         return FIREWALL
@@ -766,8 +771,12 @@ def classify(object_id="", descr="", capabilities=frozenset(), platform="", swit
         return FIREWALL
     if "phone" in capabilities or "phone" in words:
         return PHONE
-    if "ap" in capabilities or any(word in words for word in AP_WORDS):
+    if "ap" in capabilities or any(word in words for word in AP_WORDS) or object_id.startswith(ARUBA_APS + "."):
         return AP
+    # An ArubaOS controller (its LLDP to a switch says "ArubaOS (MODEL: Aruba7210), Version 8...", an AP's
+    # "ArubaOS (MODEL: 505), Version Aruba AP" with the WLAN access point capability)
+    if object_id.startswith(ARUBA_CONTROLLERS + ".") or "arubaos" in words:
+        return WLC
     # The model says more than the capabilities: an ISR with a switch module announces both
     if any(word in words for word in ROUTER_WORDS):
         return ROUTER

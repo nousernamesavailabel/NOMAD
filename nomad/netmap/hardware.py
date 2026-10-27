@@ -35,7 +35,11 @@ GET_BATCH = 12  # OIDs asked for in one GET: well inside what any agent's reply 
 PAN_SW_VERSION, PAN_SERIAL = "1.3.6.1.4.1.25461.2.1.2.1.1.0", "1.3.6.1.4.1.25461.2.1.2.1.3.0"  # PAN-COMMON-MIB
 FORTI_VERSION = "1.3.6.1.4.1.12356.101.4.1.1.0"  # FORTINET-FORTIGATE-MIB fgSysVersion
 FORTI_SERIAL = "1.3.6.1.4.1.12356.100.1.1.1.0"  # FORTINET-CORE-MIB fnSysSerial
-VENDOR_SCALARS = {"1.3.6.1.4.1.25461": (PAN_SW_VERSION, PAN_SERIAL), "1.3.6.1.4.1.12356": (FORTI_VERSION, FORTI_SERIAL)}
+# ArubaOS: WLSX-SYSTEMEXT-MIB wlsxSysExtSerialNumber. Its version (wlsxSysExtSwVersion, "8.10.0.15 LSR") leaves out
+# the "-FIPS" sysDescr and its APs' table give, so sysDescr's is kept, to match theirs
+ARUBA_SERIAL = "1.3.6.1.4.1.14823.2.2.1.2.1.29.0"
+VENDOR_SCALARS = {"1.3.6.1.4.1.25461": (PAN_SW_VERSION, PAN_SERIAL), "1.3.6.1.4.1.12356": (FORTI_VERSION, FORTI_SERIAL),
+                  "1.3.6.1.4.1.14823": ("", ARUBA_SERIAL)}
 
 # Base MACs: CISCO-STACKWISE-MIB cswSwitchMacAddress (index entPhysicalIndex: the member's chassis), LLDP-MIB's local
 # chassis ID (a MAC when its subtype is 4) and BRIDGE-MIB dot1dBaseBridgeAddress
@@ -192,7 +196,7 @@ def chassis(device_parts):
 
 
 def vendor_scalars(object_id):
-    """(version OID, serial OID) of the vendor MIB a device keeps them in, or None."""
+    """(version OID, serial OID) of the vendor MIB a device keeps them in ("" for one it doesn't), or None."""
     return next((oids for prefix, oids in VENDOR_SCALARS.items() if (object_id + ".").startswith(prefix + ".")), None)
 
 

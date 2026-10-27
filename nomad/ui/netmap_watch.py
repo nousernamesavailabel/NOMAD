@@ -98,10 +98,11 @@ class RecheckThread(QThread):
 class SignatureThread(QThread):
     done = pyqtSignal(object, object)  # {key: signature or None}, {key: (old address, address it answers at)}
 
-    def __init__(self, targets, options, client_factory, parent=None, fallbacks=None):
+    def __init__(self, targets, options, client_factory, parent=None, fallbacks=None, wireless=()):
         super().__init__(parent)
         self.targets, self.options, self.client_factory = targets, options, client_factory
         self.fallbacks = fallbacks or {}
+        self.wireless = set(wireless)  # The wireless controllers' keys
         self.stop_event = threading.Event()
 
     def stop(self):
@@ -110,7 +111,7 @@ class SignatureThread(QThread):
     def run(self):
         try:
             self.done.emit(*watch.read_switches(self.targets, self.fallbacks, self.options, self.client_factory,
-                                                self.stop_event.is_set, self.options.workers))
+                                                self.stop_event.is_set, self.options.workers, self.wireless))
         except Exception:
             log.exception("Asking switches for their neighbors failed")
             self.done.emit({}, {})
@@ -509,7 +510,8 @@ class MapWatcher(QObject):
             return
         options = self.page.watch_options()
         fallbacks = watch.fallback_addresses(self.page.network_map, targets, options.scope)
-        self.signature_thread = SignatureThread(targets, options, self.client_factory, self, fallbacks)
+        self.signature_thread = SignatureThread(targets, options, self.client_factory, self, fallbacks,
+                                                watch.controllers(self.page.network_map))
         self.signature_thread.done.connect(self.on_signatures)
         self.signature_thread.finished.connect(self.on_signature_thread_finished)
         self.signature_thread.start()

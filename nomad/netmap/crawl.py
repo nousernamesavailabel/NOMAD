@@ -17,10 +17,10 @@ from dataclasses import dataclass, field
 from ..oui import format_mac, vendor
 from ..snmp import V2C, SnmpClient, SnmpError, oid_text, parse_oid
 from ..snmpv3 import credential_from_json, credential_to_json, is_v3, users_from_json
-from . import collect, hardware, l3, vlans
-from .model import AP, HOST, KIND_NAMES, NEIGHBOR, NETWORK_KINDS, NO_SNMP, PHONE, ROUTER, SERVER, SNMP, SSH_READ, \
-    UNKNOWN, UNREACHABLE, Device, Host, Link, NetworkMap, Trace, display_name, normalize_name, port_key, \
-    port_sort_key, short_port
+from . import aruba, collect, hardware, l3, vlans
+from .model import AP, AP_DOWN, AP_UP, CONTROLLER, HOST, KIND_NAMES, NEIGHBOR, NETWORK_KINDS, NO_SNMP, PHONE, \
+    ROUTER, SERVER, SNMP, SSH_READ, UNKNOWN, UNREACHABLE, Device, Host, Link, NetworkMap, Trace, display_name, \
+    normalize_name, port_key, port_sort_key, short_port
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +176,7 @@ class Crawler:
         self.deleted = {key for key, addresses in settings.deleted.items() if not seeds & set(addresses)}
         self.deleted_addresses = {address for key in self.deleted for address in settings.deleted[key]}
         self.left_out = set()  # Deleted devices seen as neighbors (logged once each)
+        self.ap_controllers = {}  # Access point key -> the key of the controller that has it up (or lists it)
 
     # ----------------------------------------------------------------- Scope
 
@@ -253,7 +254,9 @@ class Crawler:
             self.events("phase", "Placing hosts on switch ports")
         self.place_hosts()
         if self.settings.collect_hosts:
-            self.events("log", f"Placed {len(self.map.hosts)} hosts on switch ports")
+            wireless = sum(1 for host in self.map.hosts if host.wireless)
+            self.events("log", f"Placed {len(self.map.hosts) - wireless} hosts on switch ports"
+                               + (f" and {wireless} Wi-Fi clients on access points" if wireless else ""))
         if self.settings.trace and not self.map.stopped:
             self.trace_paths()
         self.map.finished = _now()
@@ -393,6 +396,8 @@ class Crawler:
         self.read_tunnels(client, tables)
         self.read_routes(client, tables)
         self.read_vlans(client, tables)
+        if aruba.is_controller(tables.info.object_id, tables.info.descr):
+            self.read_wireless(client, tables)
         if self.settings.read_inventory:
             self.read_inventory(client, tables)
         tables.lag_parents = collect.lag_parents(
@@ -441,14 +446,37 @@ class Crawler:
         scalars = hardware.vendor_scalars(tables.info.object_id)
         if scalars is not None:
             found = {oid_text(oid): value for oid, value in
-                     self.get_many(client, [parse_oid(oid) for oid in scalars], tables, "Software version",
+                     self.get_many(client, [parse_oid(oid) for oid in scalars if oid], tables, "Software version",
                                    timing="Inventory")}
-            vendor_version = collect.text(found.get(scalars[0]))
+            vendor_version = collect.text(found.get(scalars[0])) if scalars[0] else ""
             serial = hardware.clean(collect.text(found.get(scalars[1])))
             if serial and not any(part["serial"] for part in hardware.chassis(tables.parts)):
-                tables.parts.insert(0, hardware.blank_chassis(serial))
+                model = tables.wireless.model if tables.wireless is not None else ""
+                tables.parts.insert(0, hardware.blank_chassis(serial, model))
         tables.software = hardware.device_software(tables.info.descr, tables.parts, vendor_version)
         self.read_base_macs(client, tables)
+
+    def read_wireless(self, client, tables):
+        """A wireless controller's access points (each one's name, address, model, serial number, software and
+        whether it's up) and the Wi-Fi clients on them (MAC, address, name, AP, SSID and VLAN). Only the columns
+        wanted are walked: a controller's tables have dozens of counters."""
+        def walk(entry, numbers, what):
+            rows = []
+            for number in numbers:
+                rows += self.walk(client, f"{entry}.{number}", tables, what, timing="Wireless")
+            return rows
+        ap_rows = walk(aruba.AP_ENTRY, aruba.AP_COLUMNS, "Access points")
+        access_points = aruba.access_points(ap_rows)
+        found = aruba.Controller(aps=access_points, model=aruba.controller_model(tables.info.descr))
+        if self.settings.collect_hosts:
+            found.clients = aruba.clients(walk(aruba.STATION_ENTRY, aruba.STATION_COLUMNS, "Wi-Fi clients"),
+                                          walk(aruba.USER_ENTRY, aruba.USER_COLUMNS, "Wi-Fi clients"),
+                                          self.walk(client, aruba.BSSID_ESSID, tables, "Wi-Fi clients",
+                                                    timing="Wireless"), access_points)
+        tables.wireless = found
+        up = sum(1 for item in access_points if item.up)
+        tables.notes.append(f"Wireless controller: {len(access_points)} access points ({up} up)"
+                            + (f", {len(found.clients)} Wi-Fi clients" if self.settings.collect_hosts else ""))
 
     def read_base_macs(self, client, tables):
         """Each chassis' MAC (hardware.set_chassis_macs) and the device's base MAC: a stack's members' from
@@ -951,6 +979,8 @@ class Crawler:
             self.aliases.setdefault(ip, key)
         device.kind = collect.classify(info.object_id, info.descr, frozenset(self.capabilities.get(key, ())),
                                        device.platform, switchports=bool(tables.port_vlans))
+        if tables.wireless is not None:
+            self.add_access_points(key, hops, tables.wireless)
         if tables.warnings:
             log.info("%s: %s", device.label, "; ".join(tables.warnings))
             for warning in tables.warnings:
@@ -1044,6 +1074,61 @@ class Crawler:
             next_visits.append((address, hops + 1, other))
         return next_visits
 
+    def add_access_points(self, key, hops, found):
+        """Put a wireless controller's access points on the map. One a switch's LLDP has put there already (matched
+        by its MAC, which is its LLDP chassis ID, then by its address or name) gets what the controller knows of it;
+        the rest are added, and laid out beside the controller. An AP two controllers list (a cluster, or a
+        conductor and its controller) is the one that has it up's."""
+        controller = self.map.devices[key]
+        controller.platform = found.model or controller.platform  # Over its LLDP's whole description
+        by_mac = {device.mac: other for other, device in self.map.devices.items()
+                  if device.mac and device.kind in (AP, UNKNOWN) and device.source != SNMP}
+        for item in found.aps:
+            other = by_mac.get(item.mac) or self.find(item.ip, item.name)
+            device = self.map.devices.get(other) if other else None
+            if device is not None and (device.source == SNMP or device.kind not in (AP, UNKNOWN)):
+                other = None  # Another device with its name (or address): not this AP
+            if other is None:
+                other = self.new_key(item.name, item.ip) or f"ap:{item.mac}"
+                if other in self.map.devices and self.map.devices[other].kind not in (AP, UNKNOWN):
+                    other = f"ap:{item.mac}"
+            claimed = self.ap_controllers.get(other)
+            if claimed not in (None, key) and (not item.up or self.map.devices[other].ap_status == AP_UP):
+                continue  # Listed by another controller that has it up (or had it first)
+            self.ap_controllers[other] = key
+            fresh = other not in self.map.devices
+            device = self.add_device(other, name=item.name, mgmt_ip=item.ip, mac=item.mac)
+            device.kind = AP
+            if fresh or device.source == NEIGHBOR:
+                device.source = CONTROLLER
+            if fresh:
+                device.hops = hops + 1
+            device.platform = item.model or device.platform
+            device.serial = item.serial or device.serial
+            device.software = item.software or device.software
+            device.mac = item.mac
+            if item.ip and item.ip not in device.addresses:
+                device.addresses.append(item.ip)
+                self.aliases.setdefault(item.ip, other)
+            device.controller, device.ap_group = key, item.group
+            device.ap_status = AP_UP if item.up else AP_DOWN
+
+    def wireless_hosts(self, arp_table):
+        """{MAC: Host} of the Wi-Fi clients the controllers read have, each on its access point (port: its SSID), or
+        on the controller when its AP isn't on the map."""
+        devices, found = self.map.devices, {}
+        for key, tables in self.tables.items():
+            if tables.wireless is None:
+                continue
+            ap_keys = {device.mac: other for other, device in devices.items() if device.controller == key}
+            for client in tables.wireless.clients:
+                place = ap_keys.get(client.ap) or (self.find("", client.ap_name) if client.ap_name else None)
+                found[client.mac] = Host(mac=client.mac, device=place if place in devices else key,
+                                         port=client.ssid or aruba.WIFI, ip=client.ip or arp_table.get(client.mac, ""),
+                                         vendor=vendor(client.mac), vlan=client.vlan, name=client.name,
+                                         controller=key, user=client.user)
+        return found
+
     def place_hosts(self):
         """Put each MAC on the one edge port it was learned on, with its IP from the ARP tables. Phones and other end
         devices that announce themselves over CDP/LLDP get their names."""
@@ -1064,6 +1149,10 @@ class Crawler:
         for tables in self.tables.values():
             for mac, addresses in tables.arp.items():
                 arp_table.setdefault(mac, addresses[0])
+        # Wi-Fi clients are on their access point, wherever a switch learned their MAC (a controller's uplink, when
+        # their traffic is tunneled to it); the controllers' APs aren't hosts on the switch ports they're plugged into
+        wireless = self.wireless_hosts(arp_table)
+        skip = set(wireless) | {device.mac for device in devices.values() if device.controller and device.mac}
 
         candidates = {}  # MAC -> [(switch key, port name, vlan, MACs on that port)]
         for key, tables in self.tables.items():
@@ -1075,7 +1164,8 @@ class Crawler:
             for _, port, _ in learned:
                 port_counts[port] = port_counts.get(port, 0) + 1
             for mac, port, vlan in learned:
-                if port_key(port) not in uplinks and mac not in network_macs and mac not in tables.own_macs:
+                if port_key(port) not in uplinks and mac not in network_macs and mac not in tables.own_macs \
+                        and mac not in skip:
                     candidates.setdefault(mac, []).append((key, port, vlan, port_counts[port]))
 
         hosts, named = [], set()
@@ -1092,10 +1182,13 @@ class Crawler:
         for (key, port), neighbor in end_devices.items():
             if (key, port) not in named:  # Its MAC wasn't in the table (or the table couldn't be read)
                 mac = end_device_mac(neighbor)
+                if mac in skip:
+                    continue
                 hosts.append(Host(mac=mac, device=key, port=short_port(neighbor.local_port), ip=neighbor.address,
                                   vendor=vendor(mac) if mac else "", name=neighbor.name,
                                   platform=neighbor.platform or neighbor.model,
                                   software=hardware.neighbor_software(neighbor.version), serial=neighbor.serial))
+        hosts += wireless.values()
         hosts.sort(key=lambda host: (devices[host.device].label.lower(), port_key(host.port), host.mac))
         self.map.hosts = hosts
 

@@ -9,7 +9,7 @@ asset) are kept as refused for the user to resolve, and the copy goes back to th
 import json
 import uuid
 
-from .assets import DELETE_ASSET, SET_ASSET, AssetStore, clean_values
+from .assets import DELETE_ASSET, SET_ASSET, UNKNOWN, WLC, AssetStore, clean_values
 from .client import OldServerError, ServerUnreachable, TeamKeyError, now_text
 from .store import IpamError
 
@@ -58,8 +58,14 @@ class TeamAssetStore:
         """Whether a change can go straight to the server: it's reachable and nothing is waiting to go first."""
         return self.online and not self.pending_count()
 
+    def for_server(self, values):
+        """values as the server can take them: a server too old to know wireless controllers keeps them as Other."""
+        if values.get("kind") == WLC and not self.team.server_knows_wlc:
+            return dict(values, kind=UNKNOWN)
+        return values
+
     def set_asset(self, asset_id=None, **values):
-        values = clean_values(values)
+        values = self.for_server(clean_values(values))
         asset_id = asset_id or uuid.uuid4().hex  # Made here, so a change made offline keeps its id on the server
         if self._direct():
             current = self.local.find(asset_id)
@@ -75,7 +81,7 @@ class TeamAssetStore:
     def set_assets(self, items):
         """Record several ([{"id" (or None), **values}]): in one request when the server can be reached (all or none),
         otherwise each queued."""
-        items = [dict(clean_values({name: value for name, value in item.items() if name not in ("id",)}),
+        items = [dict(self.for_server(clean_values({name: value for name, value in item.items() if name != "id"})),
                       id=item.get("id") or uuid.uuid4().hex) for item in items]
         if self._direct():
             sent = []
@@ -165,7 +171,7 @@ class TeamAssetStore:
         for entry in entries:
             arguments = dict(asset_id=entry["asset_id"], expected_version=entry["expected_version"])
             if entry["action"] == SET_ASSET:
-                arguments["values"] = entry["data"]
+                arguments["values"] = self.for_server(entry["data"])
             try:
                 reply = self.team.client.edit(entry["action"], **arguments)
             except (ServerUnreachable, OldServerError):

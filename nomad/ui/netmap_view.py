@@ -14,14 +14,14 @@ from ..netmap.overlays import DASH, DOT, TUNNEL_COLORS, Mark
 from ..netmap.layout import GROUP_PAD, GROUP_TITLE, NODE_HEIGHT, NODE_WIDTH
 from ..netmap.monitor import DOWN, UNKNOWN, UP, duration_text
 from ..netmap.vlans import ACCESS, NATIVE, ONE_END, TAGGED
-from ..netmap.model import AP, BUILDING, FIREWALL, GROUP_KINDS, KIND_NAMES, NO_SNMP, ROOM, ROUTER, SERVER, \
-    SHARED_PORT_HOSTS, SITE, SNMP, SWITCH, UNREACHABLE
+from ..netmap.model import AP, AP_DOWN, BUILDING, FIREWALL, GROUP_KINDS, KIND_NAMES, NO_SNMP, ROOM, ROUTER, \
+    SERVER, SHARED_PORT_HOSTS, SITE, SNMP, SWITCH, UNREACHABLE, WLC
 from .theme import COLORS
 
-KIND_COLORS = {SWITCH: COLORS["link"], ROUTER: COLORS["accent"], FIREWALL: "#ff9f43", AP: "#c792ea",
-               SERVER: "#4ecdc4"}
+KIND_COLORS = {SWITCH: COLORS["link"], ROUTER: COLORS["accent"], FIREWALL: "#ff9f43", WLC: "#f78fb3",
+               AP: "#c792ea", SERVER: "#4ecdc4"}
 STATUS_COLORS = {UP: COLORS["success"], DOWN: COLORS["error"], UNKNOWN: COLORS["muted"]}
-KIND_TAGS = {SWITCH: "SW", ROUTER: "RTR", FIREWALL: "FW", AP: "AP", SERVER: "SRV"}
+KIND_TAGS = {SWITCH: "SW", ROUTER: "RTR", FIREWALL: "FW", WLC: "WLC", AP: "AP", SERVER: "SRV"}
 STRIP_WIDTH = 34
 BADGE_HEIGHT = 20
 NEWS_HEIGHT = 15  # The NEW tag over a device found by watching
@@ -232,6 +232,9 @@ class DeviceItem(NodeItem):
         device, state = self.device, self.monitor_state
         tip = [device.label, KIND_NAMES.get(device.kind, device.kind), device.mgmt_ip, device.platform,
                device.found_by, device.error, device.note]
+        if device.ap_status:
+            tip.append(f"{'Down' if self.ap_down else 'Up'}, as its controller {device.controller} says"
+                       + (f" (AP group {device.ap_group})" if device.ap_group else ""))
         if state is not None and state.via:
             tip.append(probe_text(state.via))
         if self.host_count:
@@ -274,10 +277,16 @@ class DeviceItem(NodeItem):
         painter.setPen(QColor(COLORS["panel"]))
         painter.drawText(tag, Qt.AlignCenter, self.route_text)
 
+    @property
+    def ap_down(self):
+        """An access point its wireless controller has down."""
+        return self.device.ap_status == AP_DOWN and self.device.kind == AP
+
     def name_color(self):
-        """Red for a device the crawl couldn't reach, unless a router's checking it: then the router's word counts."""
+        """Red for a device the crawl couldn't reach (unless a router's checking it: then the router's word counts),
+        or an access point its controller has down."""
         state = self.monitor_state
-        if self.device.source == UNREACHABLE and not (state is not None and state.via):
+        if (self.device.source == UNREACHABLE or self.ap_down) and not (state is not None and state.via):
             return COLORS["error"]
         return COLORS["text"]
 
@@ -298,6 +307,8 @@ class DeviceItem(NodeItem):
         elif device.source in (NO_SNMP, UNREACHABLE):
             lines.append((SHORT_SOURCE_NAMES[device.source],
                           COLORS["warning" if device.source == NO_SNMP else "error"]))
+        elif self.ap_down:
+            lines.append(("Down (its controller says)", COLORS["error"]))
         else:
             lines.append((device.platform or (device.sys_descr.splitlines()[0] if device.sys_descr else "")
                           or ("Added by hand" if device.manual else ""), COLORS["muted"]))
@@ -309,7 +320,7 @@ class DeviceItem(NodeItem):
         color = QColor(KIND_COLORS.get(device.kind, COLORS["muted"]))
         painter.setRenderHint(QPainter.Antialiasing)
         self.draw_highlight(painter, self.rect, 7)
-        outline = QColor(COLORS["error"]) if device.source == UNREACHABLE else color
+        outline = QColor(COLORS["error"]) if device.source == UNREACHABLE or self.ap_down else color
         if state is not None:  # Monitored: up/down outranks the device type, which the tag still names
             outline = QColor(STATUS_COLORS[state.status])
         marked = self.mark is not None

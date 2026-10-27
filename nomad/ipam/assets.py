@@ -25,9 +25,10 @@ OUT_OF_SERVICE = {SPARE, REPAIR, REPLACED, RETIRED}  # Not expected on the netwo
 # Kinds: the map's for whole devices, and parts' (netmap.hardware's part classes)
 SWITCH, ROUTER, FIREWALL, AP, PHONE, SERVER, HOST, UNKNOWN = "switch", "router", "firewall", "ap", "phone", \
     "server", "host", "unknown"
+WLC = "wlc"  # A wireless controller (tribe servers below client.WLC_API don't know it: sent to them as UNKNOWN)
 MODULE, POWER, FAN, TRANSCEIVER = "module", "power supply", "fan", "transceiver"
-DEVICE_KINDS = {SWITCH: "Switch", ROUTER: "Router", FIREWALL: "Firewall", AP: "Access point", PHONE: "Phone",
-                SERVER: "Server", HOST: "Computer", UNKNOWN: "Other"}
+DEVICE_KINDS = {SWITCH: "Switch", ROUTER: "Router", FIREWALL: "Firewall", WLC: "Wireless controller",
+                AP: "Access point", PHONE: "Phone", SERVER: "Server", HOST: "Computer", UNKNOWN: "Other"}
 PART_KINDS = {MODULE: "Module", POWER: "Power supply", FAN: "Fan", TRANSCEIVER: "Transceiver"}
 KINDS = dict(DEVICE_KINDS, **PART_KINDS)
 TEXT_FIELDS = ("serial", "kind", "model", "maker", "hostname", "software", "mgmt_ip", "mac", "parent_id", "slot",

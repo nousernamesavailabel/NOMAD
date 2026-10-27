@@ -903,3 +903,25 @@ def test_watch_news_use_the_room_monitor_news_leave(tab, crawled):
     assert tab.status_slack.width() > 0
     tab.set_compact_top(False)
     assert tab.status_slack.parent() is tab.spare and tab.monitor_label.maximumWidth() > 10000
+
+
+def test_wireless_controller_and_access_points(tab):
+    from netmap_fakes import add_aruba
+    from nomad.netmap import overlays
+    from nomad.ui.theme import COLORS
+    network = build_network()
+    add_aruba(network)
+    tab.on_crawled(Crawler(CrawlSettings(seeds=["10.0.0.1"], overrides=[("10.0.0.12/32", "secret")], trace=False),
+                           client_factory=network.client, pinger=network.ping, echo=network.echo).run())
+    items = tab.view.items_by_key
+    assert {"wlc1", "ap1", "ap2", "ap3"} <= set(items)
+    assert items["ap2"].name_color() == COLORS["error"]  # Its controller has it down
+    assert ("Down (its controller says)", COLORS["error"]) in items["ap2"].detail_lines()
+    assert items["ap1"].name_color() == COLORS["text"]
+    assert sum(len(hosts) for hosts in items["ap1"].host_ports.values()) == 1  # The laptop, under its SSID
+    html = netmap_tab.device_html(tab.network_map, "wlc1")
+    assert "Access points" in html and "1 down" in html and "Wi-Fi clients" in html
+    assert "AP group" in netmap_tab.device_html(tab.network_map, "ap2")
+    tab.show_overlay(overlays.WIRELESS)
+    assert len(tab.view.tunnel_items) == 3  # A dashed line from each AP to its controller
+    assert "3 access points" in tab.vlan_label.text()

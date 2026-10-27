@@ -14,13 +14,13 @@ from dataclasses import dataclass, field, replace
 
 from ..netmap import hardware
 from ..netmap.collect import PHONE as MAP_PHONE, classify
-from ..netmap.model import AP, FIREWALL, PHONE, ROUTER, SERVER, SWITCH, UNKNOWN, display_name
+from ..netmap.model import AP, FIREWALL, PHONE, ROUTER, SERVER, SWITCH, UNKNOWN, WLC, display_name
 from .assets import IN_SERVICE, OUT_OF_SERVICE, PART_KINDS, REPLACED, STATUSES, is_part, label, today
 from .store import serial_key
 
 NEW, UPDATE, REPLACE, SAME, CONFLICT = "new", "update", "replace", "same", "conflict"
 ACTION_LABELS = {NEW: "New", UPDATE: "Changed", REPLACE: "Replaced", SAME: "No change", CONFLICT: "Conflict"}
-DEVICE_KINDS = {SWITCH, ROUTER, FIREWALL, AP, PHONE, SERVER, UNKNOWN}  # Map devices that become assets
+DEVICE_KINDS = {SWITCH, ROUTER, FIREWALL, WLC, AP, PHONE, SERVER, UNKNOWN}  # Map devices that become assets
 COMPARED = ("hostname", "model", "maker", "software", "mgmt_ip", "mac", "kind", "slot", "map_device", "location",
             "serial", "parent_id")
 FIELD_NAMES = {"hostname": "Hostname", "model": "Model", "maker": "Maker", "software": "Software",

@@ -3,7 +3,7 @@ from PyQt5.QtCore import QPointF, QRectF, Qt
 from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
-from ..netmap.model import AP, FIREWALL, ROUTER, SERVER, SHARED_PORT_HOSTS, SWITCH, UNKNOWN
+from ..netmap.model import AP, FIREWALL, ROUTER, SERVER, SHARED_PORT_HOSTS, SWITCH, UNKNOWN, WLC
 from ..netmap.monitor import DOWN, UNKNOWN as NOT_CHECKED, UP
 from ..netmap.vlans import ACCESS, NATIVE, ONE_END, TAGGED
 from .netmap_view import KIND_COLORS, KIND_TAGS, PATH_BLOCKED, PATH_CARRIES, PATH_CHOSEN, PATH_GAP, PATH_OFFERED, \
@@ -213,6 +213,7 @@ SECTIONS = [
         (device(SWITCH), "Switch (SW)"),
         (device(ROUTER), "Router (RTR)"),
         (device(FIREWALL), "Firewall (FW)"),
+        (device(WLC), "Wireless controller (WLC): its access points and their Wi-Fi clients are read from it"),
         (device(AP), "Access point (AP)"),
         (device(SERVER), "Server (SRV): only set by hand"),
         (device(UNKNOWN), "Unknown kind (?)"),
@@ -222,7 +223,8 @@ SECTIONS = [
         (device(dashed=True), "Dashed outline: not read over SNMP. Only seen as a neighbor (out of scope or too "
                               "far), pings but doesn't answer SNMP, or added by hand and not checked yet"),
         (device(dashed=True, unreachable=True), "Red outline and name: answered neither SNMP nor ping when "
-                                                         "crawled (a router may still reach it: see Monitoring)"),
+                                                         "crawled (a router may still reach it: see Monitoring), "
+                                                         "or an access point its wireless controller has down"),
         (device(dashed=True, italic=True), "Name in italics: added by hand (kept when you map again)"),
     ]),
     ("Monitoring (Monitor ticked): the outline shows up or down instead of the kind", [

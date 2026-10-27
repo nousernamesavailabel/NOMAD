@@ -24,7 +24,7 @@ import uuid
 from dataclasses import asdict, dataclass, field, fields
 
 from . import vlan_path
-from .model import AP, FIREWALL, KIND_NAMES, ROUTER, SHARED_PORT_HOSTS, SWITCH, port_key, short_port
+from .model import AP, FIREWALL, KIND_NAMES, ROUTER, SHARED_PORT_HOSTS, SWITCH, WLC, port_key, short_port
 from .vlans import ERROR, INFO, MAX_VLAN, TRUNK, WARNING, Finding, port_info, vlan_names
 
 log = logging.getLogger(__name__)
@@ -338,7 +338,7 @@ def port_oper(device, port):
     return status.get("oper", "")
 
 
-LINKED_KINDS = {SWITCH, ROUTER, FIREWALL, AP}  # What a port can't be taken from: an AP takes its clients with it
+LINKED_KINDS = {SWITCH, ROUTER, FIREWALL, WLC, AP}  # What a port can't be taken from: an AP takes its clients with it
 
 
 def linked_to(network_map, key, port):

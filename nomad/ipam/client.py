@@ -67,6 +67,7 @@ ROLES_API = 9  # And subnet roles
 MOVE_API = 10  # And moving subnets between networks
 ASSET_API = 11  # And assets
 TARGET_API = 12  # And software targets
+WLC_API = 13  # And wireless controllers as a kind of asset
 
 
 class ServerUnreachable(IpamError):
@@ -540,6 +541,12 @@ class TeamStore:
     def server_keeps_targets(self):
         """Whether the server is new enough to keep software targets (assumed so before the first sync)."""
         return self.server_api == 0 or self.server_api >= TARGET_API
+
+    @property
+    def server_knows_wlc(self):
+        """Whether the server is new enough to take wireless controllers as assets (assumed so before the first
+        sync)."""
+        return self.server_api == 0 or self.server_api >= WLC_API
 
     @property
     def server_keeps_vlans(self):

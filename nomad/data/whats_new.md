@@ -4,6 +4,12 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.34.0] - 2026-10-27
+
+- **New:** Aruba wireless controllers (ArubaOS 8) on the Network Map: the access points each one has (down ones in red), and its Wi-Fi clients on their APs. Overlay > Wireless shows which AP belongs to which controller.
+- **New:** access points and wireless controllers are Assets too, with their serial numbers and software.
+- **New:** MAC Finder finds Wi-Fi clients on their access point, asking the controller first.
+
 ## [1.33.0] - 2026-10-26
 
 - **Fixed:** the tribe server could stop answering anyone (laptops: "actively refused") after one connection was cut off part way.

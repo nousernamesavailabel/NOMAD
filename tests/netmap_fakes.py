@@ -353,3 +353,70 @@ def build_network():
     fw.address("192.0.2.2", 2, "255.255.255.252")
     fw.lldp(1, "ethernet1/1", 1, "core", "Te1/0/3", "10.0.0.1", CORE_MAC, 0x28)
     return network
+
+
+# An Aruba controller (made up, laid out as ArubaOS 8.10 answers): wlc1 is on the core's Gi1/0/20, ap1 on acc1's
+# Gi1/0/8 (seen by LLDP), ap2 down, ap3 up but on no switch the map has
+ARUBA_CONTROLLER = (1, 3, 6, 1, 4, 1, 14823, 1, 1, 52)
+WLC_MAC = "00-0B-86-AA-00-01"
+AP1_MAC, AP2_MAC, AP3_MAC = "00-0B-86-00-00-01", "00-0B-86-00-00-02", "00-0B-86-00-00-03"
+AP1_BSSID, AP3_BSSID = "00-0B-86-10-00-10", "00-0B-86-30-00-10"
+LAPTOP_MAC, TABLET_MAC, WIRED_USER_MAC = "3C-52-82-00-00-31", "3C-52-82-00-00-32", "3C-52-82-00-00-33"
+WLC_SERIAL = "MC0000001"
+
+
+def add_aruba(network):
+    """wlc1 (10.0.0.20, an ArubaOS controller) with three APs and two Wi-Fi clients, linked to the core."""
+    from nomad.netmap import aruba, hardware
+    from nomad.snmp import GAUGE32, TIMETICKS
+    core, acc1 = network.devices["10.0.0.1"], network.devices["10.0.0.11"]
+    core.interface(20, "GigabitEthernet1/0/20", CORE_MAC)
+    core.lldp(20, "Gi1/0/20", 1, "wlc1", "GE0/0/0", "10.0.0.20", WLC_MAC, 0x28,
+              "ArubaOS (MODEL: Aruba7210), Version 8.10.0.15-FIPS LSR")
+    acc1.interface(8, "GigabitEthernet1/0/8", ACC1_MAC)
+    acc1.lldp(8, "Gi1/0/8", 1, "ap1", AP1_MAC, "10.20.0.11", AP1_MAC, 0x10, "ArubaOS (MODEL: 505), Version Aruba AP")
+    acc1.learned(AP1_MAC, 8, 8, vlan=10)
+    acc1.learned(LAPTOP_MAC, 8, 8, vlan=10)  # Bridged by the AP: still the AP's Wi-Fi client, not a host on Gi1/0/8
+
+    wlc = network.add("10.0.0.20", Device("wlc1", "ArubaOS (MODEL: Aruba7210), Version 8.10.0.15-FIPS LSR (91324)",
+                                          ARUBA_CONTROLLER))
+    wlc.interface(1, "GE0/0/0", WLC_MAC)
+    wlc.interface(16385, "vlan 1", WLC_MAC)
+    wlc.address("10.0.0.20", 16385)
+    wlc.lldp(1, "GE0/0/0", 1, "core", "Gi1/0/20", "10.0.0.1", CORE_MAC, 0x28)
+    wlc.set(hardware.ARUBA_SERIAL, string(WLC_SERIAL))
+    wlc.arp(16385, "10.30.0.6", TABLET_MAC)
+    for mac, ip, name, group, model, serial, up, software in (
+            (AP1_MAC, "10.20.0.11", "ap1", "campus", "505", "CNAA000001", True, "8.10.0.15-FIPS"),
+            (AP2_MAC, "10.20.0.12", "ap2", "campus", "635", "CNAA000002", False, ""),
+            (AP3_MAC, "10.20.0.13", "ap3", "lab", "635", "CNAA000003", True, "8.10.0.15-FIPS")):
+        index = tuple(mac_bytes(mac))
+        entry = aruba.AP_ENTRY
+        wlc.set(entry, aruba.AP_IP, index, Value(IP_ADDRESS, ip))
+        wlc.set(entry, aruba.AP_NAME, index, string(name))
+        wlc.set(entry, aruba.AP_GROUP, index, string(group))
+        wlc.set(entry, aruba.AP_SERIAL, index, string(serial))
+        wlc.set(entry, aruba.AP_UPTIME, index, Value(TIMETICKS, 360000 if up else 0))
+        wlc.set(entry, aruba.AP_MODEL, index, string(model))
+        wlc.set(entry, aruba.AP_STATUS, index, number(1 if up else 2))
+        wlc.set(entry, aruba.AP_SOFTWARE, index, string(software))
+    for ap, bssid in ((AP1_MAC, AP1_BSSID), (AP3_MAC, AP3_BSSID)):
+        wlc.set(aruba.BSSID_ESSID, tuple(mac_bytes(ap)), 1, tuple(mac_bytes(bssid)), string("Corp"))
+    # The laptop is associated (station table) and signed in as its computer; the tablet only in the user table, as a
+    # person, on ap3 by name. The wired user is the controller's own port's
+    laptop = tuple(mac_bytes(LAPTOP_MAC))
+    wlc.set(aruba.STATION_ENTRY, aruba.STATION_BSSID, laptop, string(mac_bytes(AP1_BSSID)))
+    wlc.set(aruba.STATION_ENTRY, aruba.STATION_VLAN, laptop, number(30))
+    wlc.set(aruba.STATION_ENTRY, aruba.STATION_ESSID, laptop, string("Corp"))
+    wlc.set(aruba.STATION_ENTRY, aruba.STATION_AP, laptop, string("ap1"))
+    for mac, ip, user, ap, bssid, wired in ((LAPTOP_MAC, "10.30.0.5", "host/LAPTOP-7", "ap1", AP1_BSSID, 2),
+                                            (TABLET_MAC, "0.0.0.0", "jdoe", "ap3", "", 2),
+                                            (WIRED_USER_MAC, "10.0.0.99", "", "0/0/0", "", 1)):
+        index = tuple(mac_bytes(mac)) + tuple(int(part) for part in ip.split("."))
+        wlc.set(aruba.USER_ENTRY, aruba.USER_NAME, index, string(user))
+        wlc.set(aruba.USER_ENTRY, aruba.USER_AP, index, string(ap))
+        wlc.set(aruba.USER_ENTRY, aruba.USER_BSSID, index, string(bssid))
+        wlc.set(aruba.USER_ENTRY, aruba.USER_VLAN, index, number(30))
+        wlc.set(aruba.USER_ENTRY, aruba.USER_WIRED, index, number(wired))
+    wlc.set(aruba.AP_ENTRY, 99, tuple(mac_bytes(AP1_MAC)), Value(GAUGE32, 0))  # A column that isn't walked
+    return wlc

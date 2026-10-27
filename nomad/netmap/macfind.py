@@ -8,9 +8,12 @@ There are two ways to look:
   last had it on, then along the uplink it was learned on (a link to another switch) until it's on an edge port.
   When that doesn't find it, every switch is asked. Part of a MAC can't be asked for that way, so every switch's MAC
   table is read and searched instead, the way a crawl places hosts (and the same is done once for a long list of
-  MACs, rather than asking every switch about each). An IP address is turned into its MAC from this computer's ARP
-  table, the ARP tables of the routers with an interface in its subnet, or the map; a name into an IP address by DNS
-  (or the map, for phones and other devices that name themselves over CDP or LLDP).
+  MACs, rather than asking every switch about each), with the wireless controllers' tables of Wi-Fi clients. An IP
+  address is turned into its MAC from this computer's ARP table, the ARP tables of the routers with an interface in
+  its subnet, or the map; a name into an IP address by DNS (or the map, for phones and other devices that name
+  themselves over CDP or LLDP). A whole MAC is first asked of
+  the map's wireless controllers (a GET of its row in each one's station table): a Wi-Fi client is on its access
+  point, wherever a switch learned its MAC (the controller's uplink, when its traffic is tunneled there).
 - Over SSH too, when asked (macssh.SshAsker): switches that don't answer SNMP are asked the same at their command
   line, and a MAC learned on a port with a switch beyond it (in CDP or LLDP) is followed there, onto switches the
   map doesn't have. With no map, the search starts at a switch named for it.
@@ -31,10 +34,10 @@ from dataclasses import dataclass, field
 from ..oui import format_mac, normalize_mac, vendor
 from ..snmp import SnmpClient, SnmpError, parse_oid
 from ..snmpv3 import is_v3
-from . import collect, macssh, vlans
+from . import aruba, collect, macssh, vlans
 from .crawl import VLAN_WORKERS, Crawler
-from .model import AP, FIREWALL, HOST, NEIGHBOR, NETWORK_KINDS, PHONE, ROUTER, SERVER, SHARED_PORT_HOSTS, SNMP, \
-    SWITCH, Device, Link, NetworkMap, normalize_name, port_key, short_port
+from .model import AP, AP_DOWN, FIREWALL, HOST, NEIGHBOR, NETWORK_KINDS, PHONE, ROUTER, SERVER, SHARED_PORT_HOSTS, \
+    SNMP, SWITCH, WLC, Device, Link, NetworkMap, normalize_name, port_key, short_port
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +51,7 @@ FDB_SELF = 4  # Status: the switch's own MAC
 GET_BATCH = 20  # OIDs asked for in one GET
 TABLE_READ_AT = 8  # MACs without a quick answer before every switch's MAC table is read once instead
 FDB_KINDS = {SWITCH, ROUTER}  # Devices that can have MAC tables (routers with switch ports); firewalls only ARP
-ARP_KINDS = {SWITCH, ROUTER, FIREWALL}
+ARP_KINDS = {SWITCH, ROUTER, FIREWALL, WLC}
 NOT_UPLINK_KINDS = {PHONE, HOST, AP, SERVER}  # A link to one of these is an edge port, not an uplink
 UNKNOWN_DEVICE = "?"  # leads_to: a port another switch's MAC was learned on, with no link on the map
 DNS_TIMEOUT = 2.0  # Seconds to wait for reverse DNS (names for live results)
@@ -336,12 +339,43 @@ def describe(network_map, location, paths=None, port_macs=None):
     return location
 
 
+def wireless_note(network_map, ap_key, ssid, controller):
+    """What a Wi-Fi client's location says: its access point, SSID and controller."""
+    devices = network_map.devices
+    ap = devices.get(ap_key)
+    by = devices[controller].label if controller in devices else controller
+    on_ssid = f" on SSID {ssid}" if ssid and ssid != aruba.WIFI else ""
+    if ap is None or ap.kind != AP:
+        return f"A Wi-Fi client of controller {by}{on_ssid} (its access point isn't on the map)."
+    note = f"Wi-Fi client of access point {ap.label}{on_ssid} (controller {by})."
+    if ap.ap_status == AP_DOWN:
+        note += " The controller has that access point down."
+    return note
+
+
+def wireless_path(network_map, ap_key, ssid, paths=None):
+    """[[device, port]] from the root to a Wi-Fi client: to the switch port its access point is plugged into, then
+    the AP and the SSID."""
+    devices = network_map.devices
+    label = devices[ap_key].label if ap_key in devices else ap_key
+    for link in network_map.links_of(ap_key):
+        other = link.other(ap_key)
+        if other in devices and devices[other].kind not in NOT_UPLINK_KINDS:
+            return path_to(network_map, other, link.port_on(other), paths) + [[label, ssid]]
+    return [[label, ssid]]
+
+
 def host_location(network_map, host, query="", source=MAP, when="", paths=None):
     device = network_map.devices.get(host.device)
-    location = Location(query=query, mac=host.mac, ip=host.ip, name=host.name, vendor=host.vendor or vendor(host.mac),
-                        device=host.device, switch=device.label if device else host.device,
-                        switch_ip=device.mgmt_ip if device else "", port=host.port, vlan=host.vlan,
-                        when=when or network_map.finished or network_map.started, source=source)
+    location = Location(query=query, mac=host.mac, ip=host.ip, name=host.name or host.user,
+                        vendor=host.vendor or vendor(host.mac), device=host.device,
+                        switch=device.label if device else host.device, switch_ip=device.mgmt_ip if device else "",
+                        port=host.port, vlan=host.vlan, when=when or network_map.finished or network_map.started,
+                        source=source)
+    if host.wireless:
+        location.note = wireless_note(network_map, host.device, host.port, host.controller)
+        location.path = wireless_path(network_map, host.device, host.port, paths)
+        return location
     return describe(network_map, location, paths)
 
 
@@ -353,11 +387,12 @@ def search_map(network_map, query):
     if query.kind in (MAC_FULL, MAC_PART):
         chosen = [host for host in hosts if query.matches(host.mac)]
         if query.maybe_name:
-            chosen += [host for host in hosts if host not in chosen and name_matches(query.text, host.name)]
+            chosen += [host for host in hosts if host not in chosen and (name_matches(query.text, host.name)
+                                                                         or name_matches(query.text, host.user))]
     elif query.kind == IP:
         chosen = [host for host in hosts if same_ip(host.ip, query.address)]
-    else:
-        chosen = [host for host in hosts if name_matches(query.text, host.name)]
+    else:  # A computer's name, or the user a Wi-Fi client signed in as
+        chosen = [host for host in hosts if name_matches(query.text, host.name) or name_matches(query.text, host.user)]
     paths = network_paths(network_map) if chosen else {}
     return [host_location(network_map, host, query.text, paths=paths) for host in chosen]
 
@@ -474,6 +509,7 @@ class Locator:
         self.interface_cache = {}  # Device key -> {ifIndex: name}
         self.no_contexts = set()  # Catalysts whose per-VLAN tables don't answer
         self.tables = None  # Device key -> DeviceTables, once every switch's MAC table has been read
+        self.stations = {}  # Wi-Fi client's MAC -> (controller key, aruba.WirelessClient), read with the tables
         self.network_ports = {}  # Device key -> port keys another network device's own MAC was learned on
         self.port_counts = {}  # (device key, port key) -> MACs learned on that port, from the tables
         self.paths = network_paths(network_map)
@@ -877,11 +913,54 @@ class Locator:
                             sorted(hits.items(), key=lambda item: (self.depth(item[0]), item[0])) if other != key]
         return location
 
+    def ask_controllers(self, query, digits, ip=""):
+        """Where a whole MAC is on Wi-Fi now: [Location] from the first wireless controller that has it as a client
+        (a GET of its row in the controller's station table), or []."""
+        mac = format_mac(digits)
+        index = tuple(bytes.fromhex(digits))
+        oids = [parse_oid(f"{aruba.STATION_ENTRY}.{number}") + index for number in aruba.STATION_COLUMNS]
+        for key in self.switches({WLC}):
+            if self.should_stop() or not self.by_snmp(key):
+                continue
+            client, _ = self.clients[key]
+            self.events("step", f"{mac}: asking {self.label(key)} (wireless controller)")
+            try:
+                found = aruba.clients(self.get(client, oids), ())
+            except (SnmpError, OSError) as error:
+                log.info("MAC Finder: stations of %s: %s", self.label(key), error)
+                continue
+            if found:
+                return [self.wireless_location(query, mac, key, found[0], ip)]
+        return []
+
+    def wireless_location(self, query, mac, key, station, ip=""):
+        """The Location of a Wi-Fi client controller key has (station: its aruba.WirelessClient): its access point
+        (by name, among the controller's on the map; else the controller) and SSID."""
+        ap = next((other for other, device in self.map.devices.items() if device.controller == key
+                   and normalize_name(device.name) == normalize_name(station.ap_name)), None)
+        place = ap or key
+        device = self.map.devices[place]
+        known = next((host for host in self.map.hosts if host.mac == mac), None)
+        ssid = station.ssid or aruba.WIFI
+        name = station.name or station.user or ((known.name or known.user) if known else "")
+        location = Location(query=query, mac=mac, ip=ip or station.ip or (known.ip if known else ""), name=name,
+                            vendor=vendor(mac), device=place,
+                            switch=device.label if ap else station.ap_name or device.label,
+                            switch_ip=device.mgmt_ip, port=ssid, vlan=station.vlan, when=now(), source=LIVE)
+        location.note = wireless_note(self.map, place, ssid, key)
+        location.path = wireless_path(self.map, place, ssid, self.paths) if ap else [[location.switch, ssid]]
+        return location
+
     def locate_mac(self, query, digits, hint=None, ip=""):
-        """Where a whole MAC is now: [Location], or [] when no switch has it in its table. hint: where the map last
-        had it (a Location), asked first and followed along uplinks; then every switch is asked. With SSH, what SNMP
-        doesn't find is looked for again at the switches' command lines (SNMP can miss what show mac address-table
-        has: a VLAN whose table it can't read, say)."""
+        """Where a whole MAC is now: [Location], or [] when no switch has it in its table. The wireless controllers
+        are asked first: a Wi-Fi client is on its access point. hint: where the map last had it (a Location), asked
+        first and followed along uplinks; then every switch is asked. With SSH, what SNMP doesn't find is looked for
+        again at the switches' command lines (SNMP can miss what show mac address-table has: a VLAN whose table it
+        can't read, say)."""
+        if not self.over_ssh:
+            wireless = self.ask_controllers(query, digits, ip)
+            if wireless:
+                return wireless
         found = self.find_mac(query, digits, hint, ip)
         if found or self.ssh is None or self.over_ssh or self.ssh_tables_read or self.should_stop():
             return found
@@ -949,6 +1028,14 @@ class Locator:
         tables = collect.DeviceTables(info=collect.SystemInfo(device.name, device.sys_descr, device.sys_object_id))
         walk = self.crawler.walk
         tables.arp = collect.arp(walk(client, collect.ARP_PHYS_ADDRESS, tables, "ARP"))
+        if device.kind == WLC:  # Its Wi-Fi clients: the associated ones, with their addresses and names
+            rows = {}
+            for entry, numbers in ((aruba.STATION_ENTRY, aruba.STATION_COLUMNS),
+                                   (aruba.USER_ENTRY, aruba.USER_COLUMNS)):
+                for number in numbers:
+                    rows.setdefault(entry, []).extend(walk(client, f"{entry}.{number}", tables, "Wi-Fi clients"))
+            tables.wireless = aruba.Controller(clients=aruba.clients(rows[aruba.STATION_ENTRY],
+                                                                     rows[aruba.USER_ENTRY]))
         if device.kind not in FDB_KINDS:
             return tables
         tables.interfaces = collect.interface_names(walk(client, collect.IF_NAME, tables, "Interface names"),
@@ -1039,6 +1126,8 @@ class Locator:
                 if mac in network_macs and mac not in result.own_macs:
                     self.network_ports.setdefault(key, set()).add(port)
         self.tables = tables
+        self.stations = {client.mac: (key, client) for key, result in tables.items() if result.wireless is not None
+                         for client in result.wireless.clients}
 
     def read_tables_over_ssh(self):
         """The second look for part of a MAC: every switch's MAC table read again at its command line."""
@@ -1079,6 +1168,9 @@ class Locator:
 
     def from_tables(self, query, digits, ip=""):
         mac = format_mac(digits)
+        if mac in self.stations:  # A Wi-Fi client: on its access point, wherever a switch learned it
+            key, station = self.stations[mac]
+            return [self.wireless_location(query, mac, key, station, ip or station.ip or self.arp_ip(mac))]
         hits = self.table_hits(digits)
         choice = self.choose_edge(hits)
         if choice is None:
@@ -1087,7 +1179,8 @@ class Locator:
 
     def search_tables(self, query):
         """Every MAC in the tables read that matches part of a MAC: [Location]."""
-        macs = sorted({mac for tables in self.tables.values() for mac, _, _ in tables.fdb if query.matches(mac)})
+        macs = {mac for tables in self.tables.values() for mac, _, _ in tables.fdb if query.matches(mac)}
+        macs = sorted(macs | {mac for mac in self.stations if query.matches(mac)})
         found = []
         for mac in macs:
             found += self.from_tables(query.text, normalize_mac(mac))

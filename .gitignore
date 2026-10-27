@@ -12,3 +12,6 @@ dist/
 /NOMAD-*/
 
 /.claude/settings.local.json
+
+# SNMP walks of real devices (kept out of the public repo)
+/SNMP/

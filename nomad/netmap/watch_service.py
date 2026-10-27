@@ -242,7 +242,7 @@ class WatchEngine:
             targets = watch.switches(network_map)
             signatures, moved = watch.read_switches(
                 targets, watch.fallback_addresses(network_map, targets, options.scope), options,
-                self.client_factory, self.stop_event.is_set, options.workers)
+                self.client_factory, self.stop_event.is_set, options.workers, watch.controllers(network_map))
             lines = watch.adopt_addresses(network_map, moved)
             for line in lines:
                 log.info("%s: %s", self.map_name(watched.map_id), line)

@@ -8,9 +8,10 @@ FORMAT_VERSION = 1
 # Kinds of device
 SWITCH, ROUTER, FIREWALL, AP, PHONE, HOST, UNKNOWN = "switch", "router", "firewall", "ap", "phone", "host", "unknown"
 SERVER = "server"  # Only set by hand: the crawl shows servers as hosts on their switch port
-NETWORK_KINDS = {SWITCH, ROUTER, FIREWALL}  # Worth asking over SNMP, and whose links carry other devices' traffic
-KIND_NAMES = {SWITCH: "Switch", ROUTER: "Router", FIREWALL: "Firewall", AP: "Access point", PHONE: "Phone",
-              HOST: "Host", SERVER: "Server", UNKNOWN: "Unknown"}
+WLC = "wlc"  # A wireless controller (Aruba): its access points and their Wi-Fi clients are read from it
+NETWORK_KINDS = {SWITCH, ROUTER, FIREWALL, WLC}  # Worth asking over SNMP, and whose links carry others' traffic
+KIND_NAMES = {SWITCH: "Switch", ROUTER: "Router", FIREWALL: "Firewall", WLC: "Wireless controller",
+              AP: "Access point", PHONE: "Phone", HOST: "Host", SERVER: "Server", UNKNOWN: "Unknown"}
 
 # How a device was found
 SNMP = "snmp"  # Answered SNMP: its neighbors, MAC and ARP tables were read
@@ -18,10 +19,13 @@ NEIGHBOR = "neighbor"  # Only in another device's CDP/LLDP (not asked: out of sc
 NO_SNMP = "no-snmp"  # Answers ping but not SNMP (wrong community or an ACL)
 UNREACHABLE = "unreachable"  # Answered neither SNMP nor ping
 UNCHECKED = "unchecked"  # Added by hand and not asked yet (or it has no address to ask)
+CONTROLLER = "controller"  # An access point listed by a wireless controller that was read (Device.controller)
 # Unreachable from where it was crawled (which may not be here: a tribe map, or Map Watcher's), not from everywhere:
 # a router on the map may still reach it, and check it for Monitor
 SOURCE_NAMES = {SNMP: "SNMP", NEIGHBOR: "Seen as a neighbor", NO_SNMP: "Pings, no SNMP",
-                UNREACHABLE: "Unreachable when crawled", UNCHECKED: "Not checked"}
+                UNREACHABLE: "Unreachable when crawled", UNCHECKED: "Not checked",
+                CONTROLLER: "Listed by its wireless controller"}
+AP_UP, AP_DOWN = "up", "down"  # Device.ap_status: what its controller says
 MANUAL_SOURCE_NAMES = {SNMP: "Added by hand, answers SNMP", NO_SNMP: "Added by hand, pings, no SNMP",
                        UNREACHABLE: "Added by hand, unreachable when crawled", UNCHECKED: "Added by hand"}
 
@@ -126,6 +130,11 @@ class Device:
     serial: str = ""
     mac: str = ""
     inventory_source: str = ""  # SSH_READ when its parts were read at its command line (show inventory), not SNMP
+    # An access point a wireless controller lists: the controller's key, the AP group it's in, and whether the
+    # controller has it up or down (AP_UP, AP_DOWN; "" when no controller was read)
+    controller: str = ""
+    ap_group: str = ""
+    ap_status: str = ""
 
     @property
     def label(self):
@@ -202,6 +211,14 @@ class Host:
     note: str = ""
     software: str = ""  # What it runs, as its CDP (or LLDP-MED) said: a phone's firmware
     serial: str = ""  # Its serial number, from LLDP-MED
+    # A Wi-Fi client, as a wireless controller listed it: the controller's key (device is the access point it's on,
+    # port the SSID), and the user name it signed in with, when that's a person's rather than its computer's
+    controller: str = ""
+    user: str = ""
+
+    @property
+    def wireless(self):
+        return bool(self.controller)
 
     def same_as(self, other):
         """The same machine: by MAC, or by IP when either has no MAC."""
@@ -288,8 +305,9 @@ class NetworkMap:
             self.add_link(Link(link.a, link.a_port, link.b, link.b_port, list(link.protocols)))
         if hosts:
             found_macs = {host.mac for host in newer.hosts if host.mac}
-            kept = [host for host in self.hosts
-                    if host.manual or (host.device not in read and host.mac not in found_macs)]
+            kept = [host for host in self.hosts  # (A controller read again has the Wi-Fi clients it has now)
+                    if host.manual or (host.device not in read and host.controller not in read
+                                       and host.mac not in found_macs)]
             new_hosts = list(newer.hosts)
             for manual in [host for host in kept if host.manual]:
                 found = next((host for host in new_hosts if host.same_as(manual)), None)
@@ -584,6 +602,19 @@ class NetworkMap:
 
     def links_of(self, key):
         return [link for link in self.links if key in (link.a, link.b)]
+
+    def layout_edges(self):
+        """[(key, key)] for laying the map out: its links, and each access point no switch was seen linked to with
+        its controller, so it's placed beside that rather than off on its own."""
+        edges = [(link.a, link.b) for link in self.links]
+        linked = {key for edge in edges for key in edge}
+        edges += [(key, device.controller) for key, device in self.devices.items()
+                  if device.controller in self.devices and key not in linked]
+        return edges
+
+    def access_points_of(self, key):
+        """Keys of the access points a controller lists."""
+        return [other for other, device in self.devices.items() if device.controller == key]
 
     def hosts_by_port(self, key):
         """{port: [Host]} for one switch, in port order."""
