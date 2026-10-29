@@ -31,6 +31,7 @@ VLAN_WORKERS = 4  # A Catalyst's per-VLAN MAC tables read at once
 STOPPED = "Stopped"
 PINGS_NO_SNMP = "Answers ping but not SNMP: check the community string (or SNMPv3 user) and the device's SNMP ACL."
 NO_ANSWER = "No answer to SNMP or ping."
+PING_TRIES = 3  # Pings to a device that didn't answer SNMP: one answer is enough
 LIVE_INTERVAL = 1.5  # Seconds between snapshots of the map for drawing it while it's crawled
 ROUTE_ROWS = 20000  # Per column: a core with the full internet table shouldn't take all day
 MAX_ROUTES = 5000  # Kept per device in the map
@@ -1457,11 +1458,9 @@ def end_device_mac(neighbor):
 
 
 def _ping(address):
-    from ..sweep import ping_once  # Windows ICMP; imported here so the crawler itself runs anywhere
-    try:
-        return ping_once(address, 1000) is not None
-    except OSError:
-        return False
+    from .monitor import ping  # Windows ICMP; imported here so the crawler itself runs anywhere
+    # More than one try: a single lost echo (a router dropping the first while it ARPs) would mark it unreachable
+    return ping(address, tries=PING_TRIES) is not None
 
 
 def _now():

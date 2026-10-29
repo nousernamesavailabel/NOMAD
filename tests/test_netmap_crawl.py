@@ -162,6 +162,17 @@ def test_a_failed_device_read_still_checks_ping(responds):
     assert network_map.devices["ip:10.0.0.5"].source == (NO_SNMP if responds else UNREACHABLE)
 
 
+def test_crawl_ping_tries_again_after_a_lost_echo(monkeypatch):
+    """One lost echo (a router dropping the first while it ARPs) doesn't make a device unreachable."""
+    from nomad import sweep
+    from nomad.netmap import crawl as crawl_module
+    replies = iter([None, 3])
+    monkeypatch.setattr(sweep, "ping_once", lambda address, timeout: next(replies))
+    assert crawl_module._ping("10.0.0.5") is True
+    monkeypatch.setattr(sweep, "ping_once", lambda address, timeout: None)
+    assert crawl_module._ping("10.0.0.5") is False
+
+
 def test_same_device_at_two_addresses_is_one_device():
     network = build_network()
     network.devices["10.10.0.1"] = network.devices["10.0.0.1"]

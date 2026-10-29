@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.35.1] - 2026-10-29
+
+### Fixed
+
+- **Network Map: devices that ping shown as Unreachable**: whether a device answers ping is noted when it's crawled or checked (a device added by hand: when it's added, after mapping again, or Check SNMP Again), and kept until the next time. On a tribe map that can be from another computer that couldn't reach it, and Watch only notes devices that start answering SNMP, so a device stayed "Unreachable" (red name) while Monitor Status had it up: a green dashed box saying Unreachable. Now a device marked Unreachable that monitoring from this computer has answering ping is asked again (once), and the map notes "Pings, no SNMP" (for a crawl's device too, which Check SNMP Again only changed when it answered SNMP). Until that answer comes back, its box says "Pings, no SNMP" rather than Unreachable, and its tooltip says it answers ping now. And the crawl and the check ping up to 3 times before taking a device for unreachable (one answer is enough), so one lost echo doesn't mark it.
+
 ## [1.35.0] - 2026-10-28
 
 ### Added

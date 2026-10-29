@@ -285,6 +285,30 @@ def test_adding_a_device_checks_it_monitors_it_and_keeps_it(tab, monkeypatch):
     assert tab.network_map.devices["manual:1"].source == NO_SNMP
 
 
+def test_an_unreachable_device_monitoring_has_up_is_asked_again_once(tab):
+    """Marked unreachable by a check from somewhere it couldn't be reached (another computer of a tribe map), but it
+    answers this computer's pings: asked again, once, and the map says it pings."""
+    tab.on_crawled(crawl())
+    finish_checks(tab)
+    asked = []
+    checker = tab.check_device
+    tab.check_device = lambda settings, address: asked.append(address) or checker(settings, address)
+    with_closet(tab.network_map, mgmt_ip="10.0.0.253", source=UNREACHABLE, error="No answer to SNMP or ping.")
+    tab.map_changed()
+    tab.monitor_check.setChecked(True)
+    assert "manual:1" in tab.monitor.targets
+
+    def poll():
+        tab.monitor.on_results({key: 2 for key in tab.monitor.targets})
+    poll()
+    finish_checks(tab)
+    assert asked == ["10.0.0.253"] and tab.network_map.devices["manual:1"].source == NO_SNMP
+    poll()
+    finish_checks(tab)
+    assert asked == ["10.0.0.253"]  # Once
+    tab.monitor_check.setChecked(False)
+
+
 def test_adding_a_device_with_no_map_open_starts_one(tab, monkeypatch):
     accept_with(monkeypatch, DeviceDialog, lambda dialog: dialog.name_input.setText("lonely-sw"))
     tab.add_device(place=(10.0, 20.0))

@@ -238,6 +238,8 @@ class DeviceItem(NodeItem):
                        + (f" (AP group {device.ap_group})" if device.ap_group else ""))
         if state is not None and state.via:
             tip.append(probe_text(state.via))
+        if self.pings_now:
+            tip.append("Answers ping now (it didn't when crawled): right-click > Check SNMP Again to note it")
         if self.host_count:
             tip.append(f"{self.host_count} hosts: double-click to show them by port")
         self.setToolTip("\n".join(part for part in tip if part))
@@ -283,11 +285,19 @@ class DeviceItem(NodeItem):
         """An access point its wireless controller has down."""
         return self.device.ap_status == AP_DOWN and self.device.kind == AP
 
-    def name_color(self):
-        """Red for a device the crawl couldn't reach (unless a router's checking it: then the router's word counts),
-        or an access point its controller has down."""
+    @property
+    def pings_now(self):
+        """Unreachable when crawled, but monitoring from this computer has it answering ping now."""
         state = self.monitor_state
-        if (self.device.source == UNREACHABLE or self.ap_down) and not (state is not None and state.via):
+        return (self.device.source == UNREACHABLE and state is not None and state.status == UP
+                and not state.via)
+
+    def name_color(self):
+        """Red for a device the crawl couldn't reach (unless it's monitored and answering, or a router's checking
+        it: then the router's word counts), or an access point its controller has down."""
+        state = self.monitor_state
+        if ((self.device.source == UNREACHABLE and not self.pings_now) or self.ap_down) \
+                and not (state is not None and state.via):
             return COLORS["error"]
         return COLORS["text"]
 
@@ -305,6 +315,8 @@ class DeviceItem(NodeItem):
             lines.append((f"Can't check: {state.problem}", COLORS["warning"]))
         elif state is not None and state.via:  # Just the router: the box hasn't room for its VRF (the tooltip has)
             lines.append((f"Via {via_router(state.via)}", COLORS["muted"]))
+        elif self.pings_now:
+            lines.append((SHORT_SOURCE_NAMES[NO_SNMP], COLORS["warning"]))
         elif device.source in (NO_SNMP, UNREACHABLE):
             lines.append((SHORT_SOURCE_NAMES[device.source],
                           COLORS["warning" if device.source == NO_SNMP else "error"]))

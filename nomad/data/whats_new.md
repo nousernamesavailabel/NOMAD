@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.35.1] - 2026-10-29
+
+- **Fixed:** a Network Map device marked Unreachable (on a tribe map, perhaps by another computer) that Monitor Status has answering ping is checked again and shows "Pings, no SNMP", not a green box saying Unreachable.
+
 ## [1.35.0] - 2026-10-28
 
 - **New:** links that are gone leave the map when Crawl from Here or Watch reads a device again. One the other end may still have is drawn faint until that end is read (right-click to remove it now).

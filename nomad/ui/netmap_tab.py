@@ -208,6 +208,8 @@ class NetworkMapTab(QWidget):
         self.check_threads = []  # Asking devices added by hand over SNMP
         self.checking = set()  # Keys of the devices being asked
         self.announce = set()  # Of those, the ones to say what was found for (one added or asked again)
+        # (Key, address) of devices marked unreachable that were asked again because monitoring has them up: once each
+        self.rechecked = set()
         self.show_added = False  # Add Device to Map (from other pages) shows the map afterwards
         self.check_device = check_device  # What asks one (tests swap in the fake network)
         self.read_vlans = read_vlans_of  # What reads one's VLANs (tests swap in the fake network)
@@ -3476,6 +3478,10 @@ class NetworkMapTab(QWidget):
         if not (device.manual or "mgmt_ip" in device.corrected):
             # Found by a crawl: one that answers now is read, as the crawl would have
             if check.source != SNMP:
+                if check.source == NO_SNMP and device.source == UNREACHABLE:  # It pings now, at least
+                    device.source, device.error = NO_SNMP, check.error
+                    if self.worker is None:
+                        self.map_changed()
                 if announce:
                     set_hint(self.status_label, f"{device.label} still doesn't answer SNMP{why}.", "warning")
                 return
@@ -3775,6 +3781,19 @@ class NetworkMapTab(QWidget):
             selected = self.current_view().scene().selectedItems()
             if len(selected) == 1 and getattr(selected[0], "device", None) is not None:
                 self.show_details(("device", selected[0].key))
+            self.recheck_answering()
+
+    def recheck_answering(self):
+        """Devices marked unreachable (by the last check or crawl, perhaps on another computer of the tribe) that
+        monitoring from here has answering ping: ask them again, once each, so the map says what's so now."""
+        stale = []
+        for key, device in self.network_map.devices.items():
+            state = self.monitor.status(key)
+            if (device.source == UNREACHABLE and device.mgmt_ip and state is not None and state.status == monitor.UP
+                    and not state.via and (key, device.mgmt_ip) not in self.rechecked):
+                self.rechecked.add((key, device.mgmt_ip))
+                stale.append(key)
+        self.check_devices(stale)
 
     def keep_history(self, entries):
         """Status changes go into the map's history, saved with it."""

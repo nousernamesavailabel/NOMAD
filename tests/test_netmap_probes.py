@@ -343,6 +343,22 @@ def test_box_of_a_device_checked_from_a_router(app):
     assert item.detail_lines()[1][0] == "Unreachable" and "Checked from" not in item.toolTip()
 
 
+def test_box_of_an_unreachable_device_that_pings_now(app):
+    """Unreachable when crawled (a lost ping), but this computer's monitoring has it up: pings, not Unreachable."""
+    from nomad.ui.netmap_view import DeviceItem
+    from nomad.ui.theme import COLORS
+    device = Device("sw-c", name="sw-c", mgmt_ip="10.20.5.12", kind=SWITCH, source="unreachable")
+    item = DeviceItem(device, {}, None)
+    item.monitor_state = monitor.DeviceStatus(status=UP, rtt=2)
+    item.update_tip()
+    assert item.detail_lines()[1] == ("Pings, no SNMP", COLORS["warning"]) and item.name_color() == COLORS["text"]
+    assert "Answers ping now" in item.toolTip()
+    item.monitor_state = monitor.DeviceStatus(status=DOWN, since=1.0)
+    item.update_tip()
+    assert item.detail_lines()[1][0].startswith("Down for") and item.name_color() == COLORS["error"]
+    assert "Answers ping now" not in item.toolTip()
+
+
 # ----------------------------------------------------------------- Sending
 
 class FakeShell:
