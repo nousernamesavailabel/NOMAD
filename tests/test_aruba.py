@@ -6,13 +6,13 @@ from types import SimpleNamespace
 import pytest
 
 from netmap_fakes import (ACC1_MAC, AP1_MAC, AP2_MAC, AP3_MAC, LAPTOP_MAC, TABLET_MAC, WIRED_USER_MAC, WLC_SERIAL,
-                          add_aruba, build_network, number)
+                          add_aruba, build_network, number, oid)
 
 from nomad.ipam.asset_compare import sightings
 from nomad.ipam.asset_team import TeamAssetStore
 from nomad.netmap import aruba, collect, macfind, overlays, watch
 from nomad.netmap.crawl import CrawlSettings, Crawler
-from nomad.netmap.model import AP, AP_DOWN, AP_UP, CONTROLLER, SNMP, WLC, NetworkMap
+from nomad.netmap.model import AP, AP_DOWN, AP_UP, CONTROLLER, SNMP, WLC, NetworkMap, device_mac, name_mac
 
 NOW = datetime.datetime(2026, 10, 27, 9, 30)
 
@@ -100,6 +100,53 @@ def test_access_points_on_no_switch_are_laid_out_by_their_controller(mapped):
     assert ("ap2", "wlc1") in edges and ("ap3", "wlc1") in edges
     assert ("ap1", "wlc1") not in edges  # It has its switch
     assert sorted(mapped.access_points_of("wlc1")) == ["ap1", "ap2", "ap3"]
+
+
+def ap1_named_by_its_mac(network):
+    """acc1's LLDP for ap1 as an AP its controller has down gives it: its MAC as its system name, a chassis ID that
+    isn't a MAC subtype, and no address. Returns that name."""
+    acc1 = network.devices["10.0.0.11"]
+    entry, addresses = oid(collect.LLDP_REM_ENTRY), oid(collect.LLDP_REM_MAN_ADDR_IF_SUBTYPE)
+    for key in list(acc1.mib):
+        if (key[:len(entry)] == entry and key[len(entry) + 1:len(entry) + 4] == (0, 8, 1)) \
+                or (key[:len(addresses)] == addresses and key[len(addresses):len(addresses) + 3] == (0, 8, 1)):
+            del acc1.mib[key]
+    name = AP1_MAC.replace("-", ":").lower()
+    acc1.lldp(8, "Gi1/0/8", 1, name, "bond0", capabilities=0x10, descr="ArubaOS (MODEL: 505), Version Aruba AP")
+    return name
+
+
+@pytest.mark.parametrize("seed", ["10.0.0.11", "10.0.0.20"], ids=["switch-first", "controller-first"])
+def test_access_point_lldp_names_by_its_mac_is_its_controllers(network, seed):
+    ap1_named_by_its_mac(network)
+    mapped = crawl(network, seeds=(seed,))
+    assert [key for key, device in mapped.devices.items() if device_mac(device) == AP1_MAC] == ["ap1"]
+    ap1 = mapped.devices["ap1"]
+    assert (ap1.name, ap1.controller, ap1.serial, ap1.mac) == ("ap1", "wlc1", "CNAA000001", AP1_MAC)
+    assert any({link.a, link.b} == {"acc1", "ap1"} for link in mapped.links)
+    assert [item.map_device for item in sightings(mapped) if item.serial == "CNAA000001"] == ["ap1"]
+
+
+def test_crawl_from_here_folds_in_an_access_point_found_before_by_its_mac(network):
+    name = ap1_named_by_its_mac(network)
+    wlc = network.devices["10.0.0.20"]
+    wlc.communities = {"not-this-one"}  # Crawled before the controller could be read
+    base = crawl(network)
+    old_key = next(key for key, device in base.devices.items() if device_mac(device) == AP1_MAC)
+    assert base.devices[old_key].name == name and base.devices[old_key].controller == ""
+    base.positions[old_key] = (120.0, 80.0)
+    wlc.communities = {"public"}
+    added, _ = base.merge_crawl(crawl(network, seeds=("10.0.0.20",)))
+    assert [key for key, device in base.devices.items() if device_mac(device) == AP1_MAC] == ["ap1"]
+    assert "ap1" in added and base.positions["ap1"] == (120.0, 80.0)  # Where it was drawn
+    assert any({link.a, link.b} == {"acc1", "ap1"} for link in base.links)
+    assert len([item for item in sightings(base) if item.serial == "CNAA000001"]) == 1
+
+
+def test_name_mac():
+    assert name_mac("08:18:14:c9:0b:32") == name_mac("08-18-14-C9-0B-32") == name_mac("0818.14c9.0b32") \
+        == name_mac("081814C90B32") == "08-18-14-C9-0B-32"
+    assert name_mac("SWL-68900-SAP25") == name_mac("ap-dead-beef-0001") == name_mac("") == ""
 
 
 def test_wifi_clients_are_hosts_on_their_access_points(mapped):

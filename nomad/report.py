@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from . import __version__
 from .dnsclient import benchmark_server
 from .icmp import IcmpClient, PingStats, find_path_mtu, make_mtu_probe
-from .mtr import MtrTrace, report_text
+from .mtr import MtrTrace, hop_losses, report_text
 from .neighbors import arp_lookup, load_neighbors, shared_macs
 from .ports import OPEN, check_port
 from .system import APP_FULL_NAME, APP_NAME
@@ -173,15 +173,10 @@ def loss_start(rows):
 
     Loss at one router that later hops don't share is just that router ignoring probes.
     """
-    if not rows or not rows[-1].loss_percent:
+    losses = hop_losses(rows)
+    if not rows or not losses[-1].path:
         return None
-    start = None
-    for row in reversed(rows):
-        if row.loss_percent and row.address:
-            start = row.ttl
-        elif row.address:
-            break
-    return start
+    return next((row.ttl for row, loss in zip(rows, losses) if loss.added >= 0.5), None)
 
 
 def evaluate_trace(target, rows, reached, text):

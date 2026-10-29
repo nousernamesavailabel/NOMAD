@@ -322,10 +322,27 @@ class WatchResult:
     subnets: list = field(default_factory=list)  # (VRF, CIDR) of subnets that appeared, went or moved
     hardware: list = field(default_factory=list)  # Device keys whose software or hardware changed
     access_points: list = field(default_factory=list)  # Keys of access points that went down or came back up
+    links: list = field(default_factory=list)  # Links gone, or no longer seen by one end (Link.unseen_by)
 
     def __bool__(self):
         return bool(self.devices or self.hosts or self.moved or self.vlans or self.subnets or self.hardware
-                    or self.access_points)
+                    or self.access_points or self.links)
+
+
+def link_text(network_map, link):
+    return f"{place_text(network_map, link.a, link.a_port)} — {place_text(network_map, link.b, link.b_port)}"
+
+
+def link_lines(network_map, gone, unseen):
+    """The watch log's lines for links gone (both ends, or the only one that could give it, read without it) and
+    links one end no longer gives (kept, faint, until the other end is read)."""
+    lines = [f"Link gone: {link_text(network_map, link)}" for link in gone]
+    for link in unseen:
+        reader = network_map.devices[link.unseen_by].label if link.unseen_by in network_map.devices else link.unseen_by
+        other = network_map.devices.get(link.other(link.unseen_by))
+        lines.append(f"Link not seen by {reader}: {link_text(network_map, link)} (kept until "
+                     f"{other.label if other else 'the other end'} is read again)")
+    return lines
 
 
 def place_text(network_map, device_key, port):
@@ -368,10 +385,13 @@ def apply_refresh(network_map, crawled, now=None, by=""):
     before_places = places(network_map)
     before_hardware = {key: hardware_snapshot(device) for key, device in network_map.devices.items()}
     before_aps = {key: device.ap_status for key, device in network_map.devices.items() if device.ap_status}
+    before_links = network_map.links_before()
     recent = (now - datetime.timedelta(days=HOST_NEW_DAYS)).date().isoformat()
     added, read = network_map.merge_crawl(crawled)
     network_map.fold_manual_devices(new=set(added))
     result = WatchResult()
+    gone, unseen = network_map.link_changes(before_links)
+    result.links = gone + unseen
     when = now.isoformat(timespec="seconds")
     for key in added:
         device = network_map.devices.get(key)
@@ -423,6 +443,7 @@ def apply_refresh(network_map, crawled, now=None, by=""):
     for subnet, line in subnet_changes(network_map, before_places, places(network_map), read):
         result.subnets.append(subnet)
         result.lines.append(line)
+    result.lines += link_lines(network_map, gone, unseen)
     mark_hosts_seen(network_map, now)
     prune_news(network_map)
     return result

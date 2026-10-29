@@ -6,6 +6,26 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.35.0] - 2026-10-28
+
+### Added
+
+- **Links that are gone** go from the map: when **Crawl from Here** or **Watch** reads a device again and a link it found by CDP or LLDP isn't there any more, the link goes if nothing else could still give it: both ends were read without it (now, or one before), the other end is something only this device could have reported (an access point, a phone, a device only seen as a neighbor), or the other end no longer answers. A link to a switch that hasn't been read since is kept, drawn faint (dash-dot), with "not seen by sw1 since ..." on its tooltip and the Links tab's Seen by, until that switch is read too (it's seen again if either end still has it). Right-click a faint link > **Remove Link Not Seen**, or the map's background > **Remove Links Not Seen (N)...**, to take them off now. Watch's log notes each ("Link gone: ...", "Link not seen by sw1: ..."), and Crawl from Here says how many. A crawl that was stopped, or a device whose CDP or LLDP table timed out, takes nothing off. An access point moved to another switch port leaves its old one when that switch is read again.
+- **Monitor from a Router: Source Interface**: each device's row has a **Source Interface** list of the router's interfaces in the VRF (loopbacks first), or type an interface or address; **Router picks** (the default) leaves it to the router as before. The probe gets `icmp-echo <device> source-interface <interface>` (or `source-ip`), and the test ping uses the same source. A probe already there for the device that pings from somewhere else isn't changed: NOMAD says to take it away first. The probes list shows each probe's source address (read over SNMP).
+- **Traceroute: where loss really is** (as pathping works it out): a new **Path loss** column shows the loss that carries on to the hops after each one, so real traffic is lost by there; the rest of a hop's **Loss** is just its router skipping probes sent to itself (ICMP rate limiting), and is now gray instead of yellow or red. The **Note** says it: "Router skips 60% of probes; traffic passes it fine", "Loss starts here (20%)" at the first hop the loss carries on from, and "10% more lost here" where it grows. **Copy Report** has the Path% and Note columns too, and the Network Report's traceroute finding uses the same calculation for where loss starts.
+- **Subnet Calculator: more on each split subnet**: the split table also shows each subnet's **Network Address**, **Wildcard Mask** (IPv4) and **Addresses** (how many it has, network and broadcast included).
+
+### Changed
+
+- **Ctrl+W in a terminal goes to the remote host** again (nano's Where Is, the shell's delete-word). NOMAD no longer uses it to close the current terminal session; close one with its tab's close button. Ctrl+W still closes the current SCP session.
+
+### Fixed
+
+- **Traceroute: Stop waited on DNS**: with **Look up router names** on, Stop (and the end of a trace) waited for every router name lookup to come back, which Windows can take seconds over for each router with no PTR record, so the trace seemed stuck. Stop now ends it at once, while names are still being looked up or while the target's name is still resolving. A finished trace still waits for the names to come in, saying how many are left (Stop skips them).
+- **Add Device Here with no map open**: the device that starts the map was drawn off in the view's corner, out of sight, so the map looked empty until a crawl. It's now shown where you put it.
+- **Interfaces: removing or changing a default gateway**: Apply Settings stopped part-way with netsh's usage text ("One or more essential parameters were not entered") whenever a gateway had to go (taken off, given a new metric, or the extra ones when switching to DHCP), leaving the new gateway beside the old one. A gateway is now taken off by deleting its default route. Restoring the previous settings after an apply that failed part-way also failed ("The object already exists"), because it worked from the settings being applied rather than how the adapter was left; it now reads the adapter first.
+- **Aruba access points on the map twice**: an AP a switch's LLDP found under its MAC (as one gives itself before it's named, or with no system name) and its controller lists under the name it gives it were two devices with one serial number, so Assets left both out as a conflict. An AP is now matched by its MAC (or a name that is its MAC) whichever is read first, the switch or the controller, and takes its controller's name; one on the map from an earlier crawl is folded into the controller's (its links, hosts, place and group move over) when the map is crawled again or added to with Crawl from Here.
+
 ## [1.34.0] - 2026-10-27
 
 ### Added

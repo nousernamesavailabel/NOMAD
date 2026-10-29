@@ -35,6 +35,7 @@ PROTOCOL_NAMES = {"cdp": "CDP", "lldp": "LLDP", "l3": "address on the subnet", "
 ZOOM_STEP = 1.15
 MIN_ZOOM, MAX_ZOOM = 0.05, 4.0
 LABEL_MIN_ZOOM = 0.5  # Port labels are left off below this zoom
+UNSEEN_ALPHA = 110  # A link one end no longer gives: drawn faint
 COLLAPSED_WIDTH, COLLAPSED_HEIGHT = 200, 64
 GROUP_TAGS = {BUILDING: "BLDG", ROOM: "ROOM"}
 GROUP_Z = {SITE: -3, BUILDING: -2, ROOM: -1}  # Inner groups' boxes over the ones they're in
@@ -810,11 +811,14 @@ class LinkItem(QGraphicsItem):
         self.setZValue(0)
         self.traced = all(link.protocols == ["icmp"] for link in links)
         self.manual = all(link.manual for link in links)  # Drawn by hand
+        self.unseen = all(link.unseen_by for link in links)  # One end no longer gives it (Link.unseen_by)
         self.vlan_kind = None  # How it carries the VLAN highlighted (see MapView.set_vlan_focus)
         self.path_kind = None  # How Carry VLAN's planned path uses it (PATH_STYLES; see MapView.set_path_overlay)
         self.mark = None  # The overlay showing's Mark for it (the worst of its links'), or None
         self.base_tip = "\n".join(
             f"{label_of(a)} {link.port_on(a)}  —  {label_of(b)} {link.port_on(b)}  ({link_source(link)})"
+            + (f"\n    Not seen by {label_of(link.unseen_by)} since {link.unseen_since[:16].replace('T', ' ')}"
+               if link.unseen_by else "")
             for link, (a, b) in zip(links, ends))
         self.setToolTip(self.base_tip)
         a_item.links.append(self)
@@ -867,6 +871,11 @@ class LinkItem(QGraphicsItem):
             pen.setStyle(Qt.DashLine)
         elif self.manual:
             pen.setStyle(Qt.DotLine)
+        elif self.unseen and self.vlan_kind is None:  # Faint: it may be gone
+            color = pen.color()
+            color.setAlpha(UNSEEN_ALPHA)
+            pen.setColor(color)
+            pen.setStyle(Qt.DashDotDotLine)
         if self.mark is not None:
             pen = QPen(mark_color(self.mark.color), self.mark.width or (4 if count > 1 else 3))
             pen.setStyle(OVERLAY_LINE_STYLES.get(self.mark.style, Qt.SolidLine))

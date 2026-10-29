@@ -1123,6 +1123,7 @@ class NetworkMapTab(QWidget):
         base = self.network_map
         base.positions = self.view.positions() if self.live_map is not None else base.positions
         before = {key for key, device in base.devices.items() if device.source == SNMP}
+        before_links = base.links_before()
         added, read = base.merge_crawl(newer)
         base.bring_back(added)  # Started from one that was deleted: it's back
         folded = base.fold_manual_devices(new=set(added))  # Ones added by hand it has now found, kept where they were
@@ -1141,6 +1142,13 @@ class NetworkMapTab(QWidget):
         if problems:
             message += f" {problems} of the new ones didn't answer SNMP."
         message += folded_text(folded)
+        gone, unseen = base.link_changes(before_links)
+        if gone:
+            message += f" Took off {count_text(len(gone), 'link')} the devices read no longer have."
+        if unseen:
+            verb = "is" if len(unseen) == 1 else "are"
+            message += (f" {count_text(len(unseen), 'link')} one end no longer has {verb} drawn faint until the "
+                        "other end is read (or right-click to remove).")
         set_hint(self.status_label, message, "warning" if newer.stopped or problems else "success")
         self.hardware_found.emit()
 
@@ -3032,6 +3040,10 @@ class NetworkMapTab(QWidget):
         if manual:
             label = "Delete Link" if len(manual) == 1 else f"Delete the {len(manual)} Links Drawn by Hand"
             actions[menu.addAction(label)] = lambda: self.delete_links(manual)
+        unseen = [link for link in links if link.unseen_by]
+        if unseen:
+            label = "Remove Link Not Seen" if len(unseen) == 1 else f"Remove the {len(unseen)} Links Not Seen"
+            actions[menu.addAction(label)] = lambda: self.remove_unseen_links(unseen)
         if len({frozenset((link.a, link.b)) for link in links}) == 1:
             actions[menu.addAction("Add Another Link Between These...")] = \
                 lambda: self.add_link(links[0].a, links[0].b)
@@ -3056,6 +3068,10 @@ class NetworkMapTab(QWidget):
         if self.network_map is not None and self.network_map.deleted:
             actions[menu.addAction(f"Deleted Devices ({len(self.network_map.deleted)})...")] = \
                 self.show_deleted_devices
+        unseen = self.network_map.unseen_links() if self.network_map is not None else []
+        if unseen:
+            actions[menu.addAction(f"Remove Links Not Seen ({len(unseen)})...")] = \
+                lambda: self.remove_unseen_links(unseen)
         if self.network_map is not None and self.network_map.devices:
             menu.addSeparator()
             actions[menu.addAction("Fit")] = self.view.fit
@@ -3110,9 +3126,13 @@ class NetworkMapTab(QWidget):
         if dialog.exec_() != QDialog.Accepted:
             return None
         device = put_device(network_map, *dialog.values())
-        if self.network_map is None:
+        first = self.network_map is None
+        if first:
             self.show_map(network_map)
         self.map_changed(place={device.key: place} if place else None, select=device.key)
+        if first:  # The empty view's scroll, kept by the redraw, would leave it off in a corner
+            self.tabs.setCurrentWidget(self.view)
+            self.view.show_device(device.key)
         message = f"Added {device.label}. It's kept when you map again."
         if device.mgmt_ip:
             message += " Checking whether it answers SNMP..."
@@ -3391,6 +3411,25 @@ class NetworkMapTab(QWidget):
         self.network_map.links = [link for link in self.network_map.links if id(link) not in doomed]
         self.map_changed()
         set_hint(self.status_label, f"Deleted {count_text(len(links), 'link')}.", "info")
+
+    def remove_unseen_links(self, links):
+        """Take off links one end no longer has (Link.unseen_by), rather than wait for the other end to be read."""
+        if not links or self.network_map is None or self.worker is not None:
+            return
+        devices = self.network_map.devices
+        names = "\n".join(f"{devices[link.a].label} {link.a_port} \u2014 {devices[link.b].label} {link.b_port}"
+                          for link in links[:15]) + (f"\n...and {len(links) - 15} more" if len(links) > 15 else "")
+        what = "this link" if len(links) == 1 else f"these {len(links)} links"
+        if QMessageBox.question(self, "Remove Links Not Seen",
+                                f"Remove {what}? One end no longer has {'it' if len(links) == 1 else 'them'}, and "
+                                f"the other hasn't been read since.\n\n{names}\n\nA crawl that finds "
+                                f"{'it' if len(links) == 1 else 'one'} again puts it back.",
+                                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        doomed = {id(link) for link in links}
+        self.network_map.links = [link for link in self.network_map.links if id(link) not in doomed]
+        self.map_changed()
+        set_hint(self.status_label, f"Removed {count_text(len(links), 'link')}.", "info")
 
     def check_devices(self, keys, announce=False):
         """Ask devices added by hand, in the background, whether they answer SNMP with the map's community

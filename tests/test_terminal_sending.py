@@ -349,35 +349,15 @@ def test_alt_arrows_switch_sessions_without_sending_to_remote(page):
     assert one.transport.sent == two.transport.sent == b""
 
 
-def test_ctrl_w_confirms_connected_session_and_can_cancel(page, monkeypatch):
+def test_ctrl_w_goes_to_the_remote_host(page):
+    # nano's Where Is (find) and the shell's delete-word: NOMAD doesn't close the session on it
     one = connect(page, "one")
     page.window.activateWindow()
     one.view.setFocus()
     QApplication.processEvents()
-    sent = []
-    one.view.key_input.connect(sent.append)
-    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.No)
     QTest.keyClick(one.view, Qt.Key_W, Qt.ControlModifier)
+    assert one.transport.sent == b""
     assert page.tabs.currentWidget() is one
-    assert sent == []
-    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
-    QTest.keyClick(one.view, Qt.Key_W, Qt.ControlModifier)
-    assert page.tabs.count() == 0
-
-
-def test_ctrl_w_confirmation_defaults_to_yes(page, monkeypatch):
-    one = connect(page, "one")
-    page.window.activateWindow()
-    one.view.setFocus()
-    QApplication.processEvents()
-    defaults = []
-    def confirm(*args):
-        defaults.append(args[-1])
-        return args[-1]
-    monkeypatch.setattr(QMessageBox, "question", confirm)
-    QTest.keyClick(one.view, Qt.Key_W, Qt.ControlModifier)
-    assert defaults == [QMessageBox.Yes]
-    assert page.tabs.count() == 0
 
 
 def test_scp_close_warning_defaults_to_yes(page, monkeypatch):

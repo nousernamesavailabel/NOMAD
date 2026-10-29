@@ -45,7 +45,6 @@ APP_SHORTCUTS = {(Qt.Key_Tab, Qt.ControlModifier), (Qt.Key_Backtab, Qt.ControlMo
                  (Qt.Key_F, Qt.ControlModifier),
                  (Qt.Key_N, Qt.ControlModifier),
                  (Qt.Key_N, Qt.ControlModifier | Qt.ShiftModifier),
-                 (Qt.Key_W, Qt.ControlModifier),
                  (Qt.Key_Left, Qt.AltModifier), (Qt.Key_Right, Qt.AltModifier),
                  (Qt.Key_Return, Qt.ControlModifier | Qt.ShiftModifier),
                  (Qt.Key_Enter, Qt.ControlModifier | Qt.ShiftModifier),

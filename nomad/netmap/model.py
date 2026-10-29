@@ -1,4 +1,5 @@
 """What a network map holds: devices, the links between them, and the hosts on switch ports. Saved as JSON."""
+import datetime
 import json
 import re
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -36,6 +37,8 @@ PARENT_KIND = {BUILDING: SITE, ROOM: BUILDING}  # The kind of group each kind ca
 
 CORRECTABLE = ("name", "mgmt_ip", "kind", "platform", "note")  # What can be corrected by hand on a device found
 CORRECTED_NAMES = {"name": "Name", "mgmt_ip": "IP address", "kind": "Kind", "platform": "Model", "note": "Note"}
+
+NEIGHBOR_PROTOCOLS = {"cdp", "lldp"}  # A link from a device's neighbor tables (not traceroute's, or by subnet)
 
 SHARED_PORT_HOSTS = 8  # More MACs than this on a port with no neighbor: probably an unmanaged switch or a hypervisor
 
@@ -77,6 +80,25 @@ def normalize_name(name):
     if re.fullmatch(r"[\d.]+|[0-9a-fA-F:]+", name):
         return name.lower()  # An address, not a host name
     return name.split(".")[0].lower()
+
+
+MAC_NAME = re.compile(r"[0-9a-f]{2}([:-])[0-9a-f]{2}(?:\1[0-9a-f]{2}){4}|[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}"
+                      r"|[0-9a-f]{12}", re.IGNORECASE)
+
+
+def name_mac(name):
+    """The MAC a device's name is, as AA-BB-CC-DD-EE-FF (an access point not named yet goes by its MAC, and LLDP
+    without a system name gives its chassis ID), or "" for a name that isn't one."""
+    name = display_name(name)
+    if not MAC_NAME.fullmatch(name):
+        return ""
+    digits = re.sub(r"[^0-9a-fA-F]", "", name).upper()
+    return "-".join(digits[i:i + 2] for i in range(0, 12, 2))
+
+
+def device_mac(device):
+    """A device's MAC: the one it was found with, or its name if that's a MAC."""
+    return device.mac or name_mac(device.name)
 
 
 @dataclass
@@ -135,6 +157,9 @@ class Device:
     controller: str = ""
     ap_group: str = ""
     ap_status: str = ""
+    # Its CDP or LLDP table couldn't all be read (a timeout) when it was last read, so a link it didn't give then may
+    # still be there
+    neighbors_partial: bool = False
 
     @property
     def label(self):
@@ -185,6 +210,10 @@ class Link:
     b_port: str
     protocols: list = field(default_factory=list)  # ["cdp"], ["lldp"] or both
     manual: bool = False  # Drawn by hand, kept when mapping again (until the crawl finds it)
+    # Not seen: the device at one end was read again (Crawl from Here, Watch) without it, and the other end, which
+    # may still give it, hasn't been since. Its key, and when (ISO time)
+    unseen_by: str = ""
+    unseen_since: str = ""
 
     @property
     def key(self):
@@ -301,8 +330,10 @@ class NetworkMap:
                     device.apply_corrections(old.corrections())
                 keep_ssh_hardware(device, old)
                 self.devices[key] = device
+        self.prune_links(newer)
         for link in newer.links:
-            self.add_link(Link(link.a, link.a_port, link.b, link.b_port, list(link.protocols)))
+            found = self.add_link(Link(link.a, link.a_port, link.b, link.b_port, list(link.protocols)))
+            found.unseen_by = found.unseen_since = ""  # Seen again
         if hosts:
             found_macs = {host.mac for host in newer.hosts if host.mac}
             kept = [host for host in self.hosts  # (A controller read again has the Wi-Fi clients it has now)
@@ -321,7 +352,57 @@ class NetworkMap:
             self.traces = list(traces.values())
             self.finished, self.stopped = newer.finished, newer.stopped
         self.fold_unread_devices(read, new=set(added))
+        self.fold_access_points(fresh=set(newer.devices), new=set(added))  # Found by LLDP before, now listed
         return [key for key in added if key in self.devices], read
+
+    def prune_links(self, newer):
+        """Links that a crawl added to this map (newer) shows are gone: each its CDP/LLDP found, whose devices it read
+        again without them. One goes when no end left could still give it: both ends were read without it (now, or
+        one before: unseen_by), or the other end is one that only the device read could (an access point, a phone, a
+        device only seen as a neighbor) or that didn't answer this time. Otherwise it's kept, marked unseen_by the
+        device read, until the other end is read too. A stopped crawl's are left: it may not have read them all."""
+        if newer.stopped:
+            return
+        checked = {key for key, device in newer.devices.items()
+                   if device.source == SNMP and not device.neighbors_partial}
+        # Asked and didn't answer (keyed by their address, as a device that doesn't answer is)
+        silent = [device.mgmt_ip for device in newer.devices.values()
+                  if device.source in (NO_SNMP, UNREACHABLE) and device.mgmt_ip]
+        found = {link.key for link in newer.links}
+        when = newer.finished or datetime.datetime.now().isoformat(timespec="seconds")
+        kept = []
+        for link in self.links:
+            ends = {link.a, link.b}
+            denied = ends & checked
+            if link.manual or link.key in found or not denied or not set(link.protocols) <= NEIGHBOR_PROTOCOLS:
+                kept.append(link)
+                continue
+            if link.unseen_by in ends:
+                denied.add(link.unseen_by)
+            vouching = [end for end in ends - denied if end in self.devices and self.devices[end].source == SNMP
+                        and not any(self.devices[end].owns(address) for address in silent)]
+            if not vouching:
+                continue  # Gone
+            if link.unseen_by not in ends:
+                link.unseen_by, link.unseen_since = sorted(denied)[0], when
+            kept.append(link)
+        self.links = kept
+
+    def links_before(self):
+        """What link_changes compares with: {link key: (Link, whether it was unseen)}."""
+        return {link.key: (link, bool(link.unseen_by)) for link in self.links}
+
+    def link_changes(self, before):
+        """Since links_before: ([Link gone], [Link now unseen]). A link moved over with a device folded into another
+        isn't gone."""
+        now = {link.key: link for link in self.links}
+        gone = [link for key, (link, _) in before.items()
+                if key not in now and link.a in self.devices and link.b in self.devices]
+        unseen = [link for key, link in now.items() if link.unseen_by and not (key in before and before[key][1])]
+        return gone, unseen
+
+    def unseen_links(self):
+        return [link for link in self.links if link.unseen_by]
 
     def preview_with(self, newer, positions=None):
         """This map with a crawl's devices and links so far added (for drawing Crawl from Here as it goes), leaving
@@ -435,6 +516,27 @@ class NetworkMap:
             folded.append((manual, found))
         return folded
 
+    def fold_access_points(self, fresh=None, new=()):
+        """Access points on the map twice: once as a switch's LLDP found them (often named by their MAC) and once
+        as their controller lists them. One with the MAC of an AP a controller lists becomes that one (its links,
+        hosts, place and group move over, as fold_device does). fresh: keys of the devices just crawled, whose
+        controller-listed APs are kept over an earlier crawl's (None: all of them). Returns [(Device folded in,
+        controller's Device)]."""
+        listed = {}
+        for key, device in self.devices.items():
+            mac = device_mac(device)
+            if device.controller and mac and (fresh is None or key in fresh):
+                listed.setdefault(mac, device)
+        folded = []
+        for key, device in list(self.devices.items()):
+            found = listed.get(device_mac(device))
+            if found is None or found.key == key or device.manual or device.source == SNMP \
+                    or device.kind not in (AP, UNKNOWN):
+                continue
+            self.fold_device(key, found, new)
+            folded.append((device, found))
+        return folded
+
     def fold_unread_devices(self, read, new=()):
         """Devices that didn't answer SNMP that a crawl has now read under another key become the read ones (as
         fold_manual_devices does): a seed that didn't answer is keyed by its address, and the same device seen as
@@ -467,6 +569,7 @@ class NetworkMap:
         for link in links:
             if key in (link.a, link.b):
                 link.a, link.b = (found.key if link.a == key else link.a), (found.key if link.b == key else link.b)
+                link.unseen_by = found.key if link.unseen_by == key else link.unseen_by
                 if link.a == link.b or (link.manual and frozenset((link.a, link.b)) in crawled_pairs):
                     continue
             self.add_link(link)

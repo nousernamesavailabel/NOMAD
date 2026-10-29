@@ -4,6 +4,18 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.35.0] - 2026-10-28
+
+- **New:** links that are gone leave the map when Crawl from Here or Watch reads a device again. One the other end may still have is drawn faint until that end is read (right-click to remove it now).
+- **New:** Monitor from a Router can ping from an interface you pick (Source Interface): a loopback, say, so the device's answers come back to an address it can reach.
+- **New:** Traceroute tells loss that matters from a router just not answering pings (Path loss column, and the Note says where loss starts), the way pathping does.
+- **New:** the Subnet Calculator's split subnets show each one's network address, wildcard mask and address count.
+- **Changed:** Ctrl+W in a terminal goes to the device again (Where Is in nano); it no longer closes the session (it still does on SCP).
+- **Fixed:** Traceroute's Stop works straight away; it no longer waits for slow router name lookups (DNS).
+- **Fixed:** with no map open, right-click > Add Device Here shows the device on the map (it was drawn out of sight).
+- **Fixed:** an Aruba access point found through a switch by its MAC and listed by its controller by name is one device on the map, not two (and no longer a serial-number conflict in Assets).
+- **Fixed:** Interfaces > Apply Settings failed when a default gateway had to be removed or given a new metric, and putting the previous settings back after that failed too.
+
 ## [1.34.0] - 2026-10-27
 
 - **New:** Aruba wireless controllers (ArubaOS 8) on the Network Map: the access points each one has (down ones in red), and its Wi-Fi clients on their APs. Overlay > Wireless shows which AP belongs to which controller.

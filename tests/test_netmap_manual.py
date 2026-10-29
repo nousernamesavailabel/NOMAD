@@ -290,6 +290,9 @@ def test_adding_a_device_with_no_map_open_starts_one(tab, monkeypatch):
     tab.add_device(place=(10.0, 20.0))
     assert list(tab.network_map.devices) == ["manual:1"]
     assert tab.view.positions()["manual:1"] == (10.0, 20.0)
+    # On screen: the redraw keeps the empty view's scroll, which would leave it off in a corner
+    shown = tab.view.mapToScene(tab.view.viewport().rect()).boundingRect()
+    assert shown.contains(tab.view.items_by_key["manual:1"].sceneBoundingRect())
     assert tab.map_path is not None and store.load(tab.map_path).devices["manual:1"].name == "lonely-sw"
     assert "IP address" in tab.status_label.text()
 
@@ -357,6 +360,27 @@ def test_drawing_a_link_on_the_map(tab, monkeypatch):
     tab.delete_links([drawn])
     assert drawn not in tab.network_map.links
     tab.hide()
+
+
+def test_links_not_seen_are_faint_and_can_be_removed(tab, monkeypatch):
+    network_map = crawl()
+    unseen = next(link for link in network_map.links if {link.a, link.b} == {"core", "acc2"})
+    unseen.unseen_by, unseen.unseen_since = "core", "2026-10-28T09:30:00"
+    tab.on_crawled(network_map)
+    line = next(item for item in tab.view.link_items if unseen in item.links)
+    assert line.unseen and "Not seen by core.corp.example since 2026-10-28 09:30" in line.toolTip()
+    row = next(row for row in range(tab.links_table.rowCount())
+               if tab.links_table.item(row, 0).data_object.link is unseen)
+    assert tab.links_table.item(row, export.LINK_COLUMNS.index("Seen by")).text() == \
+        "CDP (not seen by core.corp.example since 2026-10-28)"
+    menu, actions = QMenu(), {}
+    tab.add_link_actions(menu, actions, line.links)
+    assert "Remove Link Not Seen" in [action.text() for action in actions]
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.Yes)
+    tab.remove_unseen_links(tab.network_map.unseen_links())
+    assert unseen not in tab.network_map.links and not tab.network_map.unseen_links()
+    assert not any(unseen in item.links for item in tab.view.link_items)
 
 
 def by_hand_menu(tab, key, keys):

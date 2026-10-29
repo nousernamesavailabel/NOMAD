@@ -23,6 +23,7 @@ class SessionPage(QWidget):
     tiling = False  # Offer the Layout menu, to show several sessions at once, and Send to All
     broadcast_scope = "all"  # Send to All: "all" connected sessions, those on "screen", or the "window"'s
     mirror_typing = False  # Send to All's Type in All: typing in one session goes to the others too
+    ctrl_w_closes = False  # Ctrl+W closes the current session (not on the Terminal page, where nano and the shell use it)
 
     def __init__(self, window, store):
         super().__init__(window)

@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBo
 from ..subnet import describe, host_range, parse_subnet, prefix_for_hosts, split
 from .common import SortableTableItem, read_only_table, set_hint, set_invalid
 
-SPLIT_COLUMNS = ["Subnet", "First Host", "Last Host", "Broadcast"]
+SPLIT_COLUMNS = ["Subnet", "Network Address", "First Host", "Last Host", "Broadcast", "Wildcard Mask", "Addresses"]
 
 
 class SubnetTab(QWidget):
@@ -136,7 +136,10 @@ class SubnetTab(QWidget):
         for row, subnet in enumerate(subnets):
             first, last, _ = host_range(subnet)
             broadcast = str(subnet.broadcast_address) if subnet.version == 4 and subnet.prefixlen <= 30 else ""
-            for column, value in enumerate([str(subnet), str(first), str(last), broadcast]):
+            wildcard = str(subnet.hostmask) if subnet.version == 4 else ""
+            values = [str(subnet), str(subnet.network_address), str(first), str(last), broadcast, wildcard,
+                      f"{subnet.num_addresses:,}"]
+            for column, value in enumerate(values):
                 self.split_table.setItem(row, column, SortableTableItem(value))
         hosts = host_range(subnets[0])[2] if subnets else 0
         shown = f" (showing the first {len(subnets):,})" if len(subnets) < total else ""

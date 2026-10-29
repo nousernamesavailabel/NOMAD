@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import QButtonGroup, QCheckBox, QComboBox, QDialog, QDialog
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QRadioButton, QVBoxLayout, QWidget
 
 from ..ipconfig import ApplyError, apply_ip_config, build_apply_commands, config_from_adapter, format_gateway, \
-    release_dhcp, renew_dhcp, reset_adapter, set_adapter_enabled, set_mtu, validate_ip_config, validate_mtu
+    read_ip_config, release_dhcp, renew_dhcp, reset_adapter, set_adapter_enabled, set_mtu, validate_ip_config, validate_mtu
 from ..profiles import Profile
 from .common import set_hint, set_invalid
 from .dialogs import KeepChangesDialog, SaveProfileDialog
@@ -546,9 +546,13 @@ class AdapterTab(QWidget):
                                  f"Could not restore the previous settings on {adapter.name}:\n\n{error}\n\n"
                                  f"The previous settings were: {old.describe()}")
 
+        def restore():
+            # Go from how the adapter really is: an apply that failed part-way leaves it between the two
+            return apply_ip_config(adapter.index, old, read_ip_config(adapter.index) or current)
+
         self.window.run_change(
             f"Restoring previous settings on {adapter.name}",
-            lambda: apply_ip_config(adapter.index, old, current),
+            restore,
             on_success=lambda _: self.window.show_status(f"Restored the previous settings on {adapter.name}."),
             on_error=failed)
 

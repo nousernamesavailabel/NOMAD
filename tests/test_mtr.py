@@ -1,7 +1,7 @@
 import pytest
 
 from nomad.icmp import IP_DEST_HOST_UNREACHABLE, IP_REQ_TIMED_OUT, IP_SUCCESS, IP_TTL_EXPIRED_TRANSIT, EchoReply
-from nomad.mtr import HopStats, MtrTrace, report_text
+from nomad.mtr import HopRow, HopStats, MtrTrace, hop_losses, report_text
 
 TARGET = "8.8.8.8"
 
@@ -68,7 +68,43 @@ def test_report_text():
     text = report_text("Tracing route to example", trace.rows(), {"10.0.0.1": "router.lan"})
     lines = text.splitlines()
     assert lines[0] == "Tracing route to example"
-    assert lines[2].split() == ["Hop", "Host", "Loss%", "Sent", "Last", "Avg", "Best", "Worst", "StDev"]
-    assert lines[3].split()[:4] == ["1", "router.lan", "(10.0.0.1)", "0%"]
-    assert lines[4].split() == ["2", "???", "100%", "1"]
-    assert lines[5].split()[:5] == ["3", TARGET, "0%", "1", "15"]
+    assert lines[2].split() == ["Hop", "Host", "Loss%", "Path%", "Sent", "Last", "Avg", "Best", "Worst", "StDev",
+                                "Note"]
+    assert lines[3].split()[:5] == ["1", "router.lan", "(10.0.0.1)", "0%", "0%"]
+    assert lines[4].split()[:5] == ["2", "???", "100%", "0%", "1"]
+    assert lines[4].endswith("Router doesn't answer probes; traffic passes it fine")
+    assert lines[5].split()[:6] == ["3", TARGET, "0%", "0%", "1", "15"]
+
+
+def hop(ttl, loss, address=None):
+    """A hop that answered all but loss% of ten probes."""
+    received = 10 - loss // 10
+    return HopRow(ttl, address if address is not None else (f"10.0.0.{ttl}" if received else ""), (), 10,
+                  received, 5.0, 5.0 if received else None, 5.0, 5.0, 0.0, "", False)
+
+
+def test_loss_at_one_router_is_the_router_skipping_probes():
+    losses = hop_losses([hop(1, 0), hop(2, 60), hop(3, 100), hop(4, 0)])
+    assert [loss.path for loss in losses] == [0, 0, 0, 0]
+    assert [loss.router for loss in losses] == [0, 60, 100, 0]
+    assert losses[1].note == "Router skips 60% of probes; traffic passes it fine"
+    assert losses[2].note == "Router doesn't answer probes; traffic passes it fine"
+    assert not losses[0].note and not losses[3].note
+
+
+def test_loss_that_carries_on_starts_at_its_first_hop():
+    # Hop 3 loses 20% for real (later hops all lose at least that), and its router skips another 30%;
+    # hop 5 adds 10% more on top
+    losses = hop_losses([hop(1, 0), hop(2, 0), hop(3, 50), hop(4, 20), hop(5, 30), hop(6, 30, TARGET)])
+    assert [loss.path for loss in losses] == [0, 0, 20, 20, 30, 30]
+    assert [loss.added for loss in losses] == [0, 0, 20, 0, 10, 0]
+    assert losses[2].note == "Router skips 30% of probes; traffic passes it fine; Loss starts here (20%)"
+    assert losses[4].note == "10% more lost here"
+    assert not losses[3].note and not losses[5].note
+
+
+def test_hops_past_the_last_reply_cant_be_judged():
+    losses = hop_losses([hop(1, 0), hop(2, 20), hop(3, 100)])
+    assert losses[2].path is None and not losses[2].note
+    assert losses[1].path == 20 and losses[1].note == "Loss starts here (20%)"
+    assert hop_losses([]) == []

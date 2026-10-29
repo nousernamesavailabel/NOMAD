@@ -290,7 +290,7 @@ def build_apply_commands(index, new, old=None):
         if new.dhcp:
             if old is not None and not old.dhcp:
                 # Take the extras off first: static gateways can outlive the switch to DHCP
-                commands += [delete_gateway_command(name, gateway) for gateway, _ in old.gateways()[1:]]
+                commands += [delete_gateway_command(index, gateway) for gateway, _ in old.gateways()[1:]]
                 commands += [delete_address_command(name, address) for address in old.addresses()[1:]]
             if old is None or not old.dhcp:  # netsh fails if DHCP is already on
                 commands.append(["netsh", "interface", "ipv4", "set", "address", name, "source=dhcp"])
@@ -303,7 +303,7 @@ def build_apply_commands(index, new, old=None):
             commands += [add_address_command(name, address) for address in new.addresses()[1:]]
             commands += [add_gateway_command(name, gateway, metric) for gateway, metric in new.gateways()[1:]]
         else:
-            commands += static_change_commands(name, new, old)
+            commands += static_change_commands(index, new, old)
 
     if old is None or not new.same_dns(old):
         if new.dhcp and new.dns_auto:
@@ -336,13 +336,16 @@ def add_gateway_command(name, gateway, metric):
     return ["netsh", "interface", "ipv4", "add", "address", name, f"gateway={gateway}", f"gwmetric={metric or 0}"]
 
 
-def delete_gateway_command(name, gateway):
-    return ["netsh", "interface", "ipv4", "delete", "address", name, f"gateway={gateway}"]
+def delete_gateway_command(index, gateway):
+    # "delete address gateway=" wants an address too (and would delete it), so remove the default route itself
+    return ["netsh", "interface", "ipv4", "delete", "route", "prefix=0.0.0.0/0", f"interface={index}",
+            f"nexthop={gateway}"]
 
 
-def static_change_commands(name, new, old):
+def static_change_commands(index, new, old):
     """Turn one static setup into another an address and a gateway at a time, adding before removing, so adding a
     secondary IP or a gateway doesn't drop the connections already using the adapter."""
+    name = f"name={index}"
     old_addresses = {address.ip: address for address in old.addresses()}
     new_addresses = {address.ip: address for address in new.addresses()}
     remasked = [ip for ip, address in new_addresses.items() if old_addresses.get(ip, address) != address]
@@ -354,10 +357,10 @@ def static_change_commands(name, new, old):
 
     old_gateways, new_gateways = dict(old.gateways()), dict(new.gateways())
     remetric = [gateway for gateway, metric in new_gateways.items() if old_gateways.get(gateway, metric) != metric]
-    commands += [delete_gateway_command(name, gateway) for gateway in remetric]
+    commands += [delete_gateway_command(index, gateway) for gateway in remetric]
     commands += [add_gateway_command(name, gateway, metric) for gateway, metric in new_gateways.items()
                  if gateway not in old_gateways or gateway in remetric]
-    commands += [delete_gateway_command(name, gateway) for gateway in old_gateways if gateway not in new_gateways]
+    commands += [delete_gateway_command(index, gateway) for gateway in old_gateways if gateway not in new_gateways]
     return commands
 
 
@@ -367,6 +370,13 @@ class ApplyError(CommandError):
     def __init__(self, error, applied_steps):
         super().__init__(error.command, error.output)
         self.applied_steps = applied_steps
+
+
+def read_ip_config(index):
+    """The adapter's settings as they are right now, or None if it's gone. Slow; call it off the UI thread."""
+    from .snapshot import load_snapshot
+    adapter = load_snapshot().adapters.get(str(index))
+    return config_from_adapter(adapter) if adapter else None
 
 
 def apply_ip_config(index, new, old=None):

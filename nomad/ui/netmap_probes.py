@@ -19,8 +19,11 @@ from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
 
-ADD_COLUMNS = ["Device", "Address", "Check From", "VRF", "Why That Router", "Status"]
-PROBE_COLUMNS = ["Device", "Address", "Router", "IP SLA", "VRF", "Every", "Status", "Owner"]
+ADD_COLUMNS = ["Device", "Address", "Check From", "VRF", "Source Interface", "Justification", "Status"]
+ADDRESS_COLUMN, ROUTER_COLUMN, VRF_COLUMN, SOURCE_COLUMN, WHY_COLUMN, STATUS_COLUMN = range(1, 7)
+PROBE_COLUMNS = ["Device", "Address", "Router", "IP SLA", "VRF", "Source Interface", "Every", "Status", "Owner"]
+PROBE_STATUS_COLUMN = PROBE_COLUMNS.index("Status")
+ROUTER_PICKS = "Router picks"  # No source: the router pings from the interface on its way to the device
 PING_TIMEOUT = 20  # Seconds for the router's test ping (two tries, a second each, plus a slow prompt)
 
 
@@ -36,6 +39,7 @@ class Item:
     tag: str = ""
     owner: str = ""
     frequency: int = probes.DEFAULT_FREQUENCY
+    source: str = ""  # The interface (or address) the router pings from; "" for the one on its way there
 
 
 @dataclass
@@ -102,15 +106,22 @@ class ProbeThread(StoppableThread):
     def add(self, pusher, shell, job, item, config):
         entry = probes.existing_entry(config, item.target, item.vrf)
         if entry is not None:
+            held = config[entry].get("source", "")
+            if item.source and not probes.same_source(held, item.source):
+                self.item_done.emit(item, False, f"{job.label} already has IP SLA {entry} for it, pinging from "
+                                                 f"{held or 'the interface the router picks'}: take that away first "
+                                                 f"to ping from {item.source}")
+                return False
             self.item_done.emit(item, True, f"{job.label} already has IP SLA {entry} for it: using that")
             return False
         try:
-            ping = probes.ping_summary(shell.run(probes.ping_command(item.target, item.vrf), timeout=PING_TIMEOUT))
+            ping = probes.ping_summary(shell.run(probes.ping_command(item.target, item.vrf, item.source),
+                                                 timeout=PING_TIMEOUT))
         except (Cancelled, ConnectionFailed, paramiko.SSHException, OSError, EOFError):
             ping = ""
         entry = probes.free_entry(set(config))
         outcome = pusher.set_up(job.address, probes.setup_text(entry, item.target, item.vrf, item.tag, item.owner,
-                                                               item.frequency))
+                                                               item.frequency, source=item.source))
         if outcome.transcript:
             log.info("Monitor from a Router, %s:\n%s", job.label, outcome.transcript)
         if not outcome.ok:
@@ -119,10 +130,11 @@ class ProbeThread(StoppableThread):
             self.item_done.emit(item, False, f"{job.label} refused it: {outcome.first_error}" if outcome.refused
                                 else outcome.problem or "Failed")
             return False
-        config[entry] = {"target": item.target, "vrf": item.vrf, "tag": item.tag, "scheduled": True}
+        config[entry] = {"target": item.target, "source": item.source, "vrf": item.vrf, "tag": item.tag,
+                         "scheduled": True}
         if ping.startswith("0 of"):
             text = (f"Added IP SLA {entry} on {job.label}, but its test ping got no answer ({ping}): check the "
-                    "router and VRF, or the device is down")
+                    f"router, VRF{' and source interface' if item.source else ''}, or the device is down")
             self.item_done.emit(item, True, text)
         else:
             self.item_done.emit(item, True, f"Added IP SLA {entry} on {job.label}" +
@@ -299,7 +311,7 @@ class ProbeDialog(QDialog):
             name = QTableWidgetItem(device.label)
             name.setFlags(name.flags() & ~Qt.ItemIsEditable)
             self.add_table.setItem(row, 0, name)
-            self.add_table.setCellWidget(row, 1, QLineEdit(address))
+            self.add_table.setCellWidget(row, ADDRESS_COLUMN, QLineEdit(address))
             combo = QComboBox()
             choices = [(candidate.router, candidate.vrf, candidate.why)
                        for candidate in probes.candidates(network_map, address)]
@@ -318,13 +330,23 @@ class ProbeDialog(QDialog):
                               if router == current.router and vrf == current.vrf), 0)
                 combo.setCurrentIndex(index)
             combo.currentIndexChanged.connect(self.on_router_changed)
-            self.add_table.setCellWidget(row, 2, combo)
-            self.add_table.setCellWidget(row, 3, QLineEdit())
-            for column in (4, 5):
+            self.add_table.setCellWidget(row, ROUTER_COLUMN, combo)
+            vrf_input = QLineEdit()
+            vrf_input.textChanged.connect(self.on_vrf_changed)
+            self.add_table.setCellWidget(row, VRF_COLUMN, vrf_input)
+            source = QComboBox()
+            source.setEditable(True)
+            source.setToolTip("The interface the router pings from (the device answers to its address): one of the "
+                              "router's in the VRF, or type another interface or address. Router picks: the "
+                              "interface on its way to the device.")
+            self.add_table.setCellWidget(row, SOURCE_COLUMN, source)
+            for column in (WHY_COLUMN, STATUS_COLUMN):
                 item = QTableWidgetItem("")
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.add_table.setItem(row, column, item)
             self.show_choice(row)
+            if current is not None and current.source:
+                self.set_source(row, current.source)
             if current is not None:
                 self.set_row_status(row, f"Checked from {self.page.monitor.via(key)} already (IP SLA "
                                          f"{current.entry})", "muted")
@@ -332,37 +354,83 @@ class ProbeDialog(QDialog):
                 self.set_row_status(row, "No router on the map that NOMAD can put a probe on (Cisco, read over "
                                          "SNMP)", "error")
         self.add_table.resizeColumnsToContents()
-        self.add_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Interactive)
+        self.add_table.horizontalHeader().setSectionResizeMode(WHY_COLUMN, QHeaderView.Interactive)
         self.update_buttons()
 
+    def sender_row(self, column):
+        widget = self.sender()
+        return next((row for row in self.items if self.add_table.cellWidget(row, column) is widget), None)
+
     def on_router_changed(self, _index):
-        combo = self.sender()
-        row = next((row for row in self.items if self.add_table.cellWidget(row, 2) is combo), None)
+        row = self.sender_row(ROUTER_COLUMN)
         if row is not None:
             self.show_choice(row)
 
+    def on_vrf_changed(self, _text):
+        row = self.sender_row(VRF_COLUMN)
+        if row is not None:
+            self.fill_sources(row)
+
     def show_choice(self, row):
         choice = self.choice(row)
-        vrf_input = self.add_table.cellWidget(row, 3)
-        why = self.add_table.item(row, 4)
+        vrf_input = self.add_table.cellWidget(row, VRF_COLUMN)
+        why = self.add_table.item(row, WHY_COLUMN)
         if choice is None:
             vrf_input.setText("")
             why.setText("")
+            self.fill_sources(row)
             return
         _, vrf, reason = choice
         vrf_input.setText(vrf)
         vrf_input.setPlaceholderText("global")
         why.setText(reason)
         why.setToolTip(reason)
+        self.fill_sources(row)  # Also when the VRF was already that: another router's interfaces
+
+    def fill_sources(self, row):
+        """The Source Interface list: Router picks, then the router's interfaces in the row's VRF. One typed in is kept."""
+        combo = self.add_table.cellWidget(row, SOURCE_COLUMN)
+        if combo is None:
+            return
+        typed = self.source(row)
+        choice = self.choice(row)
+        network_map = self.network_map
+        device = network_map.devices.get(choice[0]) if choice is not None and network_map is not None else None
+        vrf = self.add_table.cellWidget(row, VRF_COLUMN).text().strip()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(ROUTER_PICKS, "")
+        for port, ip in (probes.source_choices(device, vrf) if device is not None else []):
+            combo.addItem(f"{port} ({ip})", port)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+        if typed:
+            self.set_source(row, typed)
+
+    def set_source(self, row, source):
+        """Show this interface or address in Source Interface: its entry in the list (by name or address), else as typed."""
+        combo = self.add_table.cellWidget(row, SOURCE_COLUMN)
+        for index in range(1, combo.count()):
+            if probes.same_source(combo.itemData(index), source) or combo.itemText(index).endswith(f"({source})"):
+                combo.setCurrentIndex(index)
+                return
+        combo.setEditText(source)
+
+    def source(self, row):
+        """The interface (or address) the row's probe pings from, or "" for the router to pick."""
+        combo = self.add_table.cellWidget(row, SOURCE_COLUMN)
+        text = combo.currentText().strip() if combo is not None else ""
+        index = combo.findText(text) if text else -1
+        return (combo.itemData(index) or "") if index >= 0 else text
 
     def choice(self, row):
-        combo = self.add_table.cellWidget(row, 2)
+        combo = self.add_table.cellWidget(row, ROUTER_COLUMN)
         choices = self.choices.get(row, [])
         index = combo.currentIndex() if combo is not None else -1
         return choices[index] if 0 <= index < len(choices) else None
 
     def set_row_status(self, row, text, kind="info"):
-        item = self.add_table.item(row, 5)
+        item = self.add_table.item(row, STATUS_COLUMN)
         if item is not None:
             item.setText(text)
             item.setToolTip(text)
@@ -387,20 +455,25 @@ class ProbeDialog(QDialog):
             if device is None or choice is None:
                 continue
             router, _, _ = choice
-            target = self.add_table.cellWidget(row, 1).text().strip()
-            vrf = self.add_table.cellWidget(row, 3).text().strip()
+            target = self.add_table.cellWidget(row, ADDRESS_COLUMN).text().strip()
+            vrf = self.add_table.cellWidget(row, VRF_COLUMN).text().strip()
+            source = self.source(row)
             if not probes.address_ok(target):
                 set_hint(self.status_label, f"{device.label}: '{target}' isn't an IP address.", "error")
                 return None
             if " " in vrf:
                 set_hint(self.status_label, f"{device.label}: a VRF name has no spaces.", "error")
                 return None
+            if " " in source:
+                set_hint(self.status_label, f"{device.label}: write the interface to ping from without spaces "
+                                            "(Loopback0, Gi0/1), or give its address.", "error")
+                return None
             holder = network_map.devices[router]
             job = jobs.get(router)
             if job is None:
                 job = jobs[router] = probes_job(router, holder)
             job.items.append(Item(row, key, device.label, target, vrf, tag=probes.make_tag(device.label),
-                                  owner=owner, frequency=frequency))
+                                  owner=owner, frequency=frequency, source=source))
         return list(jobs.values())
 
     def copy_config(self):
@@ -417,7 +490,8 @@ class ProbeDialog(QDialog):
             for item in job.items:
                 entry = probes.free_entry(taken)
                 taken.add(entry)
-                lines.append(probes.setup_text(entry, item.target, item.vrf, item.tag, item.owner, item.frequency))
+                lines.append(probes.setup_text(entry, item.target, item.vrf, item.tag, item.owner, item.frequency,
+                                               source=item.source))
             parts.append("\n".join(lines))
         QApplication.clipboard().setText("\n\n".join(parts) + "\n")
         set_hint(self.status_label, "Copied each router's lines. Check the probe numbers are free (show ip sla "
@@ -449,7 +523,8 @@ class ProbeDialog(QDialog):
         for job in jobs:
             for item in job.items:
                 lines.append(f"{item.label} ({item.target}) from {job.label}" +
-                             (f" in vrf {item.vrf}" if item.vrf else ""))
+                             (f" in vrf {item.vrf}" if item.vrf else "") +
+                             (f", pinging from {item.source}" if item.source else ""))
         saved = ("Each router's configuration is saved afterwards (write memory)." if self.save_check.isChecked()
                  else "Nothing is saved (write memory is off): a router that reloads comes back without them.")
         question = (f"Add {'these probes' if len(lines) > 1 else 'this probe'} over SSH?\n\n" + "\n".join(lines) +
@@ -568,7 +643,8 @@ class ProbeDialog(QDialog):
                 device = (f"{owner} (another probe is used for it)" if owner else
                           f"Not on the map ({probe.device_label or 'no tag'})")
             values = [device, probe.target, network_map.devices[probe.router].label, str(probe.entry),
-                      probe.vrf or "global", monitor.duration_text(probe.frequency) if probe.frequency else "",
+                      probe.vrf or "global", probe.source or ROUTER_PICKS,
+                      monitor.duration_text(probe.frequency) if probe.frequency else "",
                       "", probe.owner]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -608,7 +684,7 @@ class ProbeDialog(QDialog):
                 text = "Down"
             else:
                 text = f"Up ({'<1' if (state.rtt or 0) < 1 else state.rtt} ms)" if state.rtt is not None else "Up"
-            item = self.probe_table.item(row, 6)
+            item = self.probe_table.item(row, PROBE_STATUS_COLUMN)
             if item is not None and item.text() != text:
                 item.setText(text)
                 item.setToolTip(text)

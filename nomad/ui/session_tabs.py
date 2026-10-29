@@ -328,13 +328,13 @@ class SessionTabs(QWidget):
 
         QApplication.instance().focusChanged.connect(self.on_focus_changed)
         self.set_layout("tabs")
-        for keys, callback in (
-            ("Ctrl+W", self.close_current),
+        shortcuts = [("Ctrl+W", self.close_current)] if getattr(page, "ctrl_w_closes", False) else []
+        for keys, callback in shortcuts + [
             ("Alt+Left", lambda: self.step_session(-1)),
             ("Alt+Right", lambda: self.step_session(1)),
             ("Ctrl+Shift+Return", self.pop_out_current),
             ("Ctrl+Shift+Enter", self.pop_out_current),
-        ):
+        ]:
             shortcut = QShortcut(QKeySequence(keys), self, context=Qt.WindowShortcut)
             shortcut.setAutoRepeat(False)
             shortcut.activated.connect(callback)

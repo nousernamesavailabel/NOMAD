@@ -64,12 +64,16 @@ def sorted_links(network_map):
 def link_rows(network_map):
     devices = network_map.devices
     return [[devices[link.a].label, link.a_port, devices[link.b].label, link.b_port,
-             seen_by(link)] for link in sorted_links(network_map)]
+             seen_by(link, network_map)] for link in sorted_links(network_map)]
 
 
-def seen_by(link):
-    """The Links table's Seen by: CDP, LLDP or both, or Drawn by hand."""
-    return "Drawn by hand" if link.manual else " + ".join(protocol.upper() for protocol in link.protocols)
+def seen_by(link, network_map=None):
+    """The Links table's Seen by: CDP, LLDP or both, or Drawn by hand; and when one end no longer gives it."""
+    text = "Drawn by hand" if link.manual else " + ".join(protocol.upper() for protocol in link.protocols)
+    if link.unseen_by:
+        device = network_map.devices.get(link.unseen_by) if network_map is not None else None
+        text += f" (not seen by {device.label if device else link.unseen_by} since {link.unseen_since[:10]})"
+    return text
 
 
 def host_rows(network_map):

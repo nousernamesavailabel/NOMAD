@@ -120,26 +120,83 @@ class MtrTrace:
         return [self.hops[ttl].row() for ttl in range(1, self.shown_ttls() + 1)]
 
 
+@dataclass(frozen=True)
+class HopLoss:
+    """Where a hop's loss happens, split the way pathping does.
+
+    path: loss that carries on past this hop, so real traffic is lost by here (None: no reply to judge by).
+    router: the rest of the hop's loss, the router itself not answering probes while it forwards traffic fine.
+    added: path loss that first appears at this hop, on the link to it or in the router before it.
+    """
+    path: Optional[float]
+    router: float
+    added: float
+    note: str
+
+
+def hop_losses(rows):
+    """A HopLoss for each row. Traffic that's lost at one hop is lost at every hop after it too, so a hop's real
+    loss is at most the lowest loss of any later hop that answers; anything above that is the router skipping
+    probes sent to itself (ICMP rate limiting), which ordinary traffic passing through never notices."""
+    losses = []
+    lowest_later = None
+    for row in reversed(rows):
+        if not row.sent or (not row.received and lowest_later is None):
+            losses.append((None, 0.0))  # Nothing answered here or after: can't tell where probes were lost
+            continue
+        path = row.loss_percent if lowest_later is None else min(row.loss_percent, lowest_later)
+        losses.append((path, row.loss_percent - path))
+        if row.received:
+            lowest_later = row.loss_percent if lowest_later is None else min(row.loss_percent, lowest_later)
+    losses.reverse()
+    result = []
+    before = 0.0
+    seen_loss = False
+    for row, (path, router) in zip(rows, losses):
+        added = 0.0 if path is None else max(0.0, path - before)
+        notes = []
+        if router >= 0.5:
+            notes.append("Router doesn't answer probes; traffic passes it fine" if not row.received else
+                         f"Router skips {router:.0f}% of probes; traffic passes it fine")
+        if added >= 0.5:
+            notes.append(f"{added:.0f}% more lost here" if seen_loss else f"Loss starts here ({added:.0f}%)")
+            seen_loss = True
+        result.append(HopLoss(path, router, added, "; ".join(notes)))
+        if path is not None:
+            before = path
+    return result
+
+
 def format_ms(value):
     if value is None:
         return ""
     return "<1" if value < 1 else f"{value:.0f}" if value >= 10 else f"{value:.1f}"
 
 
-REPORT_COLUMNS = ["Hop", "Host", "Loss%", "Sent", "Last", "Avg", "Best", "Worst", "StDev"]
+REPORT_COLUMNS = ["Hop", "Host", "Loss%", "Path%", "Sent", "Last", "Avg", "Best", "Worst", "StDev", "Note"]
+
+
+def format_percent(value):
+    return "" if value is None else f"{value:.0f}%"
+
+
+def hop_note(row, loss):
+    """The Note shown for a hop: where its loss happens, then any error the router sent back."""
+    return "; ".join(note for note in (loss.note, row.note) if note)
 
 
 def report_text(title, rows, names=None):
     """A plain-text table of the results, for pasting into an email or ticket."""
     names = names or {}
     lines = [[str(row.ttl), (f"{names[row.address]} ({row.address})" if names.get(row.address) else row.address)
-              or "???", f"{row.loss_percent:.0f}%", str(row.sent), format_ms(row.last), format_ms(row.average),
-              format_ms(row.best), format_ms(row.worst), format_ms(row.stdev)] for row in rows]
+              or "???", format_percent(row.loss_percent), format_percent(loss.path), str(row.sent),
+              format_ms(row.last), format_ms(row.average), format_ms(row.best), format_ms(row.worst),
+              format_ms(row.stdev), hop_note(row, loss)] for row, loss in zip(rows, hop_losses(rows))]
     widths = [max(len(column), *(len(line[index]) for line in lines)) if lines else len(column)
               for index, column in enumerate(REPORT_COLUMNS)]
 
     def render(cells):
-        return "  ".join(cell.ljust(width) if index == 1 else cell.rjust(width)
+        return "  ".join(cell.ljust(width) if index in (1, len(cells) - 1) else cell.rjust(width)
                          for index, (cell, width) in enumerate(zip(cells, widths))).rstrip()
 
     return "\n".join([title, "", render(REPORT_COLUMNS)] + [render(line) for line in lines]) + "\n"

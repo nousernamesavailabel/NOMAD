@@ -144,7 +144,7 @@ def test_static_changes_add_before_removing():
                         "add address name=11 gateway=10.0.0.2 gwmetric=20"]
     # Going back undoes it the same way, and the primary is never set over (which drops every connection)
     revert = [" ".join(command[3:]) for command in build_apply_commands("11", old, new)]
-    assert "delete address name=11 gateway=10.0.0.2" in revert and not any("set address" in c for c in revert)
+    assert "delete route prefix=0.0.0.0/0 interface=11 nexthop=10.0.0.2" in revert and not any("set address" in c for c in revert)
 
 
 def test_new_primary_and_gateway_metric_change():
@@ -153,9 +153,33 @@ def test_new_primary_and_gateway_metric_change():
     commands = [" ".join(command[3:]) for command in build_apply_commands("11", new, old)]
     assert commands == ["add address name=11 address=10.0.0.9 mask=255.255.255.0",
                         "delete address name=11 address=10.0.0.5",
-                        "delete address name=11 gateway=10.0.0.1",
+                        "delete route prefix=0.0.0.0/0 interface=11 nexthop=10.0.0.1",
                         "add address name=11 gateway=10.0.0.1 gwmetric=10"]
 
+
+
+def test_revert_after_a_part_way_apply():
+    # The apply added the new gateway, then failed removing the old one: going back from how the adapter really is
+    # removes the new gateway and leaves the old one alone (adding it again fails with "The object already exists")
+    old = IPConfig(dhcp=False, address="10.10.117.3", netmask="255.255.255.0", gateway="10.10.117.1",
+                   gateway_metric=1)
+    part_way = IPConfig(dhcp=False, address="10.0.2.100", netmask="255.255.255.0", gateway="10.0.2.1",
+                        extra_gateways=[{"gateway": "10.10.117.1", "metric": 1}])
+    commands = [" ".join(command[3:]) for command in build_apply_commands("26", old, part_way)]
+    assert commands == ["add address name=26 address=10.10.117.3 mask=255.255.255.0",
+                        "delete address name=26 address=10.0.2.100",
+                        "delete route prefix=0.0.0.0/0 interface=26 nexthop=10.0.2.1"]
+
+
+def test_read_ip_config(monkeypatch):
+    import ipaddress
+    from nomad import snapshot
+    from nomad.ipconfig import read_ip_config
+    adapter = snapshot.Adapter(index="26", name="NIC 2", dhcp=False, ipv4=[ipaddress.ip_interface("10.0.2.100/24")],
+                               gateways4=["10.0.2.1"])
+    monkeypatch.setattr(snapshot, "load_snapshot", lambda: snapshot.NetworkSnapshot(adapters={"26": adapter}))
+    assert (read_ip_config(26).address, read_ip_config(26).gateway) == ("10.0.2.100", "10.0.2.1")
+    assert read_ip_config(17) is None
 
 def test_primary_and_secondary_order_doesnt_matter():
     one = IPConfig(dhcp=False, address="10.0.0.5", netmask="255.255.255.0", secondary=["10.0.0.6/24"],
@@ -169,7 +193,8 @@ def test_static_to_dhcp_removes_extras_first():
     old = IPConfig(dhcp=False, address="10.0.0.5", netmask="255.255.255.0", gateway="10.0.0.1",
                    secondary=["10.0.0.6/24"], extra_gateways=[{"gateway": "10.0.0.2", "metric": None}])
     commands = [" ".join(command[3:]) for command in build_apply_commands("11", IPConfig(dhcp=True), old)]
-    assert commands[:3] == ["delete address name=11 gateway=10.0.0.2", "delete address name=11 address=10.0.0.6",
+    assert commands[:3] == ["delete route prefix=0.0.0.0/0 interface=11 nexthop=10.0.0.2",
+                            "delete address name=11 address=10.0.0.6",
                             "set address name=11 source=dhcp"]
 
 

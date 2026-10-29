@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QAction, QApplication, QComboBox, QDialog, QInputDialog, QMainWindow, QPlainTextEdit, QStackedWidget, QWidget
+from PyQt5.QtWidgets import QAction, QApplication, QComboBox, QDialog, QInputDialog, QMainWindow, QMessageBox, QShortcut, QPlainTextEdit, QStackedWidget, QWidget
 
 from nomad.snapshot import Adapter, NetworkSnapshot
 from nomad.dhcp import Offer
@@ -464,6 +464,34 @@ def test_scp_ctrl_l_focuses_current_panes_path(window, source_name):
     QTest.keyClick(source, Qt.Key_L, Qt.ControlModifier)
     assert QApplication.focusWidget() is pane.path_input
     assert pane.path_input.selectedText() == "C:/folder"
+
+
+def test_scp_ctrl_w_closes_the_current_session(window, monkeypatch):
+    page = ScpTab(window, SessionStore())
+    window.navigator.addWidget(page)
+    view = page.make_view(Session(name="files", protocol=SSH, host="files"))
+    window.navigator.setCurrentWidget(page)
+    page.show_page(1)
+    page.tabs.add_view(view)
+    view.state = "Connected"
+    asked = []
+    def confirm(*args):
+        asked.append(args[-1])
+        return args[-1]
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    view.local.list.setFocus()
+    QApplication.processEvents()
+    QTest.keyClick(view.local.list, Qt.Key_W, Qt.ControlModifier)
+    assert asked == [QMessageBox.Yes]
+    assert page.tabs.count() == 0
+
+
+def test_terminal_has_no_ctrl_w_shortcut(window, tmp_path):
+    page = TerminalTab(window, SessionStore(str(tmp_path / "sessions.json")),
+                       HighlightStore(str(tmp_path / "highlights.json")), CommandStore(str(tmp_path / "commands.json")))
+    keys = [shortcut.key().toString() for shortcut in page.tabs.findChildren(QShortcut)]
+    assert "Ctrl+W" not in keys
+    page.shutdown()
 
 
 def test_guide_searches_keys_tools_and_actions(window, tmp_path):

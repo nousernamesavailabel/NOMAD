@@ -14,6 +14,7 @@ class ScpTab(SessionPage):
     settings_prefix = "scp"
     window_title = "NOMAD SCP"
     kind = "SCP session"
+    ctrl_w_closes = True
     placeholder_text = ("Double-click a saved SSH session to browse its files, or type an address in Quick "
                         "connect.\n\nYour computer is on the left and the server on the right. Drag files between "
                         "them (or from Windows Explorer), or select them and press F5. F4 edits a remote file, F2 "

@@ -19,8 +19,8 @@ from ..snmp import V2C, SnmpClient, SnmpError, oid_text, parse_oid
 from ..snmpv3 import credential_from_json, credential_to_json, is_v3, users_from_json
 from . import aruba, collect, hardware, l3, vlans
 from .model import AP, AP_DOWN, AP_UP, CONTROLLER, HOST, KIND_NAMES, NEIGHBOR, NETWORK_KINDS, NO_SNMP, PHONE, \
-    ROUTER, SERVER, SNMP, SSH_READ, UNKNOWN, UNREACHABLE, Device, Host, Link, NetworkMap, Trace, display_name, \
-    normalize_name, port_key, port_sort_key, short_port
+    ROUTER, SERVER, SNMP, SSH_READ, UNKNOWN, UNREACHABLE, Device, Host, Link, NetworkMap, Trace, device_mac, \
+    display_name, name_mac, normalize_name, port_key, port_sort_key, short_port
 
 log = logging.getLogger(__name__)
 
@@ -245,6 +245,8 @@ class Crawler:
         read = {key for key, device in self.map.devices.items() if device.source == SNMP}
         for gone, found in self.map.fold_unread_devices(read):
             self.events("log", f"{gone.label} is {found.label} (it has that address)")
+        for gone, found in self.map.fold_access_points():
+            self.events("log", f"{gone.label} is {found.label} (its controller lists that MAC)")
         self.report_counts(0, 0)
         self.events("map", self.snapshot())
         for key, corrections in self.settings.corrections.items():  # Corrected by hand: kept over what was found
@@ -845,6 +847,14 @@ class Crawler:
                 self.map.add_link(link)
         return new
 
+    def access_point(self, mac):
+        """The key of the access point on the map with this MAC (one its controller lists first), or None."""
+        if not mac:
+            return None
+        found = [key for key, device in self.map.devices.items()
+                 if device.kind in (AP, UNKNOWN) and device.source != SNMP and device_mac(device) == mac]
+        return next((key for key in found if self.map.devices[key].controller), found[0] if found else None)
+
     def unaddressed_neighbor(self, other, key, neighbor):
         """A neighbor that gave no address, found by name as device other. Unless the port it's on has a link to
         somewhere else already: a port links to one place, so it's another device with that name. Returns its
@@ -981,6 +991,7 @@ class Crawler:
                                        device.platform, switchports=bool(tables.port_vlans))
         if tables.wireless is not None:
             self.add_access_points(key, hops, tables.wireless)
+        device.neighbors_partial = any(warning.startswith(("CDP:", "LLDP:")) for warning in tables.warnings)
         if tables.warnings:
             log.info("%s: %s", device.label, "; ".join(tables.warnings))
             for warning in tables.warnings:
@@ -1000,11 +1011,15 @@ class Crawler:
             kind = collect.neighbor_kind(neighbor)
             if kind in END_DEVICE_KINDS:
                 continue  # Placed on its port as a host at the end
-            other = self.find(neighbor.address, neighbor.name) \
+            # An access point by its MAC first: its controller may list it by another name than its LLDP gives
+            by_mac = self.access_point(neighbor.chassis_mac or name_mac(neighbor.name)) if kind in (AP, UNKNOWN) \
+                else None
+            other = by_mac or self.find(neighbor.address, neighbor.name) \
                 or self.new_key(neighbor.name, neighbor.address, (key, neighbor.local_port))
             if other == key:
                 continue
-            if not neighbor.address and other in self.map.devices and self.map.devices[other].source != SNMP:
+            if not by_mac and not neighbor.address and other in self.map.devices \
+                    and self.map.devices[other].source != SNMP:
                 other = self.unaddressed_neighbor(other, key, neighbor)
             if other in self.deleted or (neighbor.address and neighbor.address in self.deleted_addresses):
                 if other not in self.left_out:
@@ -1024,7 +1039,7 @@ class Crawler:
                                            platform=neighbor.platform,
                                            software=hardware.neighbor_software(neighbor.version),
                                            serial=neighbor.serial or hardware.serial_in_name(neighbor.name),
-                                           mac=neighbor.chassis_mac)
+                                           mac=neighbor.chassis_mac or name_mac(neighbor.name))
             if neighbor.address:
                 self.aliases.setdefault(neighbor.address, other)
                 if other_device.source != SNMP and neighbor.address not in other_device.addresses:
@@ -1081,10 +1096,8 @@ class Crawler:
         conductor and its controller) is the one that has it up's."""
         controller = self.map.devices[key]
         controller.platform = found.model or controller.platform  # Over its LLDP's whole description
-        by_mac = {device.mac: other for other, device in self.map.devices.items()
-                  if device.mac and device.kind in (AP, UNKNOWN) and device.source != SNMP}
         for item in found.aps:
-            other = by_mac.get(item.mac) or self.find(item.ip, item.name)
+            other = self.access_point(item.mac) or self.find(item.ip, item.name)
             device = self.map.devices.get(other) if other else None
             if device is not None and (device.source == SNMP or device.kind not in (AP, UNKNOWN)):
                 other = None  # Another device with its name (or address): not this AP
@@ -1092,6 +1105,15 @@ class Crawler:
                 other = self.new_key(item.name, item.ip) or f"ap:{item.mac}"
                 if other in self.map.devices and self.map.devices[other].kind not in (AP, UNKNOWN):
                     other = f"ap:{item.mac}"
+            elif item.name and not name_mac(item.name) and other not in self.ap_controllers:
+                # Found through a switch's LLDP first, under the name it gave there (often its MAC): named and keyed
+                # as its controller names it (not just by its MAC, as one not provisioned yet is), as when the
+                # controller is read first
+                wanted = self.new_key(item.name, item.ip)
+                if wanted and wanted != other and wanted not in self.map.devices:
+                    other = self.rename(other, wanted)
+                self.map.devices[other].name = item.name
+                self.aliases.setdefault(normalize_name(item.name), other)
             claimed = self.ap_controllers.get(other)
             if claimed not in (None, key) and (not item.up or self.map.devices[other].ap_status == AP_UP):
                 continue  # Listed by another controller that has it up (or had it first)

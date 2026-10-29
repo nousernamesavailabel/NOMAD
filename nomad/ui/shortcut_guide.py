@@ -30,7 +30,7 @@ SHORTCUT_SECTIONS = [
         ("Ctrl+N", "Create a saved session in the selected folder", "Terminal, SCP, RDP"),
         ("Ctrl+Shift+N", "Create a folder under the selected folder", "Terminal, SCP, RDP"),
         ("Enter", "Open the selected saved session", "Session lists"),
-        ("Ctrl+W", "Close the current session (Enter confirms Yes)", "Terminal and SCP; replaces the shell's Ctrl+W"),
+        ("Ctrl+W", "Close the current session (Enter confirms Yes)", "SCP; in Terminal, Ctrl+W goes to the remote host"),
         ("Alt+Left / Alt+Right", "Previous / next session (wraps around)", "Terminal and SCP"),
         ("Ctrl+Shift+Enter", "Pop out this session; move it back from a pop-out", "Terminal and SCP"),
         ("Ctrl+1 through Ctrl+9", "Send the corresponding saved command", "Terminal text, including when the Buttons bar is hidden"),

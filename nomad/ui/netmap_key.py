@@ -248,6 +248,10 @@ SECTIONS = [
                                      "such as a port-channel's members"),
         (line(style=Qt.DashLine), "Dashed line: found only by traceroute"),
         (line(style=Qt.DotLine), "Dotted line: drawn by hand"),
+        (line(style=Qt.DashDotDotLine, faded=True), "Faint dash-dot line: no longer seen by the device at one end "
+                                                    "when it was read again (Crawl from Here, Watch). It goes when "
+                                                    "the other end is read without it too, or right-click to "
+                                                    "remove it"),
     ]),
     ("A VLAN highlighted (Overlay > Highlight VLAN, a device's right-click menu > VLANs, or the VLANs tab)", [
         (line(VLAN_LINK_COLORS[TAGGED], 3), "Blue: carries it tagged (a trunk)"),

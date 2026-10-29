@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from ..snmp import SnmpError, parse_oid
 from .collect import text
-from .model import FIREWALL, NETWORK_KINDS, SNMP, short_port
+from .model import FIREWALL, NETWORK_KINDS, SNMP, port_key, short_port
 
 # CISCO-RTTMON-MIB, each table indexed by the probe's number
 RTT_MON = "1.3.6.1.4.1.9.9.42.1.2"
@@ -28,6 +28,7 @@ CTRL_FREQUENCY = f"{RTT_MON}.1.1.6"  # Seconds
 CTRL_TIMEOUT = f"{RTT_MON}.1.1.7"  # Milliseconds
 ECHO_PROTOCOL = f"{RTT_MON}.2.1.1"  # rttMonEchoAdminProtocol: 2 ipIcmpEcho
 ECHO_TARGET = f"{RTT_MON}.2.1.2"  # rttMonEchoAdminTargetAddress: 4 bytes for IPv4
+ECHO_SOURCE = f"{RTT_MON}.2.1.6"  # rttMonEchoAdminSourceAddress: the source-ip or source-interface's, if set
 ECHO_VRF = f"{RTT_MON}.2.1.26"  # rttMonEchoAdminVrfName
 OPER_STATE = f"{RTT_MON}.9.1.10"  # rttMonCtrlOperState: 6 active
 LATEST_RTT = f"{RTT_MON}.10.1.1"  # rttMonLatestRttOperCompletionTime, ms
@@ -68,6 +69,7 @@ class Probe:
     owner: str = ""
     frequency: int = 0  # Seconds
     state: str = ""  # active, pending...
+    source: str = ""  # The address it pings from, when it was given one (source-ip or source-interface)
 
     @property
     def device_label(self):
@@ -163,7 +165,8 @@ def read_probes(client, router, address):
     entries = sorted(tags)
     for start in range(0, len(entries), PROBES_PER_GET):
         chunk = entries[start:start + PROBES_PER_GET]
-        columns = (CTRL_RTT_TYPE, ECHO_PROTOCOL, ECHO_TARGET, ECHO_VRF, CTRL_OWNER, CTRL_FREQUENCY, OPER_STATE)
+        columns = (CTRL_RTT_TYPE, ECHO_PROTOCOL, ECHO_TARGET, ECHO_VRF, CTRL_OWNER, CTRL_FREQUENCY, OPER_STATE,
+                   ECHO_SOURCE)
         values = dict(client.get([parse_oid(f"{column}.{entry}") for entry in chunk for column in columns]))
         for entry in chunk:
             row = {column: values.get(parse_oid(f"{column}.{entry}")) for column in columns}
@@ -173,9 +176,12 @@ def read_probes(client, router, address):
             target = address_text(target.value) if target is not None and not target.is_exception else ""
             if not target:
                 continue
+            source = row[ECHO_SOURCE]
+            source = address_text(source.value) if source is not None and not source.is_exception else ""
             found.append(Probe(router, address, entry, target, text(row[ECHO_VRF]), tags[entry],
                                text(row[CTRL_OWNER]), number(row[CTRL_FREQUENCY]),
-                               OPER_STATES.get(number(row[OPER_STATE]), "")))
+                               OPER_STATES.get(number(row[OPER_STATE]), ""),
+                               "" if source in ("0.0.0.0", "::") else source))
     return found
 
 
@@ -332,12 +338,40 @@ def offer(best, candidate):
         best[key] = candidate
 
 
+def source_choices(device, vrf):
+    """[(interface, address)] the router could ping from in the VRF ("" the global table): its interfaces with an
+    IPv4 address there, loopbacks first."""
+    found = {}
+    for ip, _length, port in device.interfaces_l3:
+        if port and address_ok(ip) and device.port_vrfs.get(short_port(port), "") == vrf:
+            found.setdefault(short_port(port), ip)
+    return sorted(found.items(), key=lambda item: (not item[0].lower().startswith("lo"), port_sort(item[0])))
+
+
+def port_sort(name):
+    """Gi0/2 before Gi0/10."""
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
+
+
+def source_words(source):
+    """What goes after icmp-echo's target for a source: source-ip for an address, else source-interface."""
+    if not source:
+        return ""
+    return f"source-ip {source}" if address_ok(source) else f"source-interface {source}"
+
+
+def same_source(one, other):
+    """Whether two sources are the same one (GigabitEthernet0/1 and Gi0/1 are)."""
+    return port_key(one or "") == port_key(other or "")
+
+
 # ----------------------------------------------------------------- Configuration
 
-def setup_text(entry, target, vrf, tag, owner, frequency=DEFAULT_FREQUENCY, timeout=TIMEOUT_MS):
+def setup_text(entry, target, vrf, tag, owner, frequency=DEFAULT_FREQUENCY, timeout=TIMEOUT_MS, source=""):
     """The lines that make and start a probe. The threshold goes in before the timeout: IOS won't schedule one whose
-    threshold (5000 ms unless set) is over its timeout."""
-    lines = ["configure terminal", f"ip sla {entry}", f" icmp-echo {target}"]
+    threshold (5000 ms unless set) is over its timeout. source: the interface (or address) it pings from; "" lets
+    the router pick (the way out to the target)."""
+    lines = ["configure terminal", f"ip sla {entry}", f" icmp-echo {target} {source_words(source)}".rstrip()]
     if vrf:
         lines.append(f"  vrf {vrf}")
     lines += [f"  tag {tag}"]
@@ -355,20 +389,23 @@ def removal_text(entry):
 SLA_LINE = re.compile(r"^ip sla (\d+)\s*$")
 
 
+def blank_entry():
+    return {"target": "", "source": "", "vrf": "", "tag": "", "scheduled": False}
+
+
 def parse_sla_config(text_in):
-    """`show running-config | section ip sla` as {entry: {"target", "vrf", "tag", "scheduled"}} (any kind of probe:
-    target is "" for kinds other than ICMP echo)."""
+    """`show running-config | section ip sla` as {entry: {"target", "source", "vrf", "tag", "scheduled"}} (any kind
+    of probe: target is "" for kinds other than ICMP echo; source is its source-interface or source-ip, if any)."""
     found, current = {}, None
     for raw in (text_in or "").splitlines():
         line = raw.rstrip()
         match = SLA_LINE.match(line)
         if match:
-            current = found.setdefault(int(match.group(1)), {"target": "", "vrf": "", "tag": "", "scheduled": False})
+            current = found.setdefault(int(match.group(1)), blank_entry())
             continue
         schedule = re.match(r"^ip sla schedule (\d+)\b", line)
         if schedule:
-            found.setdefault(int(schedule.group(1)), {"target": "", "vrf": "", "tag": "", "scheduled": False})[
-                "scheduled"] = True
+            found.setdefault(int(schedule.group(1)), blank_entry())["scheduled"] = True
             current = None
             continue
         if not line.startswith(" "):
@@ -379,6 +416,9 @@ def parse_sla_config(text_in):
         words = line.split()
         if words[0] == "icmp-echo" and len(words) > 1:
             current["target"] = words[1]
+            for keyword in ("source-interface", "source-ip"):
+                if keyword in words[2:-1]:
+                    current["source"] = words[words.index(keyword) + 1]
         elif words[0] == "vrf" and len(words) > 1:
             current["vrf"] = words[1]
         elif words[0] == "tag":
@@ -402,8 +442,9 @@ def existing_entry(config, target, vrf):
     return None
 
 
-def ping_command(target, vrf):
-    return f"ping vrf {vrf} {target} repeat 2 timeout 1" if vrf else f"ping {target} repeat 2 timeout 1"
+def ping_command(target, vrf, source=""):
+    command = f"ping vrf {vrf} {target}" if vrf else f"ping {target}"
+    return f"{command} source {source} repeat 2 timeout 1" if source else f"{command} repeat 2 timeout 1"
 
 
 def ping_summary(answer):

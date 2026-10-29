@@ -80,8 +80,10 @@ class FakeRouter:
         self.uptime = 100000
         self.silent = False
 
-    def probe(self, entry, target, vrf="", tag="NOMAD sw-b", owner="NOMAD tester", frequency=30, kind=1, state=6):
-        values = {probes.CTRL_TAG: Value(OCTET_STRING, tag.encode()),
+    def probe(self, entry, target, vrf="", tag="NOMAD sw-b", owner="NOMAD tester", frequency=30, kind=1, state=6,
+              source="0.0.0.0"):
+        values = {probes.ECHO_SOURCE: Value(OCTET_STRING, bytes(int(part) for part in source.split("."))),
+                  probes.CTRL_TAG: Value(OCTET_STRING, tag.encode()),
                   probes.CTRL_OWNER: Value(OCTET_STRING, owner.encode()),
                   probes.CTRL_RTT_TYPE: Value(INTEGER, kind),
                   probes.CTRL_FREQUENCY: Value(INTEGER, frequency),
@@ -135,13 +137,33 @@ class Routers:
 
 def test_running_config_is_read():
     config = probes.parse_sla_config(R5_SLA)
-    assert config[9998] == {"target": "10.251.5.9", "vrf": "NOMAD-TEST", "tag": "NOMAD gone", "scheduled": True}
+    assert config[9998] == {"target": "10.251.5.9", "source": "", "vrf": "NOMAD-TEST", "tag": "NOMAD gone",
+                            "scheduled": True}
     assert config[9999]["tag"] == "NOMAD test"
-    assert config[12] == {"target": "", "vrf": "", "tag": "", "scheduled": True}  # Not ICMP echo: no target
+    assert config[12] == {"target": "", "source": "", "vrf": "", "tag": "",
+                          "scheduled": True}  # Not ICMP echo: no target
     assert probes.existing_entry(config, "10.251.5.1", "NOMAD-TEST") == 9999
     assert probes.existing_entry(config, "10.251.5.1", "") is None  # Another VRF is another probe
     assert probes.free_entry(set(config)) == 9000
     assert probes.free_entry({9000, 9001, 9003}) == 9002
+
+
+def test_a_probes_source_is_read_from_the_running_config():
+    config = probes.parse_sla_config("ip sla 9000\n icmp-echo 10.1.1.1 source-interface GigabitEthernet0/1\n"
+                                     "  vrf B\nip sla 9001\n icmp-echo 10.1.1.2 source-ip 10.0.0.1\n")
+    assert config[9000]["target"] == "10.1.1.1" and config[9000]["source"] == "GigabitEthernet0/1"
+    assert config[9001]["source"] == "10.0.0.1"
+    assert probes.same_source("GigabitEthernet0/1", "Gi0/1") and not probes.same_source("Gi0/1", "Gi0/2")
+
+
+def test_sources_on_offer_are_the_routers_interfaces_in_the_vrf():
+    network_map = lab_map()
+    r1 = network_map.devices["r1"]
+    assert probes.source_choices(r1, "") == [("Gi0/0", "10.0.0.1")]
+    assert probes.source_choices(r1, "MGMT-B") == [("Gi0/1", "10.20.5.1")]
+    r1.interfaces_l3 += [["10.255.0.1", 32, "Loopback0"], ["10.0.9.1", 24, "GigabitEthernet0/10"],
+                         ["10.0.2.1", 24, "GigabitEthernet0/2"]]
+    assert [port for port, _ in probes.source_choices(r1, "")] == ["Loopback0", "Gi0/0", "Gi0/2", "Gi0/10"]
 
 
 def test_setup_lines_put_the_threshold_before_the_timeout():
@@ -150,6 +172,10 @@ def test_setup_lines_put_the_threshold_before_the_timeout():
                                  "  tag NOMAD sw-b", "  owner NOMAD jared", "  threshold 1000", "  timeout 1000",
                                  "  frequency 30", " exit", "ip sla schedule 9000 life forever start-time now", "end"]
     assert "vrf" not in probes.setup_text(9000, "10.20.5.11", "", "NOMAD x", "")
+    assert " icmp-echo 10.20.5.11 source-interface Loopback0" in \
+        probes.setup_text(9000, "10.20.5.11", "", "NOMAD x", "", source="Loopback0").splitlines()
+    assert " icmp-echo 10.20.5.11 source-ip 10.0.0.1" in \
+        probes.setup_text(9000, "10.20.5.11", "", "NOMAD x", "", source="10.0.0.1").splitlines()
     assert probes.removal_text(9000) == "configure terminal\nno ip sla 9000\nend"
 
 
@@ -160,6 +186,7 @@ def test_tags_pings_and_addresses():
     assert probes.is_nomad_tag("nomad sw-b") and not probes.is_nomad_tag("WAN check")
     assert probes.make_owner("jared") == "NOMAD jared"
     assert probes.ping_command("10.1.1.1", "B") == "ping vrf B 10.1.1.1 repeat 2 timeout 1"
+    assert probes.ping_command("10.1.1.1", "", "Lo0") == "ping 10.1.1.1 source Lo0 repeat 2 timeout 1"
     assert probes.ping_summary("Success rate is 100 percent (2/2), round-trip min/avg/max = 1/1/2 ms") == \
         "2 of 2 answered (1 ms)"
     assert probes.ping_summary("Success rate is 0 percent (0/2)") == "0 of 2 answered"
@@ -200,14 +227,16 @@ def test_probes_are_matched_to_devices_by_address():
 def test_discover_and_read_results():
     r1 = FakeRouter()
     r1.probe(9000, "10.20.5.11", "MGMT-B", frequency=10)
-    r1.probe(9001, "10.20.5.12", tag="WAN check")  # Not NOMAD's: left alone
+    r1.probe(9001, "10.20.5.12", tag="WAN check")
+    r1.probe(9003, "10.20.5.14", "MGMT-B", tag="NOMAD sw-d", source="10.20.5.1")  # Not NOMAD's: left alone
     r1.probe(9002, "10.20.5.13", tag="NOMAD jitter", kind=9)  # Not an ICMP echo
     r1.result(9000, 1, 3)
     network = Routers(**{"10.0.0.1": r1})
     found = probes.discover([("r1", "10.0.0.1", "public", 1, 2000), ("r2", "10.0.0.2", "public", 1, 2000)],
                             network.client)
-    assert [(probe.entry, probe.target, probe.vrf, probe.frequency, probe.state, probe.device_label)
-            for probe in found.probes] == [(9000, "10.20.5.11", "MGMT-B", 10, "active", "sw-b")]
+    assert [(probe.entry, probe.target, probe.vrf, probe.frequency, probe.state, probe.device_label, probe.source)
+            for probe in found.probes] == [(9000, "10.20.5.11", "MGMT-B", 10, "active", "sw-b", ""),
+                                           (9003, "10.20.5.14", "MGMT-B", 30, "active", "sw-d", "10.20.5.1")]
     assert found.read == {"r1"} and set(found.problems) == {"r2"}
     read = probes.poll([("r1", "10.0.0.1", "public", 1, 2000, [9000]), ("r2", "10.0.0.2", "public", 1, 2000, [9])],
                        network.client)
@@ -378,6 +407,21 @@ def test_adding_uses_a_probe_already_there_and_numbers_new_ones(app):
     assert "ping vrf MGMT-B 10.20.5.11 repeat 2 timeout 1" in pusher.the_shell.commands
 
 
+def test_a_probe_pinging_from_a_source(app):
+    pusher = FakePusher(FakeShell(config=R5_SLA + "\nip sla 9000\n icmp-echo 10.20.5.12 source-interface "
+                                                  "GigabitEthernet0/1\n  vrf MGMT-B\n"))
+    job = netmap_probes.Job("r1", "R5", "10.0.0.1", [], [
+        netmap_probes.Item(0, "lo", "lo", "10.251.5.1", "NOMAD-TEST", source="Loopback0"),  # 9999 has none
+        netmap_probes.Item(1, "sw-c", "sw-c", "10.20.5.12", "MGMT-B", source="Gi0/1"),  # 9000 pings from it
+        netmap_probes.Item(2, "sw-b", "sw-b", "10.20.5.11", "MGMT-B", source="Gi0/1")])
+    done, _ = run_thread([job], pusher)
+    assert done[0][1] is False and "take that away first to ping from Loopback0" in done[0][2]
+    assert done[1] == ("sw-c", True, "R5 already has IP SLA 9000 for it: using that")
+    assert done[2][1] is True and done[2][2].startswith("Added IP SLA 9001 on R5")
+    assert len(pusher.sent) == 1 and " icmp-echo 10.20.5.11 source-interface Gi0/1" in pusher.sent[0]
+    assert "ping vrf MGMT-B 10.20.5.11 source Gi0/1 repeat 2 timeout 1" in pusher.the_shell.commands
+
+
 def test_a_refused_probe_is_cleaned_away(app):
     pusher = FakePusher(FakeShell(ping="Success rate is 0 percent (0/2)"), refuse="vrf NOPE")
     job = netmap_probes.Job("r1", "R5", "10.0.0.1", [], [netmap_probes.Item(0, "x", "x", "10.9.9.9", "NOPE"),
@@ -442,15 +486,30 @@ def test_monitor_from_a_router_on_the_page(app, tmp_path, monkeypatch):
         row = next(row for row, key in dialog.items.items() if key == "sw-b")
         assert dialog.add_table.cellWidget(row, 2).currentText() == "r1 (vrf MGMT-B)"
         assert dialog.add_table.cellWidget(row, 3).text() == "MGMT-B"
-        assert dialog.add_table.item(row, 4).text() == "Gi0/1 10.20.5.1/24"
+        assert dialog.add_table.item(row, netmap_probes.WHY_COLUMN).text() == "Gi0/1 10.20.5.1/24"
+        source = dialog.add_table.cellWidget(row, netmap_probes.SOURCE_COLUMN)
+        assert [source.itemText(index) for index in range(source.count())] == ["Router picks", "Gi0/1 (10.20.5.1)"]
+        assert dialog.source(row) == ""  # The router picks, unless told
         dialog.add_table.cellWidget(row, 2).setCurrentIndex(1)  # r2, by its route
         assert dialog.add_table.cellWidget(row, 3).text() == ""
+        assert [source.itemText(index) for index in range(source.count())] == ["Router picks", "Gi0/0 (10.0.0.2)"]
+        dialog.add_table.cellWidget(row, 3).setText("MGMT-B")  # r2 has nothing in that VRF
+        assert source.count() == 1
         dialog.add_table.cellWidget(row, 2).setCurrentIndex(0)
+        source.setCurrentIndex(1)
+        assert dialog.source(row) == "Gi0/1"
         jobs = dialog.planned()
-        by_router = {job.router: [(item.device, item.target, item.vrf, item.tag) for item in job.items]
+        by_router = {job.router: [(item.device, item.target, item.vrf, item.tag, item.source) for item in job.items]
                      for job in jobs}
-        assert sorted(by_router["r1"]) == [("r3", "10.0.0.3", "", "NOMAD r3"),  # r1 shares its subnet
-                                           ("sw-b", "10.20.5.11", "MGMT-B", "NOMAD sw-b")]
+        assert sorted(by_router["r1"]) == [("r3", "10.0.0.3", "", "NOMAD r3", ""),  # r1 shares its subnet
+                                           ("sw-b", "10.20.5.11", "MGMT-B", "NOMAD sw-b", "Gi0/1")]
+        source.setEditText("Loopback7")  # Typed in: kept when the router changes
+        dialog.add_table.cellWidget(row, 2).setCurrentIndex(1)
+        assert dialog.source(row) == "Loopback7"
+        source.setEditText("Gi 0/1")
+        assert dialog.planned() is None and "without spaces" in dialog.status_label.text()
+        source.setEditText("")
+        dialog.add_table.cellWidget(row, 2).setCurrentIndex(0)
         dialog.add_table.cellWidget(row, 1).setText("sw-b.corp")
         assert dialog.planned() is None and "isn't an IP address" in dialog.status_label.text()
         dialog.close()
