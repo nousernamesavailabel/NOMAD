@@ -68,6 +68,7 @@ MOVE_API = 10  # And moving subnets between networks
 ASSET_API = 11  # And assets
 TARGET_API = 12  # And software targets
 WLC_API = 13  # And wireless controllers as a kind of asset
+LOCK_API = 14  # And map icons locked in place
 
 
 class ServerUnreachable(IpamError):

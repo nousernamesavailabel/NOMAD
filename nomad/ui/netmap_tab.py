@@ -29,7 +29,8 @@ from ..netmap.crawl import MAX_WORKERS, WORKERS, CrawlSettings, Crawler, apply_i
     read_inventory_of, read_vlans_of
 from ..netmap.layout import BOTTOM, CENTER, GROUP_PAD, GROUP_TITLE, HORIZONTAL, LEFT, MIDDLE, \
     NORMAL, RESPACE_MIN_GAP, RIGHT, SPACING_NAMES, SPACINGS, STYLE_NAMES, TOP, TOP_DOWN, VERTICAL, align, arrange, \
-    arrange_boxes_in_place, arrange_in_place, distribute, merge_positions, nearest_spacing, respace, spacing_of
+    arrange_boxes_in_place, arrange_in_place, clear_of, distribute, merge_positions, nearest_spacing, respace, \
+    spacing_of
 from ..netmap.placement import places as subnet_places
 from ..netmap.tribe import SECRETS
 from ..netmap.model import AP_DOWN, AP_UP, BUILDING, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIND_NAMES, NO_SNMP, \
@@ -39,7 +40,7 @@ from ..snmp import V2C
 from ..snmpv3 import is_v3
 from ..terminal.credentials import CredentialError, protect, unprotect
 from .common import OneLineLabel, SortableTableItem, StoppableThread, add_submenu, drop_empty_submenus, \
-    read_only_table, set_hint
+    format_size, read_only_table, set_hint
 from .host_menu import HostActions
 from .map_ipam_dialog import RecordDialog
 from .integration import IPAM, PLACEMENT, VLAN, MapNetworkDialog, hub, split_key
@@ -52,7 +53,7 @@ from .netmap_progress import CrawlProgress
 from .netmap_dialogs import CommunitiesDialog, CompareDialog, DeletedDevicesDialog, DeviceDialog, GroupDialog, \
     HostDialog, LinkDialog, MapChoiceDialog, ScopeDialog, shown_value
 from .netmap_tribe import TribeSync
-from .netmap_view import GROUP_BOX, MapView
+from .netmap_view import GROUP_BOX, DrawingState, MapView
 from .netmap_vlans import VlanPanel, domain_text
 from .vlan_path_dialog import VlanPathDialog
 from .netmap_watch import MapWatcher
@@ -514,6 +515,7 @@ class NetworkMapTab(QWidget):
             view.positions_changed.connect(self.save_timer.start)
             view.positions_changed.connect(self.record_layout)
             view.context_requested.connect(self.show_device_menu)
+            view.drag_refused.connect(self.on_drag_refused)
         self.view.group_context_requested.connect(self.show_group_menu)
         self.view.groups_changed.connect(self.groups_toggled)
         self.view.devices_dropped.connect(self.on_devices_dropped)
@@ -1077,7 +1079,7 @@ class NetworkMapTab(QWidget):
         self.view.set_highlights({})
         if live is not None and not self.crawled_map:  # Failed part way: back to the map there was
             if self.network_map is not None:
-                self.show_map(self.network_map, self.map_path)
+                self.redraw_keeping_view()
             else:
                 self.view.clear_map()
         self.window.clear_busy("netmap")
@@ -1105,6 +1107,8 @@ class NetworkMapTab(QWidget):
             snapshot = self.network_map.preview_with(snapshot, self.live_positions)
             self.live_positions = snapshot.positions
             first = False  # Keep the view where it is: the map's already on screen
+        elif self.network_map is not None:  # Mapping again: what's locked stays locked while it's drawn
+            snapshot.locked = list(self.network_map.locked)
         nodes = list(snapshot.devices)
         edges = snapshot.layout_edges()
         root = self.network_map.root if self.network_map and self.network_map.root in snapshot.devices else None
@@ -1112,7 +1116,9 @@ class NetworkMapTab(QWidget):
                                               weight=lambda key: KIND_WEIGHTS.get(snapshot.devices[key].kind, 0))
         self.live_map = snapshot
         self.view.groups_editable = False
+        state = self.view.drawing_state()
         self.view.set_map(snapshot, self.live_positions)
+        self.view.restore_drawing(state)
         self.view.set_statuses(self.monitor.status)
         self.ring_devices_being_read()
         if first:
@@ -1135,7 +1141,7 @@ class NetworkMapTab(QWidget):
                 self.write_map(base, self.map_path)
             except OSError as error:
                 log.warning("Couldn't save the network map: %s", error)
-        self.show_map(base, self.map_path)
+        self.redraw_keeping_view()
         newly_read = len(read - before)
         message = (f"{'Stopped' if newer.stopped else 'Done'}: added {len(added)} device"
                    f"{'' if len(added) == 1 else 's'} to this map ({newly_read} read over SNMP for the first time)"
@@ -1174,7 +1180,10 @@ class NetworkMapTab(QWidget):
         if self.network_map is not None:  # Devices and links added by hand, first: their places are kept below
             network_map.carry_deleted(self.network_map)
             network_map.carry_ssh_hardware(self.network_map)  # What their SNMP doesn't say, read over SSH before
+            # First, so a device added by hand that's folded into a found one keeps its lock
+            network_map.locked, network_map.l3_locked = list(self.network_map.locked), list(self.network_map.l3_locked)
             folded, links_left_out = network_map.carry_manual(self.network_map)
+            network_map.locked = [key for key in network_map.locked if key in network_map.devices]
         if self.live_positions:  # Where devices were drawn (and dragged) while it crawled
             network_map.positions = {key: position for key, position in self.live_positions.items()
                                      if key in network_map.devices}
@@ -1204,7 +1213,9 @@ class NetworkMapTab(QWidget):
                 path = store.save(network_map)
         except OSError as error:
             log.warning("Couldn't save the network map: %s", error)
+        state = self.view.drawing_state()
         self.show_map(network_map, path, fit=not self.live_positions or self.view.auto_fit)
+        self.view.restore_drawing(state)
         snmp_count = sum(1 for device in network_map.devices.values() if device.source == SNMP)
         problems = sum(1 for device in network_map.devices.values() if device.source in (NO_SNMP, UNREACHABLE))
         message = (f"{'Stopped' if network_map.stopped else 'Done'}: {len(network_map.devices)} devices "
@@ -1248,7 +1259,7 @@ class NetworkMapTab(QWidget):
                                        network_map.l3_positions,
                                        weight=lambda key: 1 if self.l3_nodes[key].kind == l3.DEVICE else 0)
         network_map.l3_positions = l3_positions
-        self.l3_view.set_graph(self.l3_nodes, l3_links, l3_positions)
+        self.l3_view.set_graph(self.l3_nodes, l3_links, l3_positions, network_map.l3_locked)
         self.monitor.set_map(network_map)
         if network_map is not self.history_map:
             self.history_map = network_map
@@ -1282,19 +1293,39 @@ class NetworkMapTab(QWidget):
 
     def rearrange(self, style=None):
         """Lay out the view showing again (in style, which is remembered, or the last one), forgetting where things
-        were dragged to."""
+        were dragged to, except what's locked in place."""
         if self.network_map is None or self.worker is not None:
             return
         self.arrange_style = style or self.arrange_style
         view = self.current_view()
         nodes = list(self.l3_nodes) if view is self.l3_view else list(self.network_map.devices)
-        positions = arrange(nodes, style=self.arrange_style, **self.arrange_options(view, nodes))
+        positions = self.clear_of_locked(view, arrange(nodes, style=self.arrange_style,
+                                                       **self.arrange_options(view, nodes)))
         if view is self.l3_view:
             self.network_map.l3_positions = positions
         else:
             self.network_map.positions = positions
         self.show_map(self.network_map, self.map_path, fit=True)
         self.save_positions()
+
+    def anchored(self, view, centers):
+        """Where things arranged together should go ({key: (x, y)}) when some of them are locked in place: all shifted
+        alike, so the arrangement stands with the first locked one where it is."""
+        fixed = view.locked_centers()
+        anchor = next((key for key in centers if key in fixed), None)
+        if anchor is None:
+            return centers
+        dx, dy = fixed[anchor][0] - centers[anchor][0], fixed[anchor][1] - centers[anchor][1]
+        return {key: (x + dx, y + dy) for key, (x, y) in centers.items()}
+
+    def clear_of_locked(self, view, centers):
+        """Where things arranged should go ({key: (x, y)}): anything landing on what's locked in place is moved along
+        (a group's box isn't, as it may well be round one)."""
+        fixed = view.locked_positions()
+        if not fixed:
+            return centers
+        boxes = {key: center for key, center in centers.items() if key.startswith(GROUP_BOX)}
+        return {**clear_of({key: center for key, center in centers.items() if key not in boxes}, fixed), **boxes}
 
     def arrange_options(self, view, keys):
         """What arranging these devices (or the logical view's nodes) needs besides the style."""
@@ -1337,6 +1368,14 @@ class NetworkMapTab(QWidget):
         keep.toggled.connect(self.set_keep_groups)
         menu.addSeparator()
         self.add_selection_actions(menu, view, keys, always=True, spacing=False)
+        menu.addSeparator()
+        chosen = set(self.selection_to_lock(view))
+        locked = set(view.locked_keys())
+        idle = self.worker is None
+        menu.addAction("Lock Selected", self.lock_selected).setEnabled(idle and bool(chosen - locked))
+        menu.addAction("Unlock Selected", self.unlock_selected).setEnabled(idle and bool(chosen & locked))
+        menu.addAction(f"Unlock All ({len(locked)})" if locked else "Unlock All",
+                       self.unlock_all).setEnabled(idle and bool(locked))
         if self.network_map is not None and self.network_map.groups and view is self.view:
             menu.addSeparator()
             menu.addAction("Collapse All Groups", lambda: self.view.set_all_collapsed(True))
@@ -1359,7 +1398,8 @@ class NetworkMapTab(QWidget):
             return
         centers = {key: (x, y) for key, (x, y, _, _) in boxes.items()}
         sizes = {key: (width, height) for key, (_, _, width, height) in boxes.items()}
-        view.move_boxes(respace(centers, SPACINGS[spacing], sizes, self.closest_gap(view)))
+        view.move_boxes(self.clear_of_locked(view, self.anchored(view, respace(centers, SPACINGS[spacing], sizes,
+                                                                               self.closest_gap(view)))))
         # Arranging these again keeps the spacing (and the style they were last arranged in)
         self.last_arranged = ((view, frozenset(keys), frozenset(groups)),
                               self.selection_arrangement(view, keys, groups)[0], spacing)
@@ -1458,15 +1498,16 @@ class NetworkMapTab(QWidget):
         if groups:
             boxes = view.boxes(keys, groups)
             weight = self.arrange_options(view, [])["weight"]
-            view.move_boxes(arrange_boxes_in_place(boxes, view.box_links(boxes), style=style,
-                                                   weight=lambda key: 0 if key.startswith(GROUP_BOX) else weight(key),
-                                                   spacing=SPACINGS[spacing]))
+            view.move_boxes(self.clear_of_locked(view, self.anchored(view, arrange_boxes_in_place(
+                boxes, view.box_links(boxes), style=style,
+                weight=lambda key: 0 if key.startswith(GROUP_BOX) else weight(key), spacing=SPACINGS[spacing]))))
             return
         where = view.positions()
         positions = {key: where[key] for key in keys if key in where}
         options = self.arrange_options(view, keys)
         options["spacing"] = SPACINGS[spacing]
-        view.move_to(arrange_in_place(positions, style=style, **options))
+        view.move_boxes(self.clear_of_locked(view, self.anchored(view, arrange_in_place(positions, style=style,
+                                                                                        **options))))
 
     def align_selected(self, view, keys, how, groups=()):
         """Line up devices (and with groups, those groups' boxes and the devices not in them) by their edges or
@@ -1475,7 +1516,68 @@ class NetworkMapTab(QWidget):
         centers = {key: (x, y) for key, (x, y, _, _) in boxes.items()}
         sizes = {key: (width, height) for key, (_, _, width, height) in boxes.items()}
         line_up = distribute if how in (HORIZONTAL, VERTICAL) else align
-        view.move_boxes(line_up(centers, how, sizes))
+        view.move_boxes(self.anchored(view, line_up(centers, how, sizes)))
+
+    # ----------------------------------------------------------------- Locking icons in place
+
+    def locks_of(self, view):
+        """The keys locked in place on a view: each view has its own layout, so its own locks."""
+        return self.network_map.l3_locked if view is self.l3_view else self.network_map.locked
+
+    def set_locked(self, view, keys, locked):
+        """Lock these in place on a view (or unlock them), and save. It's a step for Undo."""
+        network_map = self.network_map
+        if network_map is None or self.worker is not None or not keys:
+            return
+        now = set(self.locks_of(view)) | set(keys) if locked else set(self.locks_of(view)) - set(keys)
+        if view is self.l3_view:
+            network_map.l3_locked = sorted(now)
+        else:
+            network_map.locked = sorted(now)
+        view.show_locked(now)
+        self.save_positions()
+        self.record_layout()
+        what = view.items_by_key[keys[0]].label if len(keys) == 1 and keys[0] in view.items_by_key \
+            else count_text(len(keys), "icon")
+        message = f"Locked {what} in place." if locked else f"Unlocked {what}."
+        maps = self.tribe.maps if self.tribe_map_id is not None else None
+        if maps is not None and maps.too_old_for_locks:
+            message +=" The tribe server is too old to share locks: they stay on this computer until it's updated."
+        set_hint(self.status_label, message, "success")
+
+    def selection_to_lock(self, view):
+        """What's selected on a view, with the devices of the groups selected."""
+        keys = view.selected_keys()
+        for group in self.selected_groups(view):
+            keys += [key for key in self.network_map.members(group) if key not in keys]
+        return keys
+
+    def lock_selected(self):
+        view = self.current_view()
+        self.set_locked(view, self.selection_to_lock(view), True)
+
+    def unlock_selected(self):
+        view = self.current_view()
+        self.set_locked(view, self.selection_to_lock(view), False)
+
+    def unlock_all(self):
+        view = self.current_view()
+        self.set_locked(view, view.locked_keys(), False)
+
+    def on_drag_refused(self, label):
+        set_hint(self.status_label, f"{label} is locked in place: right-click it > Unlock Position to move it.", "info")
+
+    def add_lock_actions(self, menu, actions, view, keys):
+        """Lock Position and Unlock Position for what's right-clicked (or selected with it): each for all of them,
+        offered if it would change any of them."""
+        if self.network_map is None or self.worker is not None:
+            return
+        locked = view.locked_keys()
+        for verb, on, applies in (("Lock", True, any(key not in locked for key in keys)),
+                                  ("Unlock", False, any(key in locked for key in keys))):
+            if applies:
+                label = f"{verb} Position" if len(keys) == 1 else f"{verb} {len(keys)} Selected"
+                actions[menu.addAction(label)] = lambda on=on: self.set_locked(view, keys, on)
 
     def groups_toggled(self):
         """A group was collapsed or expanded. On a tribe map that's this computer's own: kept here now, with nothing
@@ -2702,6 +2804,7 @@ class NetworkMapTab(QWidget):
         layout = add_submenu(menu, "Layout") if here in (self.view, self.l3_view) else None
         if layout is not None:
             self.add_selection_actions(layout, here, keys)
+            self.add_lock_actions(menu, actions, here, keys)
         edit = add_submenu(menu, "Edit") if editing else None
         if edit is not None:
             self.add_by_hand_actions(edit, actions, key, keys)
@@ -2832,6 +2935,9 @@ class NetworkMapTab(QWidget):
             menu.addSeparator()
             actions[menu.addAction("Crawl from Here")] = lambda: self.crawl_from(node.label)
             actions[menu.addAction("Copy Address")] = lambda: QApplication.clipboard().setText(node.label)
+        menu.addSeparator()
+        selected = self.l3_view.selected_keys()
+        self.add_lock_actions(menu, actions, self.l3_view, selected if key in selected else [key])
         if not actions:
             return
         chosen = menu.exec_(position)
@@ -3552,6 +3658,12 @@ class NetworkMapTab(QWidget):
                                   lambda spacing: self.space_group(key, spacing))
             self.add_selection_actions(menu, self.view, self.view.selected_keys())  # With others selected
             menu.addSeparator()
+            locked = [member for member in members if member in network_map.locked]
+            if len(locked) < len(members):
+                actions[menu.addAction("Lock Its Devices")] = lambda: self.set_locked(self.view, members, True)
+            if locked:
+                actions[menu.addAction("Unlock Its Devices")] = lambda: self.set_locked(self.view, locked, False)
+            menu.addSeparator()
             actions[menu.addAction("Rename...")] = lambda: self.rename_group(key)
             if group.kind in PARENT_KIND:
                 outer = GROUP_KINDS[PARENT_KIND[group.kind]]
@@ -3678,10 +3790,11 @@ class NetworkMapTab(QWidget):
     # ----------------------------------------------------------------- Undo and Redo
 
     def layout_state(self):
-        """What Undo puts back: where everything is on both views, the sites, buildings and rooms (not whether
-        they're collapsed), and which one each device is in."""
+        """What Undo puts back: where everything is on both views and what's locked there, the sites, buildings and
+        rooms (not whether they're collapsed), and which one each device is in."""
         network_map = self.network_map
         return {"positions": self.view.positions(), "l3_positions": self.l3_view.positions(),
+                "locked": list(network_map.locked), "l3_locked": list(network_map.l3_locked),
                 "groups": [(group.key, group.name, group.kind, group.parent) for group in network_map.groups],
                 "group_of": dict(network_map.group_of)}
 
@@ -3716,6 +3829,9 @@ class NetworkMapTab(QWidget):
                                   for key, name, kind, parent in state["groups"]]
             network_map.group_of = dict(state["group_of"])
             self.view.rebuild_groups()
+            network_map.locked, network_map.l3_locked = list(state["locked"]), list(state["l3_locked"])
+            self.view.show_locked(network_map.locked)
+            self.l3_view.show_locked(network_map.l3_locked)
             self.view.move_to(state["positions"])
             self.l3_view.move_to(state["l3_positions"])
             network_map.l3_positions = self.l3_view.positions()
@@ -4208,19 +4324,20 @@ class NetworkMapTab(QWidget):
     def redraw_keeping_view(self, show=None, select=None):
         """Draw the map open again, keeping the view where it was, what was selected and which hosts were open."""
         network_map = self.network_map
-        expanded = {key for key, item in self.view.items_by_key.items() if item.expanded}
-        selected = [select] if select else self.view.selected_keys()
+        states = {view: view.drawing_state() for view in (self.view, self.l3_view)}
+        if show:
+            states[self.view].expanded.add(show.device)
+        if select:
+            states[self.view] = DrawingState(states[self.view].expanded, [select])
         scroll = (self.view.horizontalScrollBar().value(), self.view.verticalScrollBar().value())
+        details = (self.details_shown[0], self.details.verticalScrollBar().value())
         self.show_map(network_map, self.map_path)
-        for key in expanded | ({show.device} if show else set()):
-            if key in self.view.items_by_key and self.view.items_by_key[key].host_count:
-                self.view.items_by_key[key].set_expanded(True)
-        self.view.update_scene_rect()
+        for view in sorted(states, key=lambda view: view is self.current_view()):  # Its selection is the one to show
+            view.restore_drawing(states[view])
         self.view.horizontalScrollBar().setValue(scroll[0])
         self.view.verticalScrollBar().setValue(scroll[1])
-        for key in selected:
-            if key in self.view.items_by_key:
-                self.view.items_by_key[key].setSelected(True)
+        if self.details_shown[0] == details[0]:
+            self.details.verticalScrollBar().setValue(details[1])
 
     # ----------------------------------------------------------------- Files
 
@@ -4384,6 +4501,17 @@ def wireless_rows(network_map, key):
     return rows
 
 
+def disk_rows(device):
+    """[(label, value)] for a device's details: how full each of a pfSense firewall's disks was when last read."""
+    rows = []
+    for disk in device.disks:
+        label = "Disk" if len(device.disks) == 1 else f"Disk {disk['name']}"
+        percent = 100 * disk["used"] / disk["total"] if disk["total"] else 0
+        rows.append((label, f"{format_size(disk['used'])} of {format_size(disk['total'])} used ({percent:.1f}%), "
+                            f"{format_size(disk['free'])} free, read {device.disks_read[:16].replace('T', ' ')}"))
+    return rows
+
+
 def device_html(network_map, key, state=None, live=None):
     """state: the device's monitor.DeviceStatus while it's monitored; live: the tunnels as monitoring last read
     them."""
@@ -4400,7 +4528,7 @@ def device_html(network_map, key, state=None, live=None):
             ("Addresses", ", ".join(device.addresses)), ("Problem", device.error), ("Note", device.note),
             ("Corrected", "; ".join(f"{CORRECTED_NAMES[attribute]} (the crawl found {shown_value(attribute, found)})"
                                     for attribute, (found, _) in device.corrected.items()))]
-    rows[1:1] = wireless_rows(network_map, key)
+    rows[1:1] = disk_rows(device) + wireless_rows(network_map, key)
     for label, value in rows:
         if value:
             parts.append(f"<tr><td><b>{escape(label)}</b>&nbsp;</td><td>{escape(value)}</td></tr>")

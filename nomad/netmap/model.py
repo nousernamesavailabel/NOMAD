@@ -157,6 +157,9 @@ class Device:
     controller: str = ""
     ap_group: str = ""
     ap_status: str = ""
+    # A pfSense firewall's disks ([{"name", "total", "used", "free"}] in bytes, netmap.pfsense), and when they were read
+    disks: list = field(default_factory=list)
+    disks_read: str = ""
     # Its CDP or LLDP table couldn't all be read (a timeout) when it was last read, so a link it didn't give then may
     # still be there
     neighbors_partial: bool = False
@@ -303,6 +306,8 @@ class NetworkMap:
     # The IPAM network the map is of, as the IP Addresses page names it: "team:<id>" (the tribe's) or "local:<id>"
     # (this computer's), or "" when nobody has said
     ipam_network: str = ""
+    locked: list = field(default_factory=list)  # Device keys locked in place on the physical view, sorted
+    l3_locked: list = field(default_factory=list)  # Node keys locked in place on the logical view, sorted
 
     def add_link(self, link):
         """Add a link, merging it with the same link seen from the other end (or by the other protocol)."""
@@ -409,7 +414,8 @@ class NetworkMap:
         this map as it was. Devices added by hand that it has found are folded in, so the found one is drawn in their
         place (positions: where devices are drawn now, if not this map's)."""
         preview = NetworkMap(seeds=self.seeds, started=self.started, root=self.root,
-                             positions=dict(self.positions if positions is None else positions))
+                             positions=dict(self.positions if positions is None else positions),
+                             locked=list(self.locked))
         preview.devices = dict(self.devices)
         preview.links = [replace(link, protocols=list(link.protocols)) for link in self.links]
         preview.hosts = [replace(host) for host in self.hosts]
@@ -439,6 +445,8 @@ class NetworkMap:
             self.devices.pop(key, None)
             self.positions.pop(key, None)
             self.l3_positions.pop(key, None)
+        self.locked = [key for key in self.locked if key not in keys]
+        self.l3_locked = [key for key in self.l3_locked if key not in keys]
         self.links = [link for link in self.links if link.a not in keys and link.b not in keys]
         self.hosts = [host for host in self.hosts if host.device not in keys]
         self.news = {ref: item for ref, item in self.news.items() if ref.partition(":")[2] not in keys
@@ -579,6 +587,8 @@ class NetworkMap:
         for positions in (self.positions, self.l3_positions):
             if key in positions and (found.key in new or found.key not in positions):
                 positions[found.key] = positions[key]
+        self.locked = sorted({found.key if item == key else item for item in self.locked})
+        self.l3_locked = sorted({found.key if item == key else item for item in self.l3_locked})
         if key in self.group_of:
             self.group_of.setdefault(found.key, self.group_of[key])
         if self.root == key:
@@ -749,6 +759,8 @@ class NetworkMap:
                                  if key in network_map.devices}
         network_map.traces = [_build(Trace, item) for item in data.get("traces", [])]
         network_map.l3_positions = {key: tuple(value) for key, value in data.get("l3_positions", {}).items()}
+        network_map.locked = sorted(key for key in data.get("locked", []) if key in network_map.devices)
+        network_map.l3_locked = sorted(data.get("l3_locked", []))
         network_map.status_log = [list(entry) for entry in data.get("status_log", [])]
         network_map.groups = [_build(Group, item) for item in data.get("groups", [])]
         network_map.group_of = dict(data.get("group_of", {}))

@@ -178,6 +178,7 @@ class DeviceTables:
     ike_sessions: list = field(default_factory=list)  # [(local address, remote address)] of its IKE sessions up
     ike_read: bool = False  # Its IKE sessions were read (none up is then known, not just unread)
     wireless: object = None  # A wireless controller's access points and their clients (aruba.Controller)
+    disks: list = field(default_factory=list)  # A pfSense firewall's disks (pfsense.disks)
 
 
 @dataclass
@@ -759,6 +760,11 @@ def port_status(admin_rows, oper_rows, high_speed_rows=(), speed_rows=(), duplex
     return found
 
 
+def is_pfsense(descr):
+    """From its sysDescr, "pfSense <hostname> 2.8.1-RELEASE FreeBSD ..." (sysObjectID says only FreeBSD's bsnmpd)."""
+    return (descr or "").lower().startswith("pfsense")
+
+
 def classify(object_id="", descr="", capabilities=frozenset(), platform="", switchports=False):
     """Switch, router, firewall, wireless controller, access point, phone or host, from what the device says about
     itself. switchports: a Cisco device's own tables have access or trunk ports, which makes it a switch unless its
@@ -768,6 +774,8 @@ def classify(object_id="", descr="", capabilities=frozenset(), platform="", swit
     if object_id.startswith(PALO_ALTO + ".") or "palo alto" in words or "pan-os" in words:
         return FIREWALL
     if "adaptive security appliance" in words or "firepower" in words or platform.lower().startswith(("asa", "ftd")):
+        return FIREWALL
+    if is_pfsense(descr) or is_pfsense(platform):
         return FIREWALL
     if "phone" in capabilities or "phone" in words:
         return PHONE

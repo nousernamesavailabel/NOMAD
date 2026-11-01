@@ -7,7 +7,7 @@ from ..netmap.model import AP, FIREWALL, ROUTER, SERVER, SHARED_PORT_HOSTS, SWIT
 from ..netmap.monitor import DOWN, UNKNOWN as NOT_CHECKED, UP
 from ..netmap.vlans import ACCESS, NATIVE, ONE_END, TAGGED
 from .netmap_view import KIND_COLORS, KIND_TAGS, PATH_BLOCKED, PATH_CARRIES, PATH_CHOSEN, PATH_GAP, PATH_OFFERED, \
-    PATH_PLANNED, PATH_ROUTE, PATH_STYLES, STATUS_COLORS, VLAN_LINK_COLORS
+    PATH_PLANNED, PATH_ROUTE, PATH_STYLES, STATUS_COLORS, VLAN_LINK_COLORS, draw_padlock
 from .theme import COLORS
 
 SWATCH_WIDTH, SWATCH_HEIGHT = 96, 40
@@ -29,7 +29,7 @@ def rounded(rect, radius):
 
 
 def device(kind=SWITCH, dashed=False, unreachable=False, italic=False, status=None, ring=None, selected=False,
-           news=False, mark=None):
+           news=False, mark=None, locked=False):
     """A device's box, as the map draws it: its kind's color (or up/down while monitored, or an overlay's color)
     round it and on its tag."""
     def paint(painter, rect):
@@ -70,8 +70,11 @@ def device(kind=SWITCH, dashed=False, unreachable=False, italic=False, status=No
             painter.setPen(QPen(QColor(COLORS["selection"]), 2))
             painter.drawPath(rounded(box.adjusted(-3, -3, 3, 3), 7))
         painter.setFont(font(0.62, bold=True))
-        painter.setPen(QColor(outline if status is None and mark is None else COLORS["text"]))
-        painter.drawText(strip, Qt.AlignCenter, KIND_TAGS.get(kind, "?"))
+        tag_color = QColor(outline if status is None and mark is None else COLORS["text"])
+        painter.setPen(tag_color)
+        painter.drawText(strip.adjusted(0, 0, 0, -11) if locked else strip, Qt.AlignCenter, KIND_TAGS.get(kind, "?"))
+        if locked:
+            draw_padlock(painter, QPointF(strip.center().x(), box.bottom() - 7), tag_color, 0.75)
         painter.setFont(font(0.72, bold=True, italic=italic))
         painter.setPen(QColor(COLORS["error"] if unreachable else COLORS["text"]))
         painter.drawText(box.adjusted(STRIP + 4, 0, -14 if status is not None else -2, 0),
@@ -237,6 +240,9 @@ SECTIONS = [
     ("Marks on devices", [
         (device(news=True), "NEW: found by Watch and not looked at yet (or \"2 new hosts\": new hosts on it)"),
         (device(selected=True), "White ring: selected"),
+        (device(locked=True), "Padlock under the tag: locked in place, so nothing moves it (right-click > Lock "
+                              "Position or Unlock Position). Each view has its own locks, and pictures of the map "
+                              "leave the padlock out"),
         (device(ring=COLORS["success"]), "Green ring: being read during a crawl, or new since the map you compared "
                                          "with (Compare)"),
         (device(ring=COLORS["warning"]), "Amber ring: changed since the map you compared with (Compare)"),

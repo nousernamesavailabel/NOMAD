@@ -4,6 +4,13 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.36.0] - 2026-10-31
+
+- **New:** lock Network Map icons in place: right-click > Lock Position (or Unlock Position), or a group's menu, or the Arrange menu. A small padlock shows which are locked, and nothing moves them but Undo. On a tribe map, locks are shared once the tribe server is updated.
+- **New:** the Network Map reads a pfSense firewall's disk space and shows it in the device's details (used, total, percent, free). The firewall needs Host Resources ticked under Services > SNMP.
+- **Fixed:** a pfSense box is mapped as a firewall, not an unknown device with a question mark.
+- **Fixed:** Crawl from Here keeps the device selected and its details showing, and any open hosts stay open, rather than clearing the details pane.
+
 ## [1.35.1] - 2026-10-29
 
 - **Fixed:** a Network Map device marked Unreachable (on a tribe map, perhaps by another computer) that Monitor Status has answering ping is checked again and shows "Pings, no SNMP", not a green box saying Unreachable.

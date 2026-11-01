@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from ..oui import format_mac, vendor
 from ..snmp import V2C, SnmpClient, SnmpError, oid_text, parse_oid
 from ..snmpv3 import credential_from_json, credential_to_json, is_v3, users_from_json
-from . import aruba, collect, hardware, l3, vlans
+from . import aruba, collect, hardware, l3, pfsense, vlans
 from .model import AP, AP_DOWN, AP_UP, CONTROLLER, HOST, KIND_NAMES, NEIGHBOR, NETWORK_KINDS, NO_SNMP, PHONE, \
     ROUTER, SERVER, SNMP, SSH_READ, UNKNOWN, UNREACHABLE, Device, Host, Link, NetworkMap, Trace, device_mac, \
     display_name, name_mac, normalize_name, port_key, port_sort_key, short_port
@@ -401,6 +401,8 @@ class Crawler:
         self.read_vlans(client, tables)
         if aruba.is_controller(tables.info.object_id, tables.info.descr):
             self.read_wireless(client, tables)
+        if collect.is_pfsense(tables.info.descr):
+            self.read_disks(client, tables)
         if self.settings.read_inventory:
             self.read_inventory(client, tables)
         tables.lag_parents = collect.lag_parents(
@@ -480,6 +482,16 @@ class Crawler:
         up = sum(1 for item in access_points if item.up)
         tables.notes.append(f"Wireless controller: {len(access_points)} access points ({up} up)"
                             + (f", {len(found.clients)} Wi-Fi clients" if self.settings.collect_hosts else ""))
+
+    def read_disks(self, client, tables):
+        """How full a pfSense firewall's disks are. Only the storage table's type column is walked: nearly all its
+        rows are the kernel's memory zones."""
+        type_rows = self.walk(client, f"{pfsense.STORAGE_ENTRY}.{pfsense.STORAGE_TYPE}", tables, "Disks")
+        indexes = pfsense.disk_indexes(type_rows)
+        if indexes:
+            tables.disks = pfsense.disks(self.get_many(client, pfsense.detail_oids(indexes), tables, "Disks"))
+        if not tables.disks:
+            tables.notes.append("pfSense gave no disks: is Host Resources ticked under Services > SNMP?")
 
     def read_base_macs(self, client, tables):
         """Each chassis' MAC (hardware.set_chassis_macs) and the device's base MAC: a stack's members' from
@@ -1285,15 +1297,17 @@ def read_vlans_of(settings, address, client_factory=SnmpClient, routes=False, st
 
 
 def read_inventory_of(settings, address, client_factory=SnmpClient):
-    """Read just a device's hardware and software (its chassis, parts, serial numbers and software version), not its
-    neighbors or tables: Read Inventory Again. Returns (DeviceTables, the community or V3User it answered to), or
-    (None, None) when it answers none."""
+    """Read just a device's hardware and software (its chassis, parts, serial numbers and software version, and a
+    pfSense firewall's disks), not its neighbors or tables: Read Inventory Again. Returns (DeviceTables, the community
+    or V3User it answered to), or (None, None) when it answers none."""
     crawler = Crawler(settings, client_factory=client_factory)
     client, info, community = crawler.connect(address)
     if client is None:
         return None, None
     tables = collect.DeviceTables(info=info)
     crawler.read_inventory(client, tables)
+    if collect.is_pfsense(info.descr):
+        crawler.read_disks(client, tables)
     return tables, community
 
 
@@ -1309,6 +1323,8 @@ def apply_inventory(device, tables):
     device.software = tables.software or hardware.software_version(tables.info.descr) or device.software
     if tables.info.descr:
         device.sys_descr = tables.info.descr
+    if tables.disks:  # (A read that found none leaves the last one, with its date)
+        device.disks, device.disks_read = [dict(disk) for disk in tables.disks], _now()
 
 
 def apply_vlans(device, tables):

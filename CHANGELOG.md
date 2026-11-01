@@ -6,6 +6,18 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.36.0] - 2026-10-31
+
+### Added
+
+- **Network Map: lock icons in place**: right-click a device, subnet or hop > **Lock Position** (or **Lock 5 Selected**) keeps it from being moved by accident, and **Unlock Position** frees it. A group's menu has **Lock Its Devices** and **Unlock Its Devices**, and the Arrange menu has **Lock Selected**, **Unlock Selected** and **Unlock All**. A locked icon shows a small padlock under its tag (subnets and hops, which have no tag strip, show it inside their left edge); no color or line changes, and pictures of the map leave it out. It can still be selected and used as normal. Nothing moves it but Undo: dragging a selection leaves it behind, dragging a group's title leaves it there and stretches the box round it, and Re-arrange and Put at the Top work round it (anything landing on it is moved along). A selection with locked icons in it can still be arranged, spaced, aligned and distributed: the locked ones stay where they are and the rest fall in around the first of them, so Align Left on a locked device and an unlocked one lines the unlocked one up with it. A locked device can't be dragged into or out of a group. Lock and Unlock are steps for Undo. Each view (Physical and Logical) has its own locks. They're saved with the map and kept when mapping again. On a tribe map they're shared with everyone, which needs the tribe server updated (API 14); on an older server they stay on this computer, and go when it's updated. Someone on an older NOMAD can still move locked icons, and clears the locks when their copy saves the map.
+- **Network Map: pfSense disk space**: a crawl of a pfSense firewall (and Read Hardware Again) now reads how full its disks are from the Host Resources MIB, and the device's details show it between Status and Management IP: used, total, percent, free, and when it was read. A ZFS pool shows as one disk, however many datasets it has; tmpfs and devfs are left out. The firewall needs Host Resources ticked under Services > SNMP; if it gives no disks, the crawl log says so.
+
+### Fixed
+
+- **Network Map: pfSense shown as Unknown**: a pfSense box is now mapped as a firewall (from its sysDescr, or a neighbor's LLDP), rather than the question mark icon. A map made before this needs crawling again, or the device's kind corrected by hand.
+- **Network Map: details pane cleared by a crawl**: Crawl from Here left nothing selected and the details pane saying to select a device, as soon as the map started redrawing and again when it finished. What's selected (a device, group or host port, on either view), which hosts are open and where the details are scrolled to now all stay through the crawl. Mapping again with Start keeps them too, for anything still on the map.
+
 ## [1.35.1] - 2026-10-29
 
 ### Fixed

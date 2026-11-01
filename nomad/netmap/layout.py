@@ -434,6 +434,19 @@ def merge_positions(nodes, edges, saved, root=None, weight=lambda node: 0):
     return result
 
 
+def clear_of(positions, fixed):
+    """positions with the ones in fixed ({node: (x, y)}, locked in place) kept where they are, and any landing on one
+    of those moved along until they're clear of everything."""
+    result = {node: tuple(point) for node, point in positions.items() if node not in fixed}
+    for node, point in list(result.items()):
+        if any(abs(point[0] - x) < NODE_WIDTH and abs(point[1] - y) < NODE_HEIGHT for x, y in fixed.values()):
+            others = list(fixed.values()) + [other for key, other in result.items() if key != node]
+            while overlaps(point, others):
+                point = (point[0] + NODE_WIDTH + H_GAP, point[1])
+            result[node] = point
+    return {**result, **fixed}
+
+
 # ----------------------------------------------------------------- Arranging
 
 

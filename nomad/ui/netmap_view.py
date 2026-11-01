@@ -3,11 +3,13 @@ switch's hosts behind a badge that opens into one box per port, and sites and bu
 devices that can be collapsed into one."""
 import math
 import time
+from collections import namedtuple
 
 from PyQt5.QtCore import QLineF, QPointF, QRectF, QSize, QSizeF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPainterPath, \
     QPainterPathStroker, QPen
-from PyQt5.QtWidgets import QGraphicsItem, QGraphicsLineItem, QGraphicsScene, QGraphicsView, QStyleOptionGraphicsItem
+from PyQt5.QtWidgets import QApplication, QGraphicsItem, QGraphicsLineItem, QGraphicsScene, QGraphicsView, \
+    QStyleOptionGraphicsItem
 
 from ..netmap.l3 import HOP, STAR, SUBNET
 from ..netmap.overlays import DASH, DOT, TUNNEL_COLORS, Mark
@@ -58,6 +60,8 @@ PATH_ORDER = [PATH_BLOCKED, PATH_PLANNED, PATH_ROUTE, PATH_CHOSEN, PATH_CARRIES,
 FADED = 0.22
 OVERLAY_LINE_STYLES = {DASH: Qt.DashLine, DOT: Qt.DotLine}
 OVERLAY_ORDER = ["error", "warning"]  # A line standing for several links shows the worst of their overlay marks
+# Which devices' hosts are open, and the device keys, group keys and (device key, port)s selected
+DrawingState = namedtuple("DrawingState", "expanded devices groups ports", defaults=((), ()))
 
 
 def mark_color(name):
@@ -127,6 +131,24 @@ def host_tooltip(port, hosts):
     return "\n".join(lines)
 
 
+def draw_padlock(painter, center, color, scale=1.0):
+    """A small padlock in color: this box is locked in place."""
+    painter.save()
+    painter.translate(center)
+    painter.scale(scale, scale)
+    shackle = QPainterPath(QPointF(-3.2, 0))
+    shackle.lineTo(-3.2, -3)
+    shackle.arcTo(QRectF(-3.2, -6.2, 6.4, 6.4), 180, -180)
+    shackle.lineTo(3.2, 0)
+    painter.setBrush(Qt.NoBrush)
+    painter.setPen(QPen(color, 1.5))
+    painter.drawPath(shackle)
+    body = QPainterPath()
+    body.addRoundedRect(QRectF(-5, -1, 10, 7.5), 1.5, 1.5)
+    painter.fillPath(body, color)
+    painter.restore()
+
+
 class NodeItem(QGraphicsItem):
     """Something on the map that links join and the user can drag: a device, or on the logical view a subnet or a
     hop traceroute found."""
@@ -143,9 +165,32 @@ class NodeItem(QGraphicsItem):
         self.base_tip = None  # Its tooltip without what the overlay showing adds (once one has)
         self.group_item = None  # The GroupItem it's directly in
         self.route_text = ""  # Its place on Carry VLAN's route ("1", or "2, 5" when it's on it twice)
+        self.locked = False  # Locked in place: nothing moves it but Undo
         self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable
                       | QGraphicsItem.ItemSendsGeometryChanges)
         self.setZValue(2)
+
+    def set_locked(self, locked):
+        if locked == self.locked:
+            return
+        self.locked = locked
+        self.setFlag(QGraphicsItem.ItemIsMovable, not locked)  # Qt then leaves it out of a drag of what's selected
+        self.base_tip = None
+        self.update_tip()
+        if self.mark is not None:
+            self.set_mark(self.mark)
+        self.update()
+
+    def update_tip(self):
+        """Its tooltip, without what the overlay showing adds."""
+
+    def lock_note(self):
+        return "Locked in place: right-click > Unlock Position to move it" if self.locked else ""
+
+    @property
+    def padlock_shown(self):
+        """Pictures of the map leave the padlock out: it's only for whoever's arranging it."""
+        return self.locked and not self.view.exporting
 
     def set_highlight(self, color):
         self.highlight = color
@@ -210,7 +255,10 @@ class NodeItem(QGraphicsItem):
 
     def mouseMoveEvent(self, event):
         super().mouseMoveEvent(event)
-        self.view.node_dragged(self)
+        if self.locked:
+            self.view.locked_dragged(self, event)
+        else:
+            self.view.node_dragged(self)
 
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
@@ -242,6 +290,7 @@ class DeviceItem(NodeItem):
             tip.append("Answers ping now (it didn't when crawled): right-click > Check SNMP Again to note it")
         if self.host_count:
             tip.append(f"{self.host_count} hosts: double-click to show them by port")
+        tip.append(self.lock_note())
         self.setToolTip("\n".join(part for part in tip if part))
 
     def boundingRect(self):
@@ -357,10 +406,13 @@ class DeviceItem(NodeItem):
         painter.drawPath(path)
         self.draw_selection(painter, path, self.rect, 7)
 
-        painter.setPen(QColor(outline if state is None and not marked else COLORS["text"]))
+        tag_color = QColor(outline if state is None and not marked else COLORS["text"])
+        painter.setPen(tag_color)
         painter.setFont(small_font(0.75, bold=True))
         painter.drawText(QRectF(self.rect.left(), self.rect.top(), STRIP_WIDTH, self.rect.height()), Qt.AlignCenter,
                          KIND_TAGS.get(device.kind, "?"))
+        if self.padlock_shown:  # Under the tag, in its color: nothing else on the box changes
+            draw_padlock(painter, QPointF(self.rect.left() + STRIP_WIDTH / 2, self.rect.bottom() - 13), tag_color)
         if state is not None and state.status == DOWN:  # Tint the box: it's the one to look at
             tint = QColor(COLORS["error"])
             tint.setAlpha(45)
@@ -540,7 +592,11 @@ class SimpleNodeItem(NodeItem):
             self.rect = QRectF(-16, -16, 32, 32)
         else:
             self.rect = QRectF(-NODE_WIDTH / 2 + 20, -22, NODE_WIDTH - 40, 44)
-        self.setToolTip("\n".join(part for part in (node.label, node.detail) if part))
+        self.update_tip()
+
+    def update_tip(self):
+        node = self.node
+        self.setToolTip("\n".join(part for part in (node.label, node.detail, self.lock_note()) if part))
 
     def boundingRect(self):
         return self.rect.adjusted(-9, -9, 9, 9)
@@ -560,19 +616,24 @@ class SimpleNodeItem(NodeItem):
         painter.setPen(pen)
         painter.drawPath(path)
         self.draw_selection(painter, path, self.rect, radius)
+        room = self.rect.width() - 10
+        if self.padlock_shown:  # It has no strip: inside its left edge, with its words kept clear of it
+            draw_padlock(painter, QPointF(self.rect.left() + (9 if node.kind == STAR else 13), self.rect.center().y()),
+                         QColor(COLORS["muted"]), 0.8 if node.kind == STAR else 1.0)
+            room -= 40
         bold = small_font(0.9, bold=True)
         painter.setFont(bold)
         painter.setPen(QColor(COLORS["text"]))
         if node.kind == STAR or not node.detail:
-            painter.drawText(self.rect, Qt.AlignCenter, elided(node.label, bold, self.rect.width() - 10))
+            painter.drawText(self.rect, Qt.AlignCenter, elided(node.label, bold, max(room, 10)))
             return
         painter.drawText(self.rect.adjusted(5, 3, -5, -self.rect.height() / 2), Qt.AlignCenter,
-                         elided(node.label, bold, self.rect.width() - 10))
+                         elided(node.label, bold, room))
         detail = small_font(0.75)
         painter.setFont(detail)
         painter.setPen(QColor(COLORS["muted"]))
         painter.drawText(self.rect.adjusted(5, self.rect.height() / 2, -5, -3), Qt.AlignCenter,
-                         elided(node.detail, detail, self.rect.width() - 10))
+                         elided(node.detail, detail, room))
 
 
 class GroupItem(QGraphicsItem):
@@ -1012,6 +1073,7 @@ class MapView(QGraphicsView):
     link_drawn = pyqtSignal(str, str)  # Drawing a link by hand: from device key, to device key
     device_picked = pyqtSignal(str)  # Picking devices one after another (Carry VLAN's Pick on Map): one clicked
     picking_stopped = pyqtSignal()
+    drag_refused = pyqtSignal(str)  # A locked icon was dragged: its name
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1032,6 +1094,8 @@ class MapView(QGraphicsView):
         self.groups_suspended = False  # Moving many devices at once: the groups' boxes are updated after
         self.groups_editable = True  # Dragging devices in and out of groups (not while crawling)
         self.drag = None  # Devices being dragged: {"moving": set of items, "start": {item: position}}
+        self.drag_refused_now = False  # This drag of a locked icon has been refused (said once a drag)
+        self.exporting = False  # Drawing a picture of the map
         self.network_map = None
         self.fit_pending = False
         self.auto_fit = False  # Fitted automatically and not zoomed or panned since: refit when resized
@@ -1051,7 +1115,9 @@ class MapView(QGraphicsView):
 
     def set_map(self, network_map, positions):
         self.cancel_drawing()
+        self.scene().blockSignals(True)  # Not "nothing selected": restore_drawing may be about to select it again
         self.scene().clear()
+        self.scene().blockSignals(False)
         self.items_by_key, self.link_items, self.group_items, self.drag = {}, [], {}, None
         self.vlan_focus = None  # Its links are new: the page highlights the VLAN again
         self.overlay = None  # Or shows its overlay again
@@ -1062,6 +1128,7 @@ class MapView(QGraphicsView):
         for key, device in network_map.devices.items():
             item = DeviceItem(device, network_map.hosts_by_port(key), self)
             item.setPos(*positions.get(key, (0, 0)))
+            item.set_locked(key in network_map.locked)
             self.scene().addItem(item)
             self.items_by_key[key] = item
         self.groups_suspended = False
@@ -1080,8 +1147,9 @@ class MapView(QGraphicsView):
         self.network_map, self.links, self.last_found = None, [], None
         self.update_scene_rect()
 
-    def set_graph(self, nodes, links, positions):
-        """Show the logical view: l3.L3Nodes (devices drawn as on the physical view) and the links between them."""
+    def set_graph(self, nodes, links, positions, locked=()):
+        """Show the logical view: l3.L3Nodes (devices drawn as on the physical view) and the links between them.
+        locked: the keys of those locked in place."""
         self.cancel_drawing()
         self.scene().clear()
         self.items_by_key, self.link_items, self.group_items, self.drag = {}, [], {}, None
@@ -1093,6 +1161,7 @@ class MapView(QGraphicsView):
         for key, node in nodes.items():
             item = DeviceItem(node.device, {}, self) if node.device is not None else SimpleNodeItem(node, self)
             item.setPos(*positions.get(key, (0, 0)))
+            item.set_locked(key in locked)
             self.scene().addItem(item)
             self.items_by_key[key] = item
         self.rebuild_links()
@@ -1213,9 +1282,32 @@ class MapView(QGraphicsView):
     def move_group(self, group_item, delta):
         self.groups_suspended = True
         for item in group_item.all_members():
-            item.moveBy(delta.x(), delta.y())
+            if not item.locked:  # Its box stretches to keep a locked one in it
+                item.moveBy(delta.x(), delta.y())
         self.groups_suspended = False
         self.update_groups()
+
+    def show_locked(self, keys):
+        """Lock these in place, and unlock the rest."""
+        keys = set(keys)
+        for key, item in self.items_by_key.items():
+            item.set_locked(key in keys)
+
+    def locked_keys(self):
+        return [key for key, item in self.items_by_key.items() if item.locked]
+
+    def locked_positions(self):
+        """{key: (x, y)} of those locked in place, for arranging the rest round them."""
+        return {key: (item.pos().x(), item.pos().y()) for key, item in self.items_by_key.items() if item.locked}
+
+    def locked_centers(self):
+        """As locked_positions, with the centers of the groups (keyed as in boxes()) with nothing unlocked in them."""
+        found = self.locked_positions()
+        for key, item in self.group_items.items():
+            members = item.all_members()
+            if members and all(member.locked for member in members) and not item.rect.isNull():
+                found[GROUP_BOX + key] = (item.rect.center().x(), item.rect.center().y())
+        return found
 
     def move_to(self, positions):
         """Move devices to {key: (x, y)}, as when the user drags them (the layout's saved)."""
@@ -1227,6 +1319,30 @@ class MapView(QGraphicsView):
         self.update_groups()
         self.update_scene_rect()
         self.positions_changed.emit()
+
+    def drawing_state(self):
+        """What drawing the map again forgets, for restore_drawing."""
+        return DrawingState({key for key, item in self.items_by_key.items() if item.expanded},
+                            [key for key, item in self.items_by_key.items() if item.isSelected()],
+                            [key for key, item in self.group_items.items() if item.isSelected()],
+                            [(item.parentItem().device.key, item.port) for item in self.scene().selectedItems()
+                             if isinstance(item, HostPortItem)])
+
+    def restore_drawing(self, state):
+        """Open those hosts again and select those things again, leaving out any no longer on the map."""
+        for key in state.expanded:
+            if key in self.items_by_key and self.items_by_key[key].host_count:
+                self.items_by_key[key].set_expanded(True)
+        self.update_scene_rect()
+        items = [self.items_by_key[key] for key in state.devices if key in self.items_by_key]
+        items += [self.group_items[key] for key in state.groups if key in self.group_items]
+        for key, port in state.ports:
+            if key in self.items_by_key:
+                items += [item for item in self.items_by_key[key].port_items if item.port == port]
+        for item in items:
+            item.setSelected(True)
+        if (state.devices or state.groups or state.ports) and not self.scene().selectedItems():
+            self.selection_changed.emit(None)
 
     def selected_keys(self):
         """The devices selected (on the logical view, any node), in the order they're drawn."""
@@ -1279,7 +1395,7 @@ class MapView(QGraphicsView):
 
     def move_boxes(self, centers):
         """Move devices and groups (from boxes()) so their centers are at {key: (x, y)}, as when the user drags them
-        (the layout's saved): a group with everything in it."""
+        (the layout's saved): a group with everything in it. What's locked in place stays."""
         self.groups_suspended = True
         for key, (x, y) in centers.items():
             if key.startswith(GROUP_BOX):
@@ -1287,8 +1403,9 @@ class MapView(QGraphicsView):
                 if item is not None:
                     dx, dy = x - item.rect.center().x(), y - item.rect.center().y()
                     for member in item.all_members():
-                        member.moveBy(dx, dy)
-            elif key in self.items_by_key:
+                        if not member.locked:
+                            member.moveBy(dx, dy)
+            elif key in self.items_by_key and not self.items_by_key[key].locked:
                 self.items_by_key[key].setPos(x, y)
         self.groups_suspended = False
         self.update_groups()
@@ -1303,7 +1420,8 @@ class MapView(QGraphicsView):
         moving.update(item for item in self.scene().selectedItems() if isinstance(item, NodeItem))
         self.groups_suspended = True
         for item in moving:
-            item.moveBy(delta.x(), delta.y())
+            if not item.locked:
+                item.moveBy(delta.x(), delta.y())
         self.groups_suspended = False
         self.update_groups()
 
@@ -1318,12 +1436,15 @@ class MapView(QGraphicsView):
 
     def begin_node_drag(self, item):
         """Devices are about to be dragged: groups they're not all of stay still, so they can be dropped out."""
-        if not self.group_items or not self.groups_editable:
+        self.drag_refused_now = False
+        if not self.group_items or not self.groups_editable or item.locked:
             self.drag = None
             return
-        moving = {other for other in self.scene().selectedItems() if isinstance(other, NodeItem)} | {item}
+        moving = {other for other in self.scene().selectedItems() if isinstance(other, NodeItem) and not other.locked}
+        moving.add(item)
         # The groups selected with it go along (what's in them moved here, as Qt only moves what's selected)
-        carried = {member for key in self.selected_groups() for member in self.group_items[key].all_members()} - moving
+        carried = {member for key in self.selected_groups() for member in self.group_items[key].all_members()
+                   if not member.locked} - moving
         self.drag = {"moving": moving, "start": {other: QPointF(other.pos()) for other in moving},
                      "carried": carried, "last": QPointF(item.pos())}
         for group_item in self.group_items.values():
@@ -1334,6 +1455,13 @@ class MapView(QGraphicsView):
         found = [item for item in self.group_items.values()
                  if item.frozen and item.isVisible() and not item.group.collapsed and item.rect.contains(point)]
         return min(found, key=lambda item: item.rect.width() * item.rect.height(), default=None)
+
+    def locked_dragged(self, item, event):
+        """A locked icon is being dragged: it stays, and the user's told why (once, and not for a shaky click)."""
+        travel = (event.scenePos() - event.buttonDownScenePos(Qt.LeftButton)).manhattanLength()
+        if not self.drag_refused_now and travel >= QApplication.startDragDistance():
+            self.drag_refused_now = True
+            self.drag_refused.emit(item.label)
 
     def node_dragged(self, item):
         if self.drag is None:
@@ -1953,6 +2081,10 @@ class MapView(QGraphicsView):
     def render_scene(self, painter, target, source):
         selected = self.scene().selectedItems()
         self.scene().clearSelection()  # The picture shouldn't show what happened to be selected
-        self.scene().render(painter, target, source)
+        self.exporting = True
+        try:
+            self.scene().render(painter, target, source)
+        finally:
+            self.exporting = False
         for item in selected:
             item.setSelected(True)

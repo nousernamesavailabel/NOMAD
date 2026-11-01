@@ -20,6 +20,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
+from ..ipam.client import LOCK_API
 from ..system import log_dir
 from . import shared
 
@@ -185,11 +186,41 @@ class TribeMaps:
         self.db.execute("INSERT OR REPLACE INTO collapsed (map_id, groups) VALUES (?, ?)",
                         (int(map_id), json.dumps(groups)))
 
+    @property
+    def server_api(self):
+        """The server's API level, as of the last sync (0 before one)."""
+        with self.lock:
+            return int(self._meta("server_api", "0") or 0)
+
+    @property
+    def sends_locks(self):
+        """Whether the server is known to keep icons locked in place. Until it is, they stay among the changes not
+        sent, so they work on this computer and go when the server's updated."""
+        return self.server_api >= LOCK_API
+
+    @property
+    def too_old_for_locks(self):
+        return 0 < self.server_api < LOCK_API
+
+    def note_server_api(self):
+        """Ask the server's API level (network), for sends_locks."""
+        status = getattr(self.client, "status", None)
+        api = status().get("api") if status is not None else None
+        if api:
+            self._set_meta("server_api", api)
+
+    def held_sections(self):
+        """The sections the server can't take yet (it refuses a whole push with one of them in it)."""
+        return () if self.sends_locks else shared.LOCK_SECTIONS
+
     def pending_count(self, map_id=None):
         """How many changes are waiting to be sent (a change to a map's credentials counts as one)."""
         where, values = ("", ()) if map_id is None else (" AND map_id = ?", (int(map_id),))
+        held = self.held_sections()
+        where_held = f" AND section NOT IN ({', '.join('?' * len(held))})" if held else ""
         with self.lock:
-            items = self.db.execute("SELECT COUNT(*) FROM pending WHERE 1" + where, values).fetchone()[0]
+            items = self.db.execute("SELECT COUNT(*) FROM pending WHERE 1" + where + where_held,
+                                    values + held).fetchone()[0]
             secrets = self.db.execute("SELECT COUNT(*) FROM secrets WHERE pending = 1" + where, values).fetchone()[0]
         return items + secrets
 
@@ -232,13 +263,21 @@ class TribeMaps:
     def create(self, name, network_map, settings, secrets):
         """Share a map with the tribe (needs the server). Returns its id."""
         items = shared.flatten(network_map, settings)
-        reply = self.client.map_request("create", name=name, changes=shared.diff({}, items), secrets=secrets)
+        self.note_server_api()
+        held = self.held_sections()
+        changes = [change for change in shared.diff({}, items) if change["section"] not in held]
+        reply = self.client.map_request("create", name=name, changes=changes, secrets=secrets)
         map_id = reply["map_id"]
         with self._transaction():
             self.db.execute("INSERT OR REPLACE INTO maps (id, name, revision) VALUES (?, ?, ?)",
                             (map_id, name.strip(), reply["revision"]))
             self.db.executemany("INSERT OR REPLACE INTO base (map_id, section, key, data) VALUES (?, ?, ?, ?)",
-                                [(map_id, section, key, json.dumps(data)) for (section, key), data in items.items()])
+                                [(map_id, section, key, json.dumps(data)) for (section, key), data in items.items()
+                                 if section not in held])
+            seq = (self.db.execute("SELECT MAX(seq) FROM pending").fetchone()[0] or 0) + 1
+            self.db.executemany("INSERT OR REPLACE INTO pending (map_id, section, key, data, seq) VALUES "
+                                "(?, ?, ?, ?, ?)", [(map_id, section, key, json.dumps(data), seq)
+                                                    for (section, key), data in items.items() if section in held])
             self._keep_collapsed(map_id, network_map)
             self._cache_secrets(map_id, secrets)
         return map_id
@@ -357,9 +396,12 @@ class TribeMaps:
                     self._forget(map_id)
                     continue
                 raise
+        held = self.held_sections()
         with self.lock:
             outgoing = {}
             for row in self.db.execute("SELECT * FROM pending ORDER BY seq"):
+                if row["section"] in held:
+                    continue
                 outgoing.setdefault(row["map_id"], []).append(
                     {"section": row["section"], "key": row["key"],
                      "data": None if row["data"] is None else json.loads(row["data"])})
@@ -418,6 +460,7 @@ class TribeMaps:
         {map id: items changed} as apply_changes does, with SECRETS among a map's items when its credentials
         changed."""
         try:
+            self.note_server_api()
             self.send_pending()
             payload, revision = self.client.map_changes(self.revision)
         except Exception as error:

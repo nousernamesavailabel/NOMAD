@@ -19,7 +19,10 @@ from .model import Device, Group, Host, Link, NetworkMap, Trace, _build, port_ke
 DEVICE, LINK, HOST, GROUP, GROUP_OF, POSITION, L3_POSITION, DELETED, TRACE, NEWS, HOST_SEEN, META = (
     "device", "link", "host", "group", "group_of", "position", "l3_position", "deleted", "trace", "news",
     "host_seen", "meta")
-SECTIONS = (DEVICE, LINK, HOST, GROUP, GROUP_OF, POSITION, L3_POSITION, DELETED, TRACE, NEWS, HOST_SEEN, META)
+LOCKED, L3_LOCKED = "locked", "l3_locked"
+LOCK_SECTIONS = (LOCKED, L3_LOCKED)  # Servers below client.LOCK_API refuse these: they wait here until it's updated
+SECTIONS = (DEVICE, LINK, HOST, GROUP, GROUP_OF, POSITION, L3_POSITION, DELETED, TRACE, NEWS, HOST_SEEN, META,
+            LOCKED, L3_LOCKED)
 # The meta items: the map's own fields, how to crawl it (not secret), and the IPAM network it's of (an item of its
 # own, so setting it doesn't touch the others)
 MAP_META, SETTINGS, IPAM = "map", "settings", "ipam"
@@ -62,6 +65,8 @@ def flatten(network_map, settings=None):
     items.update({(GROUP_OF, key): group for key, group in network_map.group_of.items()})
     items.update({(POSITION, key): list(position) for key, position in network_map.positions.items()})
     items.update({(L3_POSITION, key): list(position) for key, position in network_map.l3_positions.items()})
+    items.update({(LOCKED, key): True for key in network_map.locked})
+    items.update({(L3_LOCKED, key): True for key in network_map.l3_locked})
     items.update({(DELETED, key): list(value) for key, value in network_map.deleted.items()})
     items.update({(TRACE, trace.target): asdict(trace) for trace in network_map.traces})
     items.update({(NEWS, ref): dict(value) for ref, value in network_map.news.items()})
@@ -99,7 +104,9 @@ def build(items):
     network_map.group_of = dict(sections[GROUP_OF])
     network_map.positions = {key: tuple(value) for key, value in sections[POSITION].items() if key in devices}
     network_map.l3_positions = {key: tuple(value) for key, value in sections[L3_POSITION].items()}
-    network_map.deleted = {key: [value[0], list(value[1])] for key, value in sections[DELETED].items()}
+    network_map.locked = sorted(key for key in sections[LOCKED] if key in devices)
+    network_map.l3_locked = sorted(sections[L3_LOCKED])
+    network_map.deleted ={key: [value[0], list(value[1])] for key, value in sections[DELETED].items()}
     network_map.traces = [_build(Trace, data) for _, data in sorted(sections[TRACE].items())]
     network_map.news = {ref: dict(value) for ref, value in sections[NEWS].items()}
     network_map.host_seen = dict(sections[HOST_SEEN])

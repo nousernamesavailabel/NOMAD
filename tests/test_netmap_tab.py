@@ -472,7 +472,7 @@ def test_device_menu_groups_like_items(tab, crawled, monkeypatch):
         {action.text(): action.menu() for action in menu.actions() if not action.isSeparator()}))
     tab.show_device_menu(keys[0], None)
     entries = shown[-1]
-    assert len(entries) <= 16  # Fits on the screen (it was over 40 entries)
+    assert len(entries) <= 17  # Fits on the screen (it was over 40 entries)
     assert {"Connect", "Tools", "Show In", "Group", "Layout", "Edit", "Copy Name", "Copy Address"} <= set(entries)
     assert "Copy IP Address" not in entries and "Show on Map" not in entries  # Copy Address, Show In
     assert "Delete 2 Devices..." in [action.text() for action in entries["Edit"].actions()]
@@ -694,6 +694,72 @@ def test_crawl_from_here_updates_the_map_open(tab, tmp_path):
     assert tab.view.items_by_key["core"].pos().x() == 3000  # Left where it was
     assert store.load(path).devices["acc1"].source == "snmp"
     assert "added 0 devices to this map (1 read over SNMP for the first time)" in tab.status_label.text()
+
+
+def crawl_from_here(tab, seed):
+    """A Crawl from Here on the map open, drawn live as it goes, finishing with the thread."""
+    tab.extending = True  # As crawl_from sets it
+    tab.live_positions = dict(tab.network_map.positions)
+    network = build_network()
+    newer = Crawler(CrawlSettings(seeds=[seed], trace=False), client_factory=network.client,
+                    pinger=network.ping, echo=network.echo, known=tab.network_map).run()
+    tab.show_live(newer)
+    tab.show_live(newer)
+    return newer
+
+
+def test_crawl_from_here_keeps_the_details_showing(tab, crawled):
+    tab.on_crawled(crawled)
+    tab.view.items_by_key["acc2"].setSelected(True)
+    tab.view.toggle_hosts(tab.view.items_by_key["acc2"])
+    tab.details.verticalScrollBar().setValue(0)
+    showing = tab.details.toPlainText()
+    assert "Select a device" not in showing
+
+    selections = []
+    tab.view.selection_changed.connect(selections.append)
+    newer = crawl_from_here(tab, "10.0.0.11")
+    assert tab.view.selected_keys() == ["acc2"]  # Still selected on the map drawn as it crawls
+    assert None not in selections  # And the details never went away
+    assert "Select a device" not in tab.details.toPlainText()
+
+    tab.on_crawled(newer)
+    assert tab.view.selected_keys() == ["acc2"]  # And when it's finished
+    assert tab.details_shown[0] == ("device", "acc2")
+    assert tab.view.items_by_key["acc2"].expanded  # Its hosts stayed open
+
+
+def test_crawl_from_here_keeps_a_port_selected(tab, crawled):
+    tab.on_crawled(crawled)
+    acc2 = tab.view.items_by_key["acc2"]
+    tab.view.toggle_hosts(acc2)
+    acc2.port_items[0].setSelected(True)
+    selection = tab.details_shown[0]
+    assert selection[0] == "port"
+    tab.on_crawled(crawl_from_here(tab, "10.0.0.11"))
+    assert tab.details_shown[0] == selection
+
+
+def test_crawl_from_here_keeps_a_selection_on_the_logical_view(tab, crawled):
+    tab.on_crawled(crawled)
+    tab.tabs.setCurrentWidget(tab.l3_view)
+    key = next(key for key, node in tab.l3_nodes.items() if node.device is not None)
+    tab.l3_view.items_by_key[key].setSelected(True)
+    selection = tab.details_shown[0]
+    tab.tabs.setCurrentWidget(tab.view)  # As start() does
+    tab.on_crawled(crawl_from_here(tab, "10.0.0.11"))
+    assert tab.details_shown[0] == selection
+
+
+def test_details_go_when_the_device_selected_does(tab, crawled):
+    tab.on_crawled(crawled)
+    tab.view.items_by_key["acc2"].setSelected(True)
+    state = tab.view.drawing_state()
+    tab.view.set_map(tab.network_map, tab.network_map.positions)
+    tab.view.items_by_key.pop("acc2")
+    tab.view.restore_drawing(state)  # Selected, but not on the map now
+    assert tab.details_shown[0] is None
+    assert "Select a device" in tab.details.toPlainText()
 
 
 def test_session_hints_for_a_device(tab, crawled):
