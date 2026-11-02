@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDialog
 
 from ..snmpv3 import AUTH_NAMES, PRIV_NAMES, V3User, credential_from_json, credential_label, credential_to_json, \
     is_v3
-from ..switchconfig import SYSLOG_LEVELS, TRAP_CATEGORIES, ConfigOptions, build, problems, undo
+from ..switchconfig import SYSLOG_LEVELS, TRAP_CATEGORIES, ConfigOptions, build, cautions, problems, undo
 from ..terminal.credentials import CredentialError, protect, unprotect
 from .common import set_hint
 from .session_send import SessionSender
@@ -463,7 +463,9 @@ class SnmpConfigTab(QWidget):
         else:
             self.lines = build(options) if self.show_combo.currentData() == "add" else undo(options)
             self.preview.setPlainText("\n".join(self.lines))
-            set_hint(self.status_label, f"{len(self.lines)} lines, from the enable (#) prompt.", "info")
+            caution = cautions(options)
+            set_hint(self.status_label, " ".join([f"{len(self.lines)} lines, from the enable (#) prompt."] + caution),
+                     "warning" if caution else "info")
         has_lines = bool(self.lines)
         for widget in (self.send_button, self.copy_button, self.save_button):
             widget.setEnabled(has_lines)
@@ -596,11 +598,14 @@ class SnmpConfigTab(QWidget):
         self.update_enabled()
         self.update_preview()
 
-    def prefill(self, destination="", credential=None, from_map=False):
+    def prefill(self, destination="", credential=None, from_map=False, location=""):
         """From the Network Map: send to this computer, with the map's credential, or (from_map) with the map's
-        credentials as default_choice picks them."""
+        credentials as default_choice picks them. location: the device's Site / Building / Room on the map (left as
+        it is when the device isn't in a group)."""
         if destination:
             self.add_destination(destination)
+        if location:
+            self.location_input.setText(location)
         if from_map:
             chosen = default_choice(self.map_credential_entries())
             if chosen:

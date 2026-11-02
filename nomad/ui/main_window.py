@@ -393,11 +393,11 @@ class MainWindow(QMainWindow):
         self.navigator.setCurrentWidget(self.terminal_tab)
         then()
 
-    def show_snmp_config(self, destination="", credential=None, from_map=False):
+    def show_snmp_config(self, destination="", credential=None, from_map=False, location=""):
         """The SNMP Config page, sending traps and syslog to destination, with credential or (from_map) the Network
-        Map's credentials."""
+        Map's credentials, and location (a map device's Site / Building / Room)."""
         self.navigator.setCurrentWidget(self.snmp_config_tab)
-        self.snmp_config_tab.prefill(destination, credential, from_map)
+        self.snmp_config_tab.prefill(destination, credential, from_map, location)
 
     def show_acls(self, device=None, acl="", port=""):
         """The ACLs page, with the Network Map device's ACLs (read now if they haven't been): acl, or the one on

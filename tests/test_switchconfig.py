@@ -4,7 +4,7 @@ from dataclasses import replace
 import pytest
 
 from nomad.snmpv3 import V3User
-from nomad.switchconfig import ConfigOptions, build, problems, undo
+from nomad.switchconfig import ConfigOptions, build, cautions, problems, undo
 
 NOW = datetime.datetime(2026, 10, 2, 14, 30)
 USER = V3User("nomad", "sha", "authpass1", "aes128", "privpass1")
@@ -101,7 +101,6 @@ def test_undo_takes_out_what_was_added():
 @pytest.mark.parametrize("changes, message", [
     ({"community": "", "v3_user": None}, "community string or an SNMPv3 user"),
     ({"community": "has space"}, "spaces"),
-    ({"community": "x@y"}, "Leave @ out"),
     ({"permit": []}, "allowed to read"),
     ({"permit": ["10.0.0.300"]}, "isn't an IPv4 address or subnet"),
     ({"destinations": []}, "where traps and syslog"),
@@ -126,6 +125,15 @@ def test_problems(changes, message):
 def test_valid_options_have_no_problems():
     assert problems(options()) == []
     assert problems(options(access_ports="Gi1/0/1-24, Gi2/0/1 - 24", source_interface="Loopback0")) == []
+
+
+def test_at_sign_in_a_community_is_a_caution_not_a_problem():
+    """Some networks already use one: build the config, but say Catalyst may read it as community@vlan."""
+    assert problems(options(community="x@y", more_communities=["a@b"])) == []
+    assert "snmp-server community x@y RO NOMAD-SNMP" in build(options(community="x@y"), NOW)
+    found = cautions(options(community="x@y", more_communities=["a@b"]))
+    assert len(found) == 2 and "community string a@b" in found[1]
+    assert cautions(options()) == []
 
 
 def test_poe_logging_can_be_left_out():
@@ -157,7 +165,6 @@ def test_more_communities_and_users_can_read():
 
 def test_more_credentials_are_checked_too():
     assert problems(options(community="", more_communities=["branch-ro"], traps=False)) == []
-    assert any("community string x@y" in problem for problem in problems(options(more_communities=["x@y"])))
     twin = V3User("nomad", "md5", "authpass2", "none")
     assert any("two SNMPv3 users named nomad" in problem
                for problem in problems(options(v3_user=USER, more_users=[twin])))

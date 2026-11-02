@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
 from netmap_fakes import LAB_MACS, PC1_MAC, build_network  # noqa: E402
-from PyQt5.QtCore import QRectF, QSettings, Qt, pyqtSignal  # noqa: E402
+from PyQt5.QtCore import QPoint, QRectF, QSettings, Qt, pyqtSignal  # noqa: E402
 from PyQt5.QtTest import QTest  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QMenu, QWidget  # noqa: E402
 
@@ -476,6 +476,40 @@ def test_device_menu_groups_like_items(tab, crawled, monkeypatch):
     assert {"Connect", "Tools", "Show In", "Group", "Layout", "Edit", "Copy Name", "Copy Address"} <= set(entries)
     assert "Copy IP Address" not in entries and "Show on Map" not in entries  # Copy Address, Show In
     assert "Delete 2 Devices..." in [action.text() for action in entries["Edit"].actions()]
+
+
+def test_generate_snmp_config_from_the_map_menus(tab, crawled, monkeypatch):
+    for name in ("terminal_tab", "scp_tab"):
+        page = Mock()
+        page.saved_matches.return_value = []
+        setattr(tab.window, name, page)
+    tab.on_crawled(crawled)
+    opened = []
+    tab.window.show_snmp_config = lambda **kwargs: opened.append(kwargs)
+    switch = next(key for key, device in crawled.devices.items() if device.kind == netmap_tab.SWITCH)
+    chosen = []
+
+    def pick(menu, *args):  # Choose Generate SNMP Config... from the menu or one of its submenus
+        places = [("", menu)] + [(action.text(), action.menu()) for action in menu.actions()
+                                 if action.menu() is not None]
+        for title, place in places:
+            for action in place.actions():
+                if action.text() == "Generate SNMP Config...":
+                    chosen.append(title)
+                    return action
+        return None
+
+    monkeypatch.setattr(QMenu, "exec_", pick)
+    tab.show_device_menu(switch, None)
+    assert chosen == ["Tools"]
+    assert opened == [{"destination": "", "from_map": True, "location": ""}]  # No adapter: no address; no group
+    site = tab.network_map.new_group("HQ", "site")
+    room = tab.network_map.new_group("IDF 3", "room", tab.network_map.new_group("Building 2", "building", site.key).key)
+    tab.network_map.group_of[switch] = room.key
+    tab.show_device_menu(switch, None)
+    assert opened[-1]["location"] == "HQ / Building 2 / IDF 3"  # Its Site / Building / Room on the map
+    tab.show_background_menu(tab.view.mapToScene(0, 0), QPoint(0, 0))
+    assert chosen == ["Tools", "Tools", ""] and opened[-1]["location"] == ""
 
 
 def test_links_table_shows_both_ends(tab, crawled):

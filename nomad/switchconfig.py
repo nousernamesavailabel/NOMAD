@@ -94,8 +94,6 @@ def problems(options):
         found += _secret_problems(community, f"The {what}")
         if not community_is_valid(community):
             found.append(f"The {what} can't be over 255 bytes or contain control characters.")
-        if "@" in community:
-            found.append(f"Leave @ out of the {what}: community@vlan is how the per-VLAN MAC tables are read.")
     names = set()
     for user in users(options):
         found += [user.problem()] if user.problem() else []
@@ -138,6 +136,17 @@ def problems(options):
     for text, what in ((options.location, "location"), (options.contact, "contact")):
         if any(ord(character) < 32 for character in text) or "?" in text:
             found.append(f"The {what} can't contain ? or control characters.")
+    return found
+
+
+def cautions(options):
+    """Things worth knowing that don't stop the configuration being built, as sentences ([] when nothing)."""
+    found = []
+    for community in communities(options):
+        if "@" in community:
+            what = "community string" if community == options.community else f"community string {community}"
+            found.append(f"Catalyst switches read an @ in the {what} as community@vlan, so they may not answer it "
+                         f"(and the per-VLAN MAC tables can't be read with it).")
     return found
 
 

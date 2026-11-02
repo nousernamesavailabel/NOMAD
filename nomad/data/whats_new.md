@@ -4,6 +4,11 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.38.0] - 2026-11-02
+
+- **New:** right-click a switch or router on the map > **Tools** > **Generate SNMP Config...** (or right-click the map's background) to open the SNMP Config page with the map's credentials. From a device, its Location comes from its Site / Building / Room on the map.
+- **Fixed:** the SNMP Config page builds the configuration for a community string with an @ in it, with a warning about Catalyst switches, instead of refusing.
+
 ## [1.37.0] - 2026-11-01
 
 - **New:** sharing a map with the tribe can also share its Local IP network and VLANs. Update the tribe server first (**Update Service**).

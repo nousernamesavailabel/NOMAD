@@ -15,7 +15,7 @@ A read-only community string, an SNMPv3 user, or both, limited by a standard acc
 | **Generate** | Makes up a community string or passwords |
 | **Add to Network Map** | Has the map try them |
 
-**Generate SNMP Config**, in the map's **SNMP Credentials...** dialog and on its Watch tab, opens this page the same way.
+**Generate SNMP Config** opens this page the same way. It is in the map's **SNMP Credentials...** dialog, on its Watch tab, in the right-click menu of the map's background, and under **Tools** when you right-click a switch or router. When you open it from a switch or router, the **Location** box is filled in with the device's group on the map, such as HQ / Building 2 / IDF 3. If the device isn't in a group, the box keeps what was there.
 
 A v3 user goes in a group that can also read the per-VLAN contexts (`context vlan- match prefix`), so the hosts on every VLAN are found.
 

@@ -6,6 +6,16 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.38.0] - 2026-11-02
+
+### Added
+
+- **Network Map: Generate SNMP Config from the right-click menu:** right-click a switch or router > **Tools** > **Generate SNMP Config...**, or right-click the map's background, to open the SNMP Config page set up for this computer and the map's credentials, the same as the button in **SNMP Credentials...**. From a device, its **Location** is filled in from the device's Site / Building / Room group on the map (left as it is when the device isn't in a group).
+
+### Fixed
+
+- **SNMP Config: community strings with @:** the page refused to build any configuration when a community string (including one taken from a map's credentials) had an @ in it. It now builds it, with a warning that Catalyst switches read the @ as community@vlan, so they may not answer that community, and its per-VLAN MAC tables can't be read with it.
+
 ## [1.37.0] - 2026-11-01
 
 ### Added

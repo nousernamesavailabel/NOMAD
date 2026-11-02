@@ -226,7 +226,7 @@ class MapWatcher(QObject):
         self.config_button = QPushButton("Generate SNMP Config")
         self.config_button.setToolTip("Build the configuration that lets the switches be read and has them send traps "
                                       "and syslog here, and send it to a switch.")
-        self.config_button.clicked.connect(self.open_config_builder)
+        self.config_button.clicked.connect(self.config_button_clicked)
         config_row.addWidget(self.config_label, 1)
         config_row.addWidget(self.config_button)
         layout.addLayout(config_row)
@@ -303,10 +303,15 @@ class MapWatcher(QObject):
                                   f"here ({self.local_address()}), with link-status logging on its access ports.")
         self.status_changed.emit()
 
-    def open_config_builder(self):
-        """The SNMP Config page, set up for this computer and the map's credentials."""
+    def config_button_clicked(self):
+        self.open_config_builder()  # Not connected straight to it: clicked would pass its checked as the location
+
+    def open_config_builder(self, location=""):
+        """The SNMP Config page, set up for this computer and the map's credentials (and location, a device's
+        Site / Building / Room on the map)."""
         address = self.local_address()
-        self.page.window.show_snmp_config(destination=address if not address.startswith("<") else "", from_map=True)
+        self.page.window.show_snmp_config(destination=address if not address.startswith("<") else "", from_map=True,
+                                          location=location)
 
     def local_address(self):
         adapter = self.page.window.current_adapter() if hasattr(self.page.window, "current_adapter") else None

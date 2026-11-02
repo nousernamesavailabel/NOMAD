@@ -201,6 +201,15 @@ def test_prefill_from_the_watch_tab(page):
     assert page.v3_user() == USER and page.trap_version_combo.currentData() == "v3"
 
 
+def test_prefill_with_a_devices_location(page):
+    page.location_input.setText("HQ")
+    page.prefill("10.0.0.70", from_map=True)  # Not in a group on the map: what's there stays
+    assert page.location_input.text() == "HQ"
+    page.prefill("10.0.0.70", from_map=True, location="HQ / Building 2 / IDF 3")
+    assert page.location_input.text() == "HQ / Building 2 / IDF 3"
+    assert "snmp-server location HQ / Building 2 / IDF 3" in page.lines
+
+
 def test_the_maps_credentials_all_at_once(page, monkeypatch):
     """Use the Map's Credentials: public is left out while there's anything else, those for subnets unless ticked."""
     other = V3User("branch", "sha256", "authpass2", "none")

@@ -2765,6 +2765,11 @@ class NetworkMapTab(QWidget):
             actions[tools.addAction("Mirror Ports...")] = lambda: self.window.show_mirror(source=key)
             if hasattr(self.window, "show_acls"):
                 actions[tools.addAction("ACLs & Route Maps...")] = lambda: self.window.show_acls(device=key)
+        if device.kind in (SWITCH, ROUTER) and hasattr(self.window, "show_snmp_config"):  # In Tools, after ACLs
+            tools = next((action.menu() for action in menu.actions() if action.menu() is not None
+                          and action.text() == "Tools"), menu)
+            location = shown.device_group_label(key)  # Site / Building / Room, as its location
+            actions[tools.addAction("Generate SNMP Config...")] = lambda: self.watcher.open_config_builder(location)
         current = self.tabs.currentWidget()
         here_keys = current.selected_keys() if current in (self.view, self.l3_view) else []
         readable = [item for item in (here_keys if key in here_keys else [key])
@@ -3197,6 +3202,8 @@ class NetworkMapTab(QWidget):
         if unseen:
             actions[menu.addAction(f"Remove Links Not Seen ({len(unseen)})...")] = \
                 lambda: self.remove_unseen_links(unseen)
+        if hasattr(self.window, "show_snmp_config"):
+            actions[menu.addAction("Generate SNMP Config...")] = self.watcher.open_config_builder
         if self.network_map is not None and self.network_map.devices:
             menu.addSeparator()
             actions[menu.addAction("Fit")] = self.view.fit
