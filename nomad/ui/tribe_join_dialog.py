@@ -3,13 +3,16 @@ going on. The key file is read; the tribe server is reached (each address in the
 certificate checked against the key file's) and the key checked with it, on a worker thread; then the key is saved
 and the pages' first download of the tribe's IPAM networks and maps is followed until they arrive. Closing the window
 then leaves the download running. A server that can't be reached right now needn't stop it (NOMAD works offline):
-the key can be saved anyway, and NOMAD connects when the server can be reached."""
+the key can be saved anyway, and NOMAD connects when the server can be reached. A server older than this NOMAD doesn't
+stop it either: updating it is recommended here, then by the banner across the main window (see tribe_version.py)."""
 import logging
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import QFileDialog
 
-from ..ipam.client import ServerMoved, ServerUnreachable, TeamClient, TeamKeyError, read_key_file, save_key
+from .. import __version__
+from ..ipam.client import ServerMoved, ServerUnreachable, TeamClient, TeamKeyError, read_key_file, save_key, \
+    server_update
 from ..ipam.server import KEY_FILE_SUFFIX
 from ..ipam.store import IpamError
 from .common import release_thread
@@ -18,10 +21,10 @@ from .tribe_steps import DONE, FAILED, SKIPPED, WAITING, WARNING, WORKING, Steps
 
 log = logging.getLogger(__name__)
 
-KEY, REACH, CHECK, SAVE, NETWORKS, MAPS = range(6)
+KEY, REACH, CHECK, VERSION, SAVE, NETWORKS, MAPS = range(7)
 STEPS = {KEY: "Read the tribe key file", REACH: "Reach the tribe server", CHECK: "Check the tribe key",
-         SAVE: "Save the key on this computer", NETWORKS: "Download the tribe's IPAM networks",
-         MAPS: "Download the tribe's network maps"}
+         VERSION: "Check the tribe server's version", SAVE: "Save the key on this computer",
+         NETWORKS: "Download the tribe's IPAM networks", MAPS: "Download the tribe's network maps"}
 DOWNLOADS = (NETWORKS, MAPS)
 KEEP_IT_SAFE = ("You can delete the key file now, or keep it somewhere safe: anyone with it can change the tribe's "
                 "IPAM and maps.")
@@ -73,6 +76,7 @@ class JoinTribeDialog(StepsDialog):
         self.key = None
         self.saved = False
         self.offline = False
+        self.update_needed = None  # The tribe server is older than this NOMAD (a ServerUpdate)
         self.thread = None
         self.ipam = self.tribe = None  # What's followed once the key is saved
         self.anyway_button = self.add_button(accent_button("Save Key Anyway"))
@@ -114,6 +118,11 @@ class JoinTribeDialog(StepsDialog):
         self.thread_finished()
         name = status.get("name") or ", ".join(self.key.hosts)
         self.set_state(CHECK, DONE, f"Accepted by {name}")
+        self.update_needed = server_update(status)
+        if self.update_needed is not None:
+            self.set_state(VERSION, WARNING, self.update_needed.summary)
+        else:
+            self.set_state(VERSION, DONE, f"NOMAD {status.get('version')}: it has everything NOMAD {__version__} uses")
         self.save()
 
     def on_check_failed(self, error):
@@ -121,6 +130,7 @@ class JoinTribeDialog(StepsDialog):
         if isinstance(error, ServerUnreachable) and not isinstance(error, ServerMoved):
             self.set_state(REACH, FAILED, str(error))
             self.set_state(CHECK, SKIPPED, "Checked when the tribe server can be reached")
+            self.set_state(VERSION, SKIPPED, "Checked when the tribe server can be reached")
             self.offer_saving_anyway()
             return
         # Refused, or not the server in the key file, or moved without saying where: the key file needs replacing
@@ -233,6 +243,9 @@ class JoinTribeDialog(StepsDialog):
         elif any(self.states[step] == WARNING for step in DOWNLOADS):
             self.headline.setText("Connected to the tribe, but not everything has arrived yet")
             self.say("The key is saved; see above for what's missing. " + KEEP_IT_SAFE, "warning")
+        elif self.update_needed is not None:
+            self.headline.setText("Connected to the tribe, but its server needs updating")
+            self.say(f"{self.update_needed.steps()}\n\n{KEEP_IT_SAFE}", "warning")
         else:
             self.headline.setText("Connected to the tribe")
             self.say("The IP Addresses and Network Map pages share the tribe's networks and maps now. " +

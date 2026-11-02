@@ -23,6 +23,8 @@ VLANs (API 7; see vlans.py) are rows like the rest, so they come with /api/chang
 add_vlan_domain, update_vlan_domain, delete_vlan_domain, set_vlan, delete_vlan and set_vlans (several at once).
 Subnet placement (API 8; see placement.py): set_placement, plan_move, update_move and complete_move; set_role (API 9).
 Moving subnets between networks (API 10; see network_move.py): move_subnet, and take_subnets (from a laptop's own).
+Sharing a laptop's whole network, with its VLAN domains (API 15; see network_move.py): take_network. Any tribe member
+can, unlike add_network: the network comes with what's in it, when a map of it is shared.
 Assets (API 11; see assets.py): set_asset, set_assets (several at once) and delete_asset.
 Software targets (API 12; see targets.py): set_target and delete_target.
 
@@ -79,15 +81,17 @@ BACKUP_KEEP_DAYS = 14
 BACKUP_CHECK_SECONDS = 3600
 TEAM, ADMIN = "team", "admin"
 ADMIN_ONLY_ACTIONS = {"add_network", "delete_network"}
+WHOLE_NETWORK_ACTIONS = {"take_network"}  # Their reply carries every row made, however many
+EDIT_REPLY, WHOLE_REPLY = 5000, 10 ** 9
 CERTIFICATE_YEARS = 20
 MAX_WAIT_SECONDS = 55
 STOP_WAIT_SECONDS = 10  # How long stop() waits for the listener to close
 HANDSHAKE_SECONDS = 15  # A connection that hasn't finished its TLS handshake by then is dropped
 IDLE_SECONDS = MAX_WAIT_SECONDS + 30  # A connection that sends nothing for this long is closed (past /api/wait's)
-API_LEVEL = 14  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
+API_LEVEL = 15  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
 # 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks, 11 assets,
-# 12 software targets, 13 wireless controller assets, 14 map icons locked in place.
-# Clients cope with servers below this
+# 12 software targets, 13 wireless controller assets, 14 map icons locked in place, 15 taking a laptop's whole network.
+# Clients cope with servers below this, and recommend updating them (add each new level to client.SERVER_FEATURES)
 
 
 class ConflictError(IpamError):
@@ -382,7 +386,8 @@ class IpamServer:
             before = self.store.revision()
             with self.store.transaction():
                 method(request)
-            items, revision, _ = self.store.changes_since(before)
+            items, revision, _ = self.store.changes_since(before, limit=WHOLE_REPLY if action in WHOLE_NETWORK_ACTIONS
+                                                          else EDIT_REPLY)
         log.info("%s by %s", action, user)
         self.announce(revision)
         return {"items": items, "revision": revision}
@@ -515,6 +520,10 @@ class IpamServer:
         from .network_move import receive
         link = request.get("link")
         receive(self.store, request["to_network_id"], request["data"], tuple(link) if link else None)
+
+    def _edit_take_network(self, request):
+        from .network_move import receive_network
+        receive_network(self.store, request["data"])
 
     def _edit_add_network(self, request):
         self.store.add_network(request["name"], request.get("description", ""), request.get("fields"))

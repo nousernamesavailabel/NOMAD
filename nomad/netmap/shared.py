@@ -26,6 +26,7 @@ SECTIONS = (DEVICE, LINK, HOST, GROUP, GROUP_OF, POSITION, L3_POSITION, DELETED,
 # The meta items: the map's own fields, how to crawl it (not secret), and the IPAM network it's of (an item of its
 # own, so setting it doesn't touch the others)
 MAP_META, SETTINGS, IPAM = "map", "settings", "ipam"
+LOCAL_LINK = "local:"  # How a map names a network of this computer's own
 PAGE_ITEMS = 5000
 LEASE_SECONDS = 180  # A watcher's claim on a map lasts this long unless renewed
 
@@ -46,6 +47,12 @@ def host_id(host):
 def _plain(value):
     """As it comes back from JSON (tuples as lists), so items compare equal before and after a round trip."""
     return json.loads(json.dumps(value))
+
+
+def tribe_link(key):
+    """A map's IPAM network as a tribe map can have it. A network of one computer's own ("local:...") means nothing
+    on the others, so it's no network at all: everyone is asked which it is, and maps shared with one mend themselves."""
+    return "" if str(key or "").startswith(LOCAL_LINK) else str(key or "")
 
 
 def shared_part(section, data):
@@ -74,7 +81,7 @@ def flatten(network_map, settings=None):
     items[(META, MAP_META)] = {"seeds": list(network_map.seeds), "started": network_map.started,
                                "finished": network_map.finished, "stopped": network_map.stopped,
                                "root": network_map.root}
-    if network_map.ipam_network:
+    if tribe_link(network_map.ipam_network):
         items[(META, IPAM)] = {"network": network_map.ipam_network}
     if settings is not None:
         items[(META, SETTINGS)] = dict(settings)
@@ -91,7 +98,7 @@ def build(items):
     network_map = NetworkMap(seeds=list(meta.get("seeds", [])), started=meta.get("started", ""),
                              finished=meta.get("finished", ""), stopped=bool(meta.get("stopped")),
                              root=meta.get("root", ""),
-                             ipam_network=str((sections[META].get(IPAM) or {}).get("network", "")))
+                             ipam_network=tribe_link((sections[META].get(IPAM) or {}).get("network", "")))
     network_map.devices = {key: _build(Device, data) for key, data in sorted(sections[DEVICE].items())}
     devices = network_map.devices
     network_map.links = [_build(Link, data) for _, data in sorted(sections[LINK].items())

@@ -6,6 +6,21 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.37.0] - 2026-11-01
+
+### Added
+
+- **Share a Local network with a map:** **Share This Map with the Tribe...** now asks which IPAM network the map belongs to, and can share a network from this computer as a new tribe network. After a confirmation, its subnets, addresses, roles, Subnet Placement settings, VLAN domains and VLANs all go at once or not at all, then leave this computer, and other maps of it here switch to the tribe network. A tribe map's **IPAM Network...** offers the same. Tribe networks can otherwise still be added only on the server. The server needs updating with **Update Service** (Tribe API 15).
+- **Tribe server version check:** NOMAD asks the tribe server what it runs each time it starts, when you connect to the tribe, and every 10 minutes while the server needs updating. A server older than this NOMAD's Tribe API gets a banner across the main window with the version to update to, and **How to Update...** shows the steps and what the update brings. **Connect to the Tribe** has a new step for it. The connection still goes ahead. A server as new as this NOMAD, or newer, is treated as fine. **Dismiss** hides the banner until NOMAD next starts, or until the server changes level.
+
+### Fixed
+
+- **Tribe maps tied to a Local network:** sharing one sent a link only that computer could use, so others saw a blank network name, the map wasn't used with the tribe's network, and nobody was asked to choose one. A tribe map can no longer have such a link. Maps already shared with one now ask for a network when opened, and the bad link is removed for everyone.
+
+### Changed
+
+- **Documentation:** the README is rewritten as a short overview with a quick start, a page list and what each feature works with. The detail moved to guides in `docs/`, broken into short steps and tables, and brought up to date (Ansible Inventory, saved credentials, secondary IPs and gateways, map locks, pfSense disk space, Undo and Redo on the map). They now cover how to share maps and IPAM details with the tribe, and how the two work together. Every screenshot is retaken from the current version with made-up data, with new ones for ACLs, VPNs, Assets and Packet Capture.
+
 ## [1.36.0] - 2026-10-31
 
 ### Added

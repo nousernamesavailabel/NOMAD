@@ -4,6 +4,13 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.37.0] - 2026-11-01
+
+- **New:** sharing a map with the tribe can also share its Local IP network and VLANs. Update the tribe server first (**Update Service**).
+- **New:** NOMAD tells you when the tribe server is older than it needs, with the version to update to and how. A newer server is fine.
+- **Fixed:** a tribe map tied to a Local network no longer leaves everyone else with a blank network. It now asks which network it belongs to.
+- **Changed:** the README is shorter, with a quick start, and the detail is in easier-to-read guides in the `docs` folder, including how to share maps and IPAM details with the tribe.
+
 ## [1.36.0] - 2026-10-31
 
 - **New:** lock Network Map icons in place: right-click > Lock Position (or Unlock Position), or a group's menu, or the Arrange menu. A small padlock shows which are locked, and nothing moves them but Undo. On a tribe map, locks are shared once the tribe server is updated.

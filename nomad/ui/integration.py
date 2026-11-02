@@ -18,9 +18,10 @@ from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from PyQt5.QtCore import QObject, pyqtSignal
-from PyQt5.QtWidgets import QComboBox, QLabel
+from PyQt5.QtWidgets import QComboBox, QLabel, QLineEdit, QMessageBox
 
 from ..ipam.map_compare import DEVICE, HOST, short_name, usable
+from ..ipam.network_move import plan_network, share_network, share_problems
 from ..ipam.placement import SEVERITY_LABELS, PlacementStore, evaluate
 from ..ipam.placement_team import TeamPlacementStore
 from ..ipam.store import IpamError
@@ -28,6 +29,7 @@ from ..ipam.vlan_team import TeamVlanStore
 from ..ipam.vlans import VlanStore
 from ..netmap.l3 import owned_addresses
 from ..netmap.placement import GLOBAL, places
+from .common import set_hint
 from .ipam_dialogs import _EditDialog
 
 log = logging.getLogger(__name__)
@@ -273,6 +275,31 @@ class Integration(QObject):
             return None
         return network_map
 
+    def share_problems(self, network_id, name):
+        """Why a network of this computer's can't be shared with the tribe under this name now: [text]."""
+        page = self.window.ipam_tab
+        return share_problems(page.local_store, page.team, network_id, name)
+
+    def share_network(self, network_id, name):
+        """Make a network of this computer's a tribe network, and bring every page and map of it along. Returns its
+        new key. Raises IpamError, with nothing changed, if it can't."""
+        page = self.window.ipam_tab
+        was_shown = page.source == LOCAL and page.network_id == network_id
+        network = share_network(page.local_store, page.team, network_id, name)
+        old, new = network_key(LOCAL, network_id), network_key(TEAM, network.id)
+        log.info("Shared the network %s with the tribe", network.name)
+        self.window.netmap_tab.network_replaced(old, new)
+        if was_shown:
+            page.network_id = None
+        page.fill_networks(new if was_shown else None)
+        if self.network == old:
+            self.choose_network(new, page)
+        if self.window.placement_tab.network_combo.count():
+            self.window.placement_tab.fill_networks()
+        page.tribe_synced.emit()  # What it brought, shown everywhere, as after a sync
+        page.sync_now()
+        return new
+
     def suggested_network(self, network_map=None):
         """The network holding most of the map's subnets ("source:id"), or ""."""
         network_map = network_map or self.open_map()
@@ -431,4 +458,98 @@ class MapNetworkDialog(_EditDialog):
         self.finish_layout()
 
     def apply(self):
+        return self.combo.currentData()
+
+
+class TribeNetworkDialog(_EditDialog):
+    """Which IPAM network a tribe map is of: one of the tribe's, or one of this computer's, which is shared with the
+    tribe to be it (a Local network as it stands would mean nothing to anyone else). map_name: also name the map, as
+    when sharing it; taken: the names the tribe's maps have."""
+
+    def __init__(self, parent, integration, network_map, title, map_name=None, taken=()):
+        super().__init__(parent, title)
+        self.integration = integration
+        self.taken = {name.lower() for name in taken}
+        self.map_name = map_name
+        self.name_input = None
+        if map_name is not None:
+            self.name_input = QLineEdit(map_name)
+            intro = QLabel("Everyone in the tribe will see the map, and its SNMP credentials, by this name.")
+            intro.setWordWrap(True)
+            self.form.addRow(intro)
+            self.form.addRow("Map name:", self.name_input)
+        self.combo = QComboBox()
+        self.combo.addItem("(none chosen: anyone in the tribe can choose later)", "")
+        suggested = integration.suggested_network(network_map)
+        for key, label, store, network in integration.networks():
+            held = held_by(network_map, store.subnets(network.id))
+            text = label + (f"  ({held} of the map's subnets)" if held else "")
+            text += "  (suggested)" if key == suggested else ""
+            self.combo.addItem(text + (": share it with the tribe" if split_key(key)[0] == LOCAL else ""), key)
+        self.combo.setCurrentIndex(max(self.combo.findData(network_map.ipam_network or suggested), 0))
+        self.form.addRow("IPAM network:", self.combo)
+        self.network_name_label = QLabel("Name in the tribe:")
+        self.network_name_input = QLineEdit()
+        self.form.addRow(self.network_name_label, self.network_name_input)
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        self.layout.addWidget(self.summary)
+        self.finish_layout()
+        self.combo.currentIndexChanged.connect(self.show_choice)
+        self.network_name_input.textChanged.connect(self.show_summary)
+        self.show_choice()
+
+    def local_network(self):
+        """The id of the network of this computer's chosen, or ""."""
+        source, network_id = split_key(self.combo.currentData())
+        return network_id if source == LOCAL else ""
+
+    def show_choice(self):
+        network_id = self.local_network()
+        self.network_name_label.setVisible(bool(network_id))
+        self.network_name_input.setVisible(bool(network_id))
+        if network_id:
+            self.network_name_input.setText(self.integration.network_name(network_key(LOCAL, network_id)))
+        self.show_summary()
+
+    def show_summary(self):
+        network_id = self.local_network()
+        if not network_id:
+            self.summary.setText("")
+            return
+        plan_made = plan_network(self.integration.store_for(LOCAL), network_id)
+        subnets, addresses, domains = (len(plan_made.move.subnets), len(plan_made.move.addresses),
+                                       len(plan_made.domains))
+        problems = self.integration.share_problems(network_id, self.network_name_input.text())
+        self.moves = (f"Moves {subnets} subnet{'' if subnets == 1 else 's'}, {addresses} recorded "
+                      f"address{'' if addresses == 1 else 'es'} and {domains} VLAN "
+                      f"domain{'' if domains == 1 else 's'} into a new tribe network. They leave this computer's "
+                      "networks and are shared with everyone in the tribe from now on. The network's history isn't "
+                      "carried over.")
+        set_hint(self.summary, " ".join(problems) or self.moves, "error" if problems else "warning")
+
+    def confirmed(self, network_id, name):
+        """Whether to go ahead: it can't be undone from here, as a laptop can't move a network back or delete it."""
+        local_name = self.integration.network_name(network_key(LOCAL, network_id))
+        return QMessageBox.question(self, "Share with the Tribe",
+                                    f"Share {local_name} with the tribe as {name.strip()}?\n\n{self.moves}\n\nThis "
+                                    "can't be undone from here: it can't be moved back to this computer, and only the "
+                                    "tribe server can delete it.") == QMessageBox.Yes
+
+    def apply(self):
+        if self.name_input is not None:
+            self.map_name = self.name_input.text().strip()
+            if not self.map_name:
+                raise IpamError("Give the map a name.")
+            if self.map_name.lower() in self.taken:
+                raise IpamError(f"There's already a tribe map called {self.map_name}.")
+        network_id = self.local_network()
+        if network_id:
+            name = self.network_name_input.text()
+            problems = self.integration.share_problems(network_id, name)
+            if problems:
+                raise IpamError(" ".join(problems))
+            if not self.confirmed(network_id, name):
+                raise IpamError("Not shared: nothing was moved.")
+            return self.integration.share_network(network_id, name)
         return self.combo.currentData()

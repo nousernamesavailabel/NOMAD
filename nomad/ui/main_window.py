@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import QAction, QActionGroup, QApplication, QCheckBox, QCom
     QProgressBar, QPushButton, QVBoxLayout, QWidget
 
 from .. import __version__
+from ..ipam.client import current_key
 from ..ipconfig import flush_dns
 from ..profiles import ProfileStore
 from ..snapshot import NetworkSnapshot, load_snapshot
@@ -54,6 +55,7 @@ from .syslog_tab import SyslogTab
 from .tftp_tab import TftpTab
 from .theme import COLORS, DEFAULT_TEXT_SCALE, TEXT_SCALES, closest_text_scale, set_text_scale
 from .traceroute_tab import TracerouteTab
+from .tribe_version import TribeUpdateBanner
 from .terminal_tab import TerminalTab
 from .rdp_tab import RdpTab
 from .terminal_transfer import export_securecrt, export_terminal, import_terminal
@@ -116,6 +118,7 @@ class MainWindow(QMainWindow):
         QApplication.instance().commitDataRequest.connect(lambda manager: self.save_settings())
         log.info("%s started (administrator: %s)", APP_NAME, self.admin)
         self.refresh()
+        self.tribe_banner.check()
 
     # ----------------------------------------------------------------- UI setup
 
@@ -145,6 +148,8 @@ class MainWindow(QMainWindow):
         banner_layout.addWidget(restart_button)
         self.admin_banner.setVisible(not self.admin)
         layout.addWidget(self.admin_banner)
+        self.tribe_banner = TribeUpdateBanner(self.tribe_key, central)
+        layout.addWidget(self.tribe_banner)
 
         # App-wide adapter picker used by the Interfaces, MTU, Ping, Sweep and other pages
         self.picker_bar = QWidget(central)
@@ -451,6 +456,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.save_settings()
+        self.tribe_banner.stop()
         for tab in self.all_tabs:
             tab.shutdown()
         super().closeEvent(event)
@@ -487,6 +493,7 @@ class MainWindow(QMainWindow):
         self.navigator.set_navigation_hidden(on)
         self.picker_bar.setVisible(not on)
         self.admin_banner.setVisible(not on and not self.admin)
+        self.tribe_banner.set_focused(on)
         self.statusBar().setVisible(not on)
         self.central_layout.setContentsMargins(*((0, 0, 0, 0) if on else self.normal_margins))
         for page in (self.terminal_tab, self.scp_tab):
@@ -620,18 +627,26 @@ class MainWindow(QMainWindow):
         from .tribe_dialog import TribeDialog  # Loads pywin32 only when it's needed
         TribeDialog(self).exec_()
 
+    def tribe_key(self):
+        """The key NOMAD uses for the tribe on this computer, or None (safe on a worker thread)."""
+        return current_key(self.admin)
+
     def tribe_key_changed(self, origin=None):
         """A page saved or forgot the tribe key: the other pages that use the tribe start again with it."""
         if origin is not self.netmap_tab:
             self.netmap_tab.tribe_key_changed()
         if origin is not self.ipam_tab and self.ipam_tab.local_store is not None:  # Opened: else it's read later
             self.ipam_tab.connect_team()
+        self.tribe_banner.check()
 
     def confirm_leave_tribe(self, parent):
         """Ask, then stop using the tribe on this computer, showing the steps (Tools > Tribe Management is the one
         place to leave). Returns whether it left."""
         from .tribe_leave_dialog import disconnect_from_tribe
-        return disconnect_from_tribe(parent, self)
+        left = disconnect_from_tribe(parent, self)
+        if left:
+            self.tribe_banner.check()
+        return left
 
     def show_map_watcher(self):
         from .watch_service_dialog import MapWatcherDialog  # Loads pywin32 only when it's needed

@@ -10,6 +10,9 @@ of it is under way.
 plan() says what would happen; move() does it within one database (this computer's, or the server's for the tribe:
 one change, all or nothing). From this computer to the tribe, payload() is sent for the server to receive() and
 then remove() takes it from here. In the old network it shows as deleted, and in the new one as made (history).
+
+A whole network of this computer's can become a tribe network too, with its VLAN domains and their VLANs (when a map
+of it is shared with the tribe): share_network(), which is the one way a laptop can add a network to the tribe.
 """
 import uuid
 from dataclasses import dataclass, field
@@ -171,6 +174,96 @@ def to_tribe(local, team, network_id, cidr, to_network_id, take_nested=True, lin
     with local.transaction():
         remove(local, done)
     return done
+
+
+@dataclass
+class NetworkPlan:
+    """What sharing a whole network of this computer's with the tribe would take."""
+    network: object
+    move: MovePlan  # Its subnets, addresses, roles and placements, as a move of them
+    domains: list = field(default_factory=list)  # [(VlanDomain, [Vlan])] of the network
+
+
+def plan_network(store, network_id):
+    """A whole network, as plan() says for a subnet: everything in it goes, with its VLAN domains."""
+    network = store.network(network_id)
+    subnets = store.subnets(network_id)
+    vlans, placements = VlanStore(store), PlacementStore(store)
+    moving = {subnet.cidr for subnet in subnets}
+    move = MovePlan(network_id, "", subnets, [], store.addresses(network_id))
+    move.roles = {cidr: role.role for cidr, role in placements.roles(network_id).items() if cidr in moving}
+    move.placements = {cidr: item for cidr, item in placements.placements(network_id).items() if cidr in moving}
+    for item in subnets:
+        for planned in placements.moves(network_id, item.cidr, open_only=True):
+            move.problems.append(f"{item.cidr} is being moved on the Subnet Placement page ({planned.status}): finish "
+                                 "or cancel that first.")
+    domains = [(domain, vlans.vlans(domain.id)) for domain in vlans.domains() if domain.network_id == network_id]
+    return NetworkPlan(network, move, domains)
+
+
+def network_payload(plan_made, name):
+    """What the server needs to make a tribe network of it, as plain data."""
+    data = payload(plan_made.move)
+    data["network"] = dict(name=name, description=plan_made.network.description, fields=dict(plan_made.network.fields))
+    data["domains"] = [dict(name=domain.name, vtp_domain=domain.vtp_domain, description=domain.description,
+                            ranges=list(domain.ranges), fields=dict(domain.fields),
+                            vlans=[dict(vlan=vlan.vlan, name=vlan.name, status=vlan.status, subnets=list(vlan.subnets),
+                                        description=vlan.description, fields=dict(vlan.fields)) for vlan in vlans])
+                       for domain, vlans in plan_made.domains]
+    return data
+
+
+def receive_network(store, data):
+    """Make a network from network_payload's data (inside the caller's transaction). Returns it."""
+    details = data["network"]
+    network = store.add_network(details["name"], details.get("description", ""), details.get("fields"))
+    receive(store, network.id, data)
+    vlans = VlanStore(store)
+    for item in data.get("domains") or ():
+        domain = vlans.add_domain(item["name"], network.id, item.get("vtp_domain", ""), item.get("description", ""),
+                                  item.get("ranges"), item.get("fields"))
+        for vlan in item.get("vlans") or ():
+            vlans.set_vlan(domain.id, vlan["vlan"], vlan.get("name", ""), vlan.get("status", ACTIVE),
+                           vlan.get("subnets") or (), vlan.get("description", ""), vlan.get("fields"))
+    return network
+
+
+def share_problems(local, team, network_id, name):
+    """Why a network of this computer's can't be shared with the tribe under this name now: [text]."""
+    if team is None:
+        return ["This computer isn't connected to the tribe's IPAM server."]
+    if not team.online:
+        return ["The IPAM server can't be reached: networks can only be shared while it can."]
+    if not team.server_takes_networks:
+        return ["The IPAM server needs updating before it can take a network (Tools > Tribe Management > Update "
+                "Service, on the server)."]
+    plan_made = plan_network(local, network_id)
+    problems = list(plan_made.move.problems)
+    if not name.strip():
+        problems.append("Give the network a name.")
+    elif any(network.name.lower() == name.strip().lower() for network in team.networks()):
+        problems.append(f"The tribe already has a network called {name.strip()}.")
+    vlans = VlanStore(team.copy)
+    problems += [f"The tribe already has a VLAN domain called {domain.name}: rename this computer's first."
+                 for domain, _ in plan_made.domains if vlans.domain_named(domain.name) is not None]
+    return problems
+
+
+def share_network(local, team, network_id, name):
+    """Make a network of this computer's a tribe network, with its VLAN domains: the server takes it all (or refuses
+    it all), then it's taken out of this computer's. Returns the tribe's network."""
+    problems = share_problems(local, team, network_id, name)
+    if problems:
+        raise IpamError(" ".join(problems))
+    plan_made = plan_network(local, network_id)
+    network = team.take_network(network_payload(plan_made, name.strip()))
+    with local.transaction():
+        remove(local, plan_made.move)
+        vlans = VlanStore(local)
+        for domain, _ in plan_made.domains:
+            vlans.delete_domain(domain.id)
+        local.delete_network(network_id)
+    return network
 
 
 def move(store, network_id, cidr, to_network_id, take_nested=True, link=None):

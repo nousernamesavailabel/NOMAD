@@ -31,9 +31,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .. import __version__
 from ..system import app_data_dir, log_dir
-from .server import ADMIN, KEY_FILE_FORMAT, TEAM, ConflictError, fingerprint, fingerprint_of_file, load_config, \
-    server_dir
+from .server import ADMIN, API_LEVEL, KEY_FILE_FORMAT, TEAM, ConflictError, fingerprint, fingerprint_of_file, \
+    load_config, server_dir
 from .store import TABLES, IpamError, IpamStore, current_user, ip_key, parse_address
 from .assets import ASSET_PENDING_SCHEMA, keep_pending_on_top as keep_asset_pending_on_top
 from .vlans import VLAN_PENDING_SCHEMA, keep_pending_on_top as keep_vlan_pending_on_top
@@ -69,6 +70,50 @@ ASSET_API = 11  # And assets
 TARGET_API = 12  # And software targets
 WLC_API = 13  # And wireless controllers as a kind of asset
 LOCK_API = 14  # And map icons locked in place
+NETWORK_API = 15  # And taking a laptop's whole network
+SERVER_FEATURES = ((2, "instant sync"), (3, "change history"), (4, "loopback subnets"), (5, "Last Seen sweep results"),
+                   (6, "tribe maps"), (VLAN_API, "VLANs"), (PLACEMENT_API, "Subnet Placement"),
+                   (ROLES_API, "subnet roles"), (MOVE_API, "moving subnets between networks"), (ASSET_API, "assets"),
+                   (TARGET_API, "software targets"), (WLC_API, "wireless controllers as assets"),
+                   (LOCK_API, "locked map icons"), (NETWORK_API, "sharing a whole network with a map"))
+
+
+@dataclass
+class ServerUpdate:
+    """A tribe server older than this NOMAD: it still works, without what came after its API level."""
+    name: str
+    version: str
+    api: int
+
+    @property
+    def missing(self):
+        return [what for level, what in SERVER_FEATURES if level > self.api]
+
+    @property
+    def summary(self):
+        server = f"The tribe server {self.name}" if self.name else "The tribe server"
+        running = f"NOMAD {self.version}" if self.version else "an older NOMAD"
+        return (f"{server} is running {running} (Tribe API {self.api}), and this NOMAD {__version__} needs Tribe API "
+                f"{API_LEVEL}. Update the server to NOMAD {__version__} or newer.")
+
+    def steps(self, on_server=False):
+        """What to do about it, on the server itself or from a laptop."""
+        needed = "This needs the update: " + ", ".join(self.missing) + "."
+        if on_server:
+            return (f"{needed}\n\nOpen Tools > Tribe Management... on this computer and click Update Service. It "
+                    "installs the service again from this copy of NOMAD. The data and tribe key are kept.")
+        return (f"{needed}\n\n1. Copy NOMAD {__version__} or newer to the tribe server.\n2. Run it there as "
+                "administrator.\n3. Open Tools > Tribe Management... and click Update Service.\n\nThe data and tribe "
+                "key are kept. If someone else looks after the server, send them this.")
+
+
+def server_update(status):
+    """A ServerUpdate if the server with this status is older than this NOMAD, otherwise None. Only the API level
+    counts, so a server newer than this NOMAD is fine: it still answers everything this one asks."""
+    api = int(status.get("api") or 1)  # Servers from before API 2 don't say
+    if api >= API_LEVEL:
+        return None
+    return ServerUpdate(status.get("name") or "", status.get("version") or "", api)
 
 
 class ServerUnreachable(IpamError):
@@ -534,6 +579,11 @@ class TeamStore:
         return self.server_api == 0 or self.server_api >= MOVE_API
 
     @property
+    def server_takes_networks(self):
+        """Whether the server is new enough to take a laptop's whole network (assumed so before the first sync)."""
+        return self.server_api == 0 or self.server_api >= NETWORK_API
+
+    @property
     def server_keeps_assets(self):
         """Whether the server is new enough to keep assets (assumed so before the first sync)."""
         return self.server_api == 0 or self.server_api >= ASSET_API
@@ -822,6 +872,15 @@ class TeamStore:
         """Put subnets moved from this computer's own networks into a tribe network (network_move.payload)."""
         self._needs_move_api()
         self._send("take_subnets", to_network_id=to_network_id, data=data, link=list(link) if link else None)
+
+    def take_network(self, data):
+        """Make a tribe network of one of this computer's (network_move.share_network). Returns it."""
+        if not self.server_takes_networks:
+            raise OldServerError("The IPAM server is running an older version of NOMAD that can't take a network: it "
+                                 "needs updating (Tools > Tribe Management > Update Service, on the server).")
+        reply = self._send("take_network", data=data)
+        created = [item["row"]["id"] for item in reply["items"] if item["entity"] == "networks"]
+        return self.copy.network(created[-1])
 
     def _needs_move_api(self):
         if not self.server_moves_subnets:

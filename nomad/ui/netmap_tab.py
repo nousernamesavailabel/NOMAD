@@ -43,7 +43,7 @@ from .common import OneLineLabel, SortableTableItem, StoppableThread, add_submen
     format_size, read_only_table, set_hint
 from .host_menu import HostActions
 from .map_ipam_dialog import RecordDialog
-from .integration import IPAM, PLACEMENT, VLAN, MapNetworkDialog, hub, split_key
+from .integration import IPAM, PLACEMENT, VLAN, MapNetworkDialog, TribeNetworkDialog, hub, split_key
 from .integration import link as page_link
 from .netmap_key import MapKeyDialog
 from .netmap_counters import LinkCounters
@@ -2137,9 +2137,26 @@ class NetworkMapTab(QWidget):
         if integration is None or self.network_map is None:
             return
         self.window.ipam_tab.open_store()
-        dialog = MapNetworkDialog(self, integration, self.network_map, self.map_name())
+        dialog = MapNetworkDialog(self, integration, self.network_map, self.map_name()) if self.tribe_map_id is None \
+            else TribeNetworkDialog(self, integration, self.network_map, "IPAM Network of the Map")
         if dialog.exec_():
             self.set_ipam_network(dialog.result_item or "")
+
+    def network_replaced(self, old, new):
+        """One of this computer's networks became a tribe network: the maps of it here are of that one now."""
+        for path in store.recent(limit=None):
+            if self.tribe_map_id is None and self.map_path and path.resolve() == Path(self.map_path).resolve():
+                continue  # The open map, below
+            try:
+                network_map = store.load(path)
+                if network_map.ipam_network == old:
+                    network_map.ipam_network = new
+                    store.save(network_map, path)
+            except (OSError, ValueError) as error:
+                log.warning("Couldn't update the IPAM network of %s: %s", path, error)
+        self.map_networks.clear()
+        if self.network_map is not None and self.network_map.ipam_network == old:
+            self.set_ipam_network(new)
 
     def set_ipam_network(self, key):
         """Say which IPAM network the open map is of (saved with it, and shared with a tribe map)."""
@@ -4203,15 +4220,24 @@ class NetworkMapTab(QWidget):
             self.choose_ipam_network()
 
     def share_with_tribe(self):
-        maps = self.tribe.ensure()
+        maps, integration = self.tribe.ensure(), hub(self.window)
         if maps is None or self.network_map is None:
             return
         default = Path(self.map_path).stem if self.map_path else store.default_name(self.network_map)[:-len(
             store.EXTENSION)]
-        name, ok = QInputDialog.getText(self, "Share with the Tribe", "Name for the map (everyone in the tribe will "
-                                        "see it, and its community strings, by this name):", text=default)
-        if not ok or not name.strip():
-            return
+        if integration is None:  # A page on its own: no IPAM to tie it to
+            name, ok = QInputDialog.getText(self, "Share with the Tribe", "Name for the map (everyone in the tribe "
+                                            "will see it, and its community strings, by this name):", text=default)
+            if not ok or not name.strip():
+                return
+        else:
+            self.window.ipam_tab.open_store()
+            dialog = TribeNetworkDialog(self, integration, self.network_map, "Share with the Tribe", default,
+                                        [item["name"] for item in maps.maps()])
+            if not dialog.exec_():
+                return
+            name = dialog.map_name
+            self.set_ipam_network(dialog.result_item or "")
         self.flush_save()
         self.network_map.positions = self.view.positions()
         self.network_map.l3_positions = self.l3_view.positions()

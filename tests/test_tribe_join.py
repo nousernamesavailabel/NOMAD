@@ -11,13 +11,14 @@ from PyQt5.QtCore import QObject, QTimer, pyqtSignal  # noqa: E402
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 from test_ipam_server import key_for  # noqa: E402
 
+from nomad.ipam import server as server_module  # noqa: E402
 from nomad.ipam.client import TeamClient, TeamKey  # noqa: E402
 from nomad.ipam.server import IpamServer  # noqa: E402
 from nomad.netmap.tribe import TribeMaps  # noqa: E402
 from nomad.ui import tribe_join_dialog  # noqa: E402
 from nomad.ui.netmap_tribe import TribeSync  # noqa: E402
-from nomad.ui.tribe_join_dialog import CHECK, DONE, FAILED, KEY, MAPS, NETWORKS, REACH, SAVE, SKIPPED, WARNING, \
-    JoinTribeDialog  # noqa: E402
+from nomad.ui.tribe_join_dialog import CHECK, DONE, FAILED, KEY, MAPS, NETWORKS, REACH, SAVE, SKIPPED, VERSION, \
+    WARNING, JoinTribeDialog  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -134,6 +135,32 @@ def test_each_step_is_shown_then_the_downloads_are_followed(app, server, joining
     assert dialog.close_button.text() == "Close" and dialog.bar.value() == dialog.bar.maximum()
 
 
+def test_a_server_as_new_as_this_nomad_passes_the_version_check(app, server, joining):
+    dialog, _ = joining()
+    assert wait_for(app, lambda: settled(dialog))
+    assert dialog.states[VERSION] == DONE and "it has everything" in dialog.notes[VERSION].text()
+    assert dialog.update_needed is None
+
+
+def test_a_newer_server_is_fine(app, server, joining, monkeypatch):
+    monkeypatch.setattr(server_module, "API_LEVEL", server_module.API_LEVEL + 3)
+    dialog, _ = joining()
+    assert wait_for(app, lambda: settled(dialog))
+    assert dialog.states[VERSION] == DONE and dialog.update_needed is None
+    assert dialog.headline.text() == "Connected to the tribe"
+
+
+def test_an_older_server_is_joined_with_a_recommendation_to_update_it(app, server, joining, monkeypatch):
+    monkeypatch.setattr(server_module, "API_LEVEL", server_module.API_LEVEL - 1)
+    dialog, window = joining()
+    assert wait_for(app, lambda: settled(dialog))
+    assert dialog.states[VERSION] == WARNING and "Update the server to NOMAD" in dialog.notes[VERSION].text()
+    assert window.saved and dialog.saved  # It still works, without the newest things
+    assert dialog.headline.text() == "Connected to the tribe, but its server needs updating"
+    assert "Update Service" in dialog.message.text() and "keep it somewhere safe" in dialog.message.text()
+    assert dialog.bar.value() == dialog.bar.maximum()
+
+
 def test_closing_during_the_download_leaves_it_running(app, server, joining):
     dialog, window = joining()
     assert wait_for(app, lambda: dialog.states[SAVE] == DONE)
@@ -148,7 +175,7 @@ def test_a_server_that_cant_be_reached_can_be_saved_anyway(app, server, joining)
     dialog, window = joining(TeamKey(key.server_id, ["127.0.0.1"], 1, key.fingerprint, key.secret))
     assert wait_for(app, lambda: settled(dialog))
     assert dialog.states[REACH] == FAILED and "Can't reach" in dialog.notes[REACH].text()
-    assert dialog.states[CHECK] == SKIPPED and not window.saved
+    assert dialog.states[CHECK] == SKIPPED and dialog.states[VERSION] == SKIPPED and not window.saved
     assert dialog.anyway_button.isVisibleTo(dialog) and dialog.headline.text().endswith("can't be reached right now")
     dialog.anyway_button.click()
     assert window.saved and dialog.saved and window.changed == 1
