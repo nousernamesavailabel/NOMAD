@@ -245,12 +245,17 @@ def existing_server(directory=None):
 
 def import_server(move_file, directory=None, port=None):
     """Set this computer's tribe server up from a move file (the service must be stopped or not installed). A server
-    already here is kept, renamed to server-before-move-<time> beside it. Returns the new config."""
+    already here is kept, renamed to server-before-move-<time> beside it. Returns the new config. The server's own
+    folder (directory not given) is locked down before the secrets go in it."""
+    real = directory is None
     directory = Path(directory or server_dir())
     if directory.exists() and any(directory.iterdir()):
         aside = directory.with_name(f"{directory.name}-before-move-{datetime.datetime.now():%Y%m%d-%H%M%S}")
         rename_aside(directory, aside)
     directory.mkdir(parents=True, exist_ok=True)
+    if real:
+        from .service import secure_service_folder
+        secure_service_folder(directory)
     for name in FILES:
         (directory / name).write_bytes(move_file.archive.read(name))
     protect, _ = _map_secret_protection()

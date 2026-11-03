@@ -118,6 +118,59 @@ def quote(path):
     return shlex.quote(path)
 
 
+# ----------------------------------------------------------------- Local names for remote files
+
+# Windows reads \ and / in a name as folders, and : as a drive or a hidden stream, so a server's file named with one
+# (allowed on Linux, or sent by a hostile server) could be saved outside the folder it's downloaded into
+NOT_IN_WINDOWS_NAMES = set('<>:"/\\|?*')
+WINDOWS_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {
+    f"{port}{number}" for port in ("COM", "LPT") for number in "123456789¹²³"}
+UNSAFE_NAME = "Not copied: its name (or a folder's it's in) can't be used on Windows."
+
+
+def local_name_problem(name):
+    """Why a remote file's name can't be a file name on this computer, or "" if it can."""
+    if name in ("", ".", ".."):
+        return f'"{name}" isn\'t a file name'
+    if any(character in NOT_IN_WINDOWS_NAMES or ord(character) < 32 for character in name):
+        return f'"{name}" has a character Windows doesn\'t allow in names (\\ / : * ? " < > | or a control character)'
+    if name.endswith((" ", ".")):
+        return f'"{name}" ends with a space or dot, which Windows leaves off (it would be saved as another name)'
+    if name.split(".")[0].rstrip(" ").upper() in WINDOWS_DEVICE_NAMES:
+        return f'"{name}" is a name Windows keeps for a device'
+    return ""
+
+
+def local_path(folder, relative):
+    """Where a remote file goes in a local folder: relative is its path below the folder being copied ("sub/a.conf"),
+    or just its name. Raises RemoteError if any name in it can't be used on Windows."""
+    parts = relative.split("/")
+    for part in parts:
+        problem = local_name_problem(part)
+        if problem:
+            raise RemoteError(f"Not copied: {problem}.")
+    path = os.path.join(folder, *parts)
+    root = os.path.abspath(folder)
+    if os.path.commonpath([root, os.path.abspath(path)]) != root:  # The names checked can't do this; to be sure
+        raise RemoteError(f"Not copied: {relative} would be saved outside {folder}.")
+    return path
+
+
+def download_transfer(folder, relative, remote, size=0, **options):
+    """A download of a remote file (or folder) into a local folder: already FAILED, saving nothing, if its name can't
+    be used on Windows (so it's still listed in the queue, saying why)."""
+    try:
+        return Transfer(DOWNLOAD, local_path(folder, relative), remote, size, **options)
+    except RemoteError as error:
+        return Transfer(DOWNLOAD, "", remote, size, state=FAILED, message=str(error), **options)
+
+
+def check_local_target(transfer):
+    """A download with nowhere to go (its name couldn't be used on Windows) mustn't run, even when retried."""
+    if not transfer.local:
+        raise RemoteError(UNSAFE_NAME)
+
+
 # ----------------------------------------------------------------- Parsing `ls -la`
 
 MONTHS = {name: index for index, name in enumerate(
@@ -1045,13 +1098,14 @@ def expand(fs, transfer, cancelled=lambda: False):
                 files.append(Transfer(UPLOAD, local, join(remote_folder, name), os.path.getsize(local),
                                       verify=transfer.verify))
     else:
+        check_local_target(transfer)
         folders.append(transfer.local)
         for relative, entry in fs.walk_files(transfer.remote, cancelled, follow_links=True):
-            local = os.path.join(transfer.local, *relative.split("/"))
-            if entry.is_dir:
-                folders.append(local)
-            else:
-                files.append(Transfer(DOWNLOAD, local, entry.path, entry.size, verify=transfer.verify))
+            item = download_transfer(transfer.local, relative, entry.path, entry.size, verify=transfer.verify)
+            if not entry.is_dir:
+                files.append(item)  # One whose name can't be used comes already failed, saying why
+            elif item.local:
+                folders.append(item.local)  # A folder that can't be made: each file in it fails instead
     return folders, files
 
 
@@ -1123,6 +1177,7 @@ class TransferRunner:
         return add
 
     def download(self, transfer):
+        check_local_target(transfer)
         remote = self.fs.stat(transfer.remote)
         if remote is None:
             raise RemoteError(f"{transfer.remote} doesn't exist any more.")

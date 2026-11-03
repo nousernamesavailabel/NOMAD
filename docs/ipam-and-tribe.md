@@ -226,7 +226,7 @@ For what's shared and how changes merge, see [Tribe maps](network-map.md#tribe-m
 
 ### Troubleshooting
 
-Stop the service and run `NOMAD.exe --ipam-server` to run the server in a console. Its log is `%ProgramData%\NOMAD\server\server.log`.
+Stop the service and run `NOMAD.exe --ipam-server` in a console opened as administrator to run the server there. Its log is `%ProgramData%\NOMAD\server\server.log`.
 
 ## Maps and IPAM together
 

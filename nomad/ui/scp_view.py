@@ -11,12 +11,13 @@ from PyQt5.QtWidgets import QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMen
     QVBoxLayout, QWidget
 
 from ..terminal.files import CANCELLED, DONE, DOWNLOAD, FAILED, OVERWRITE, PAUSED, QUEUED, RUNNING, UPLOAD, Entry, \
-    FileConnection, RemoteError, SCP, Transfer, TransferRunner, chmod_tree, chown_tree, join, parent as remote_parent, remove_tree
+    FileConnection, RemoteError, SCP, Transfer, TransferRunner, chmod_tree, chown_tree, download_transfer, join, \
+    local_name_problem, local_path, parent as remote_parent, remove_tree
 from .common import format_size, release_thread, set_hint
 from .file_panes import LocalPane, RemotePane
 from .prompts import PromptAnswers, UiPrompter
-from .remote_editor import EDITOR_LIMIT, ExternalEdit, RemoteEditor, edit_folder, looks_binary, open_in_program, \
-    remove_edit_copy
+from .remote_editor import EDITOR_LIMIT, ExternalEdit, RemoteEditor, edit_folder, looks_binary, notepad, \
+    open_in_program, remove_edit_copy, runs_when_opened
 from .scp_dialogs import ChecksumDialog, ConflictDialog, PropertiesDialog, SyncDialog
 from .scp_workers import ConnectThread, TaskWorker, TransferWorker
 from .terminal_view import CONNECTED, CONNECTING, DISCONNECTED
@@ -562,18 +563,19 @@ class FileSessionView(PromptAnswers, QWidget):
                                        is_dir=entry.is_dir) for entry in entries])
 
     def queue_downloads(self, entries, folder):
-        self.queue_transfers([Transfer(DOWNLOAD, os.path.join(folder, entry.name), entry.path, entry.size,
-                                       is_dir=entry.is_dir) for entry in entries])
+        self.queue_transfers([download_transfer(folder, entry.name, entry.path, entry.size, is_dir=entry.is_dir)
+                              for entry in entries])
 
     def queue_sync(self, local_root, remote_root, differences):
         transfers = []
         for difference in differences:
-            local = os.path.join(local_root, *difference.relative.split("/"))
             remote = join(remote_root, difference.relative)
             if difference.action == UPLOAD:
+                local = os.path.join(local_root, *difference.relative.split("/"))
                 transfers.append(Transfer(UPLOAD, local, remote, difference.local_size or 0, conflict=OVERWRITE))
             elif difference.action == DOWNLOAD:
-                transfers.append(Transfer(DOWNLOAD, local, remote, difference.remote.size, conflict=OVERWRITE))
+                transfers.append(download_transfer(local_root, difference.relative, remote, difference.remote.size,
+                                                   conflict=OVERWRITE))
         self.queue_transfers(transfers)
         self.set_status(f"Synchronizing: {len(transfers)} file{'' if len(transfers) == 1 else 's'} queued.", "info")
 
@@ -693,12 +695,18 @@ class FileSessionView(PromptAnswers, QWidget):
                 editor.activateWindow()
                 return
         if entry.size > EDITOR_LIMIT:
+            # Never Windows' default program here, one Enter away: for an .exe, that would run it
+            program = self.settings().value(EDITOR_SETTING, "", str)
+            instead = f"Open it in {os.path.basename(program)}" if program else "Choose a program to open it in"
             reply = QMessageBox.question(
-                self, "Edit", f"{entry.name} is {format_size(entry.size)}, too big for NOMAD's editor. Open it in "
-                              "another program instead (changes are uploaded each time you save)?",
+                self, "Edit", f"{entry.name} is {format_size(entry.size)}, too big for NOMAD's editor. {instead} "
+                              "instead (changes are uploaded each time you save)?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
             if reply == QMessageBox.Yes:
-                self.edit_external(entry, self.settings().value(EDITOR_SETTING, "", str))
+                if program:
+                    self.edit_external(entry, program)
+                else:
+                    self.choose_editor(entry)
             return
         self.set_status(f"Opening {entry.name}...", "info")
 
@@ -749,37 +757,69 @@ class FileSessionView(PromptAnswers, QWidget):
                 self.remote.refresh()
         self.submit(work, saved, failed)
 
-    def choose_editor(self, entry):
+    def pick_editor(self):
+        """Ask for an editor program, remembered for Edit With; "" if none was chosen."""
         program, _ = QFileDialog.getOpenFileName(self, "Choose an Editor", os.environ.get("ProgramFiles", ""),
                                                  "Programs (*.exe);;All files (*)")
         if program:
             self.settings().setValue(EDITOR_SETTING, program)
+        return program
+
+    def choose_editor(self, entry):
+        program = self.pick_editor()
+        if program:
             self.edit_external(entry, program)
 
+    def instead_of_running(self, entry):
+        """A program to edit a file in that Windows' default program would run (a program, script, installer...),
+        or "" to leave it."""
+        box = QMessageBox(QMessageBox.Warning, "Edit",
+                          f"Windows' default program for {entry.name} would run it rather than open it for editing, "
+                          "so NOMAD won't use it for a file from a server.\n\nOpen it in Notepad, or choose a "
+                          "program?", parent=self)
+        notepad_button = box.addButton("Notepad", QMessageBox.AcceptRole)
+        choose_button = box.addButton("Choose Program...", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(notepad_button)
+        box.exec_()
+        if box.clickedButton() is notepad_button:
+            return notepad()
+        if box.clickedButton() is choose_button:
+            return self.pick_editor()
+        return ""
+
     def edit_external(self, entry, program):
-        """Download a copy, open it in a program, and upload it whenever it's saved there."""
-        folder = edit_folder()
-        local_path = os.path.join(folder, entry.name)
+        """Download a copy, open it in a program, and upload it whenever it's saved there. With no program, Windows'
+        default one for its type, unless that would run it."""
+        problem = local_name_problem(entry.name)
+        if problem:
+            self.fail("Edit", f"It can't be copied to this computer to edit: {problem}.")
+            return
+        if not program and runs_when_opened(entry.name):
+            program = self.instead_of_running(entry)
+            if not program:
+                return
+        copy = local_path(edit_folder(), entry.name)
         self.set_status(f"Downloading {entry.name} to edit...", "info")
 
         def work(fs):
-            with open(local_path, "wb") as file:
+            with open(copy, "wb") as file:
                 fs.download(entry.path, file)
 
         def downloaded(_):
-            error = open_in_program(local_path, program)
+            error = open_in_program(copy, program)
             if error:
-                remove_edit_copy(local_path)
+                remove_edit_copy(copy)
                 self.fail("Edit", error)
                 return
-            edit = ExternalEdit(entry, local_path, self)
+            edit = ExternalEdit(entry, copy, self)
             edit.changed.connect(self.upload_edit)
             self.external_edits.append(edit)
             self.set_status(f"Editing {entry.name} in {os.path.basename(program) if program else 'its program'}. "
                             "Each save there is uploaded to the server.", "info")
 
         def failed(message):
-            remove_edit_copy(local_path)
+            remove_edit_copy(copy)
             self.fail("Edit", message)
         self.submit(work, downloaded, failed)
 

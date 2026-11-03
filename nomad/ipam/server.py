@@ -882,7 +882,16 @@ def log_to_file(directory=None):
 
 
 def run_in_foreground(directory=None, port=None):
-    """Run the server in this console until Ctrl+C (NOMAD.exe --ipam-server), for trying it out or troubleshooting."""
+    """Run the server in this console until Ctrl+C (NOMAD.exe --ipam-server), for trying it out or troubleshooting.
+    In the server's own folder (directory not given), it needs administrator rights, to keep the folder's secrets
+    from everyone else on the computer."""
+    if directory is None and sys.platform == "win32":
+        from ..system import is_admin
+        from .service import secure_service_folder
+        if not is_admin():
+            raise SystemExit("Run NOMAD as administrator to run the IPAM server: its folder holds the tribe's "
+                             "secrets, which only administrators may read.")
+        secure_service_folder(server_dir())
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s")
     log_to_file(directory)
     server = IpamServer(directory, port=port)

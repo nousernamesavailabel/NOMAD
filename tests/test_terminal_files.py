@@ -10,9 +10,9 @@ import paramiko
 import pytest
 
 from nomad.terminal.files import BOTH_WAYS, CANCELLED, DIFFERENT, DONE, DOWNLOAD, FAILED, LOCAL_NEWER, LOCAL_ONLY, \
-    NEWER, OVERWRITE, PART_SUFFIX, REMOTE_NEWER, REMOTE_ONLY, RENAME, SAME, SCP, SFTP, SKIP, SKIPPED, TO_LOCAL, \
+    NEWER, OVERWRITE, PART_SUFFIX, QUEUED, REMOTE_NEWER, REMOTE_ONLY, RENAME, SAME, SCP, SFTP, SKIP, SKIPPED, TO_LOCAL, \
     TO_REMOTE, UPLOAD, Entry, FileConnection, RemoteError, RemoteFS, ShellFS, Transfer, TransferRunner, chmod_tree, compare, \
-    SFTP_SERVER_SEARCH, chown_tree, expand, folder_mode, local_files, parse_ids, parse_ls, parse_permissions, permission_text, remote_files, remove_tree, \
+    SFTP_SERVER_SEARCH, chown_tree, download_transfer, expand, folder_mode, local_files, local_name_problem, local_path, parse_ids, parse_ls, parse_permissions, permission_text, remote_files, remove_tree, \
     scp_receive, scp_send
 from nomad.terminal.hostkeys import KnownHosts
 from nomad.terminal.sessions import SSH, Session
@@ -510,6 +510,78 @@ def test_expand_folders_both_ways(remote, tmp_path):
     assert sorted((item.remote, item.size) for item in files) == [("/logs/a.log", 1), ("/logs/old/b.log", 2)]
 
 
+@pytest.mark.parametrize("name", ["..", ".", "", r"..\..\Startup\x.bat", "C:evil.bat", r"C:\x.bat",
+                                  "file.txt:hidden", "bad\x01name", "trailing.", "trailing ", "CON", "nul.txt",
+                                  "com1", "LPT9.log", 'quote".txt', "pipe|x", "star*"])
+def test_names_windows_cant_use_are_refused(name, tmp_path):
+    assert local_name_problem(name)
+    with pytest.raises(RemoteError):
+        local_path(str(tmp_path), name)
+    with pytest.raises(RemoteError):
+        local_path(str(tmp_path), f"ok/{name}/deeper")
+
+
+@pytest.mark.parametrize("name", ["running-config", "a.b.c", ".bashrc", "...x", "with space.txt", "CONSOLE.txt",
+                                  "com10", "ünïcode.txt"])
+def test_ordinary_names_are_kept(name, tmp_path):
+    assert local_name_problem(name) == "" and local_name_problem("a/b")
+    assert local_path(str(tmp_path), f"sub/{name}") == os.path.join(str(tmp_path), "sub", name)
+
+
+class HostileFS(RemoteFS):
+    """A server whose listing names files so as to land outside the download folder on Windows."""
+
+    def __init__(self, listing):
+        super().__init__(None)
+        self.listing = listing
+
+    def listdir(self, path):
+        return self.listing.get(path, [])
+
+    def stat(self, path):
+        return next((entry for entries in self.listing.values() for entry in entries if entry.path == path), None)
+
+    def download(self, remote, local_file, offset=0, progress=None, cancelled=lambda: False):
+        local_file.write(b"payload")
+        return 0
+
+
+def test_hostile_names_in_a_folder_download_save_nothing_outside_it(tmp_path):
+    target = tmp_path / "into"
+    fs = HostileFS({"/logs": [Entry("ok.log", "/logs/ok.log", size=7),
+                              Entry(r"..\..\escaped.bat", r"/logs/..\..\escaped.bat", size=7),
+                              Entry("C:evil.bat", "/logs/C:evil.bat", size=7),
+                              Entry("bad..", "/logs/bad..", is_dir=True)],
+                    "/logs/bad..": [Entry("inside.log", "/logs/bad../inside.log", size=7)]})
+    folders, files = expand(fs, Transfer(DOWNLOAD, str(target), "/logs", is_dir=True))
+    assert folders == [str(target)]
+    by_remote = {item.remote: item for item in files}
+    assert by_remote["/logs/ok.log"].state != FAILED and by_remote["/logs/ok.log"].local == str(target / "ok.log")
+    refused = [by_remote[path] for path in (r"/logs/..\..\escaped.bat", "/logs/C:evil.bat", "/logs/bad../inside.log")]
+    assert all(item.state == FAILED and item.local == "" and "Not copied" in item.message for item in refused)
+
+    runner = TransferRunner(fs)
+    for item in files:  # Even run (or retried) they save nothing
+        item.state = QUEUED
+        runner.run(item)
+    assert (target / "ok.log").read_bytes() == b"payload"
+    assert [item.state for item in refused] == [FAILED] * 3
+    assert sorted(path.name for path in tmp_path.rglob("*")) == ["into", "ok.log"]
+    assert not list(tmp_path.parent.glob("escaped.bat")) and not os.path.exists(PART_SUFFIX)
+
+
+def test_a_folder_download_with_nowhere_to_go_is_refused(tmp_path):
+    with pytest.raises(RemoteError):
+        expand(HostileFS({}), Transfer(DOWNLOAD, "", "/logs", is_dir=True))
+
+
+def test_download_transfer_marks_unusable_names_failed(tmp_path):
+    good = download_transfer(str(tmp_path), "sub/a.conf", "/x/sub/a.conf", 5, conflict=OVERWRITE)
+    assert good.local == str(tmp_path / "sub" / "a.conf") and good.state == QUEUED and good.conflict == OVERWRITE
+    bad = download_transfer(str(tmp_path), r"sub\..\..\a.conf", "/x/a.conf", 5, is_dir=True)
+    assert bad.state == FAILED and bad.local == "" and bad.is_dir and "Windows" in bad.message
+
+
 # ----------------------------------------------------------------- Without SFTP
 
 def test_falls_back_to_scp_without_the_sftp_subsystem(tmp_path, host_key):
@@ -720,6 +792,114 @@ def test_old_edit_copies_are_cleaned(tmp_path, monkeypatch):
         os.utime(path, (week_ago, week_ago))
     assert remote_editor.clean_old_edits() == 1
     assert not old.exists() and recent.exists()
+
+
+@pytest.mark.parametrize("name", ["setup.exe", "RUN.BAT", "fix.cmd", "script.ps1", "notes.txt.exe", "go.lnk",
+                                  "site.url", "app.hta", "a.js", "a.vbs", "install.msi", "image.iso", "keys.reg",
+                                  "help.chm", "bundle.pfx"])
+def test_types_that_run_when_opened(name):
+    from nomad.ui.remote_editor import runs_when_opened
+    assert runs_when_opened(name)
+
+
+@pytest.mark.parametrize("name", ["running-config", "router.cfg", "nginx.conf", "notes.txt", "syslog.log",
+                                  "c2960-lanbasek9-mz.bin", "trace.pcapng", "data.json", "inventory.csv", "Makefile"])
+def test_types_that_just_open(name):
+    from nomad.ui.remote_editor import runs_when_opened
+    assert not runs_when_opened(name)
+
+
+@pytest.fixture
+def startfile_calls(monkeypatch):
+    calls = []
+    monkeypatch.setattr(os, "startfile", lambda path, *verb: calls.append((path, *verb)), raising=False)
+    return calls
+
+
+def test_default_program_opens_for_editing_and_never_runs(tmp_path, startfile_calls, monkeypatch):
+    from nomad.ui.remote_editor import open_in_program
+    program = write(tmp_path / "evil.exe", b"MZ")
+    assert "wasn't opened" in open_in_program(str(program))
+    assert startfile_calls == []
+
+    text = write(tmp_path / "router.cfg", b"hostname r1")
+    assert open_in_program(str(text)) == ""
+    assert startfile_calls == [(str(text), "edit")]
+
+    def no_edit_verb(path, *verb):
+        if verb:
+            raise OSError("No application is associated with the specified file for this operation")
+        startfile_calls.append((path,))
+    monkeypatch.setattr(os, "startfile", no_edit_verb)
+    assert open_in_program(str(text)) == ""
+    assert startfile_calls[-1] == (str(text),)  # Types without an edit verb are opened as usual
+
+    startfile_calls.clear()
+    monkeypatch.setattr(os, "startfile", lambda path, *verb: startfile_calls.append((path, *verb)))
+    assert open_in_program(str(tmp_path)) == ""  # Show in Explorer
+    assert startfile_calls == [(str(tmp_path),)]
+
+
+class FakeScpView:
+    """Just enough of an SCP tab for its edit methods."""
+
+    def __init__(self, program="", choice=""):
+        self.program, self.choice = program, choice
+        self.failures, self.submitted, self.calls, self.editors = [], [], [], []
+
+    def settings(self):
+        return self
+
+    def value(self, key, default="", kind=str):
+        return self.program
+
+    def fail(self, title, message):
+        self.failures.append(message)
+
+    def set_status(self, *arguments):
+        pass
+
+    def submit(self, work, done, failed):
+        self.submitted.append(work)
+
+    def instead_of_running(self, entry):
+        self.calls.append(("instead", entry.name))
+        return self.choice
+
+    def choose_editor(self, entry):
+        self.calls.append(("choose", entry.name))
+
+    def edit_external(self, entry, program):
+        self.calls.append(("edit", entry.name, program))
+
+
+def test_a_file_windows_would_run_is_never_given_to_its_default_program(tmp_path, monkeypatch):
+    from nomad.ui import remote_editor
+    from nomad.ui.scp_view import FileSessionView as ScpView
+    monkeypatch.setattr(remote_editor, "EDIT_FOLDER", str(tmp_path))
+    view = FakeScpView(choice="")
+    ScpView.edit_external(view, Entry("update.exe", "/tmp/update.exe"), "")
+    assert view.calls == [("instead", "update.exe")] and view.submitted == []  # Cancelled: nothing downloaded
+
+    view = FakeScpView(choice=remote_editor.notepad())
+    ScpView.edit_external(view, Entry("fix.ps1", "/tmp/fix.ps1"), "")
+    assert view.calls == [("instead", "fix.ps1")] and len(view.submitted) == 1
+
+    view = FakeScpView()
+    ScpView.edit_external(view, Entry("router.cfg", "/etc/router.cfg"), "")
+    assert view.calls == [] and len(view.submitted) == 1  # Not a type that runs: Windows' editor for it
+
+
+def test_a_big_file_never_goes_to_windows_default_program(monkeypatch):
+    from nomad.ui import scp_view
+    monkeypatch.setattr(scp_view.QMessageBox, "question", lambda *arguments: scp_view.QMessageBox.Yes)
+    big = Entry("c9300-universalk9.SPA.exe", "/flash/c9300.exe", size=scp_view.EDITOR_LIMIT + 1)
+    view = FakeScpView()
+    scp_view.FileSessionView.open_remote_file(view, big)
+    assert view.calls == [("choose", big.name)]  # No editor chosen yet: ask for one
+    view = FakeScpView(program=r"C:\Tools\editor.exe")
+    scp_view.FileSessionView.open_remote_file(view, big)
+    assert view.calls == [("edit", big.name, r"C:\Tools\editor.exe")]
 
 
 # ----------------------------------------------------------------- Sudo and owners

@@ -274,12 +274,59 @@ def test_secure_folder_leaves_files_readable(tmp_path):
     (folder / "backups" / "old.db").write_bytes(b"x")
     me = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True).stdout
     sid = me.strip().split(",")[-1].strip('"')
-    secure_folder(folder, [f"*{sid}:(OI)(CI)M", "*S-1-5-18:(OI)(CI)F"])
+    # Someone given access by hand (as an earlier NOMAD left them) is taken off
+    subprocess.run(["icacls", str(folder), "/grant", "*S-1-5-32-545:(OI)(CI)R"], capture_output=True, check=True)
+    secure_folder(folder, [f"*{sid}:(OI)(CI)M", "*S-1-5-18:(OI)(CI)F"], owner=None)  # Setting owners needs admin
     assert (folder / "config.json").read_text() == "{}"
     assert (folder / "backups" / "old.db").read_bytes() == b"x"
     (folder / "new.db").write_bytes(b"y")  # Files created later inherit the folder's permissions
     assert (folder / "new.db").read_bytes() == b"y"
     assert getpass.getuser()
+    assert acl_sids(folder) == {sid, "S-1-5-18"}
+    assert acl_sids(folder / "config.json") == {sid, "S-1-5-18"}
+
+
+def acl_sids(path):
+    import win32security
+    dacl = win32security.GetNamedSecurityInfo(str(path), win32security.SE_FILE_OBJECT,
+                                              win32security.DACL_SECURITY_INFORMATION).GetSecurityDescriptorDacl()
+    return {win32security.ConvertSidToStringSid(dacl.GetAce(index)[-1]) for index in range(dacl.GetAceCount())}
+
+
+def test_a_folder_someone_else_owns_is_refused(tmp_path, monkeypatch):
+    """A folder a non-administrator made first could hold settings or a certificate they chose: don't adopt it."""
+    from nomad.ipam import service
+    stranger = "S-1-5-21-1111111111-2222222222-3333333333-1001"
+    assert service.owner_problem(tmp_path, owner=stranger, me="S-1-5-21-1-2-3-500")
+    for trusted in (service.ADMINISTRATORS_SID, service.SYSTEM_SID, service.TRUSTED_INSTALLER_SID):
+        assert service.owner_problem(tmp_path, owner=trusted, me="S-1-5-21-1-2-3-500") == ""
+    assert service.owner_problem(tmp_path, owner=stranger, me=stranger) == ""  # Whoever is setting it up now
+
+    folder = tmp_path / "server"
+    folder.mkdir()
+    (folder / "config.json").write_text('{"team_secret": "chosen"}')
+    monkeypatch.setattr(service, "folder_owner", lambda directory: stranger)
+    ran = []
+    monkeypatch.setattr(service, "_run", ran.append)
+    with pytest.raises(service.ServiceError, match="not an administrator"):
+        service.secure_folder(folder)
+    assert ran == []  # Nothing changed, nothing adopted
+
+
+def test_service_folders_and_their_parent_are_locked_down_in_order(tmp_path, monkeypatch):
+    from nomad.ipam import service
+    folder = tmp_path / "NOMAD" / "server"
+    ran = []
+    monkeypatch.setattr(service, "_run", lambda arguments: ran.append(arguments[1:4]))
+    monkeypatch.setattr(service, "_remove_others", lambda directory, grants: ran.append(("remove others", directory)))
+    monkeypatch.setattr(service, "folder_owner", lambda directory: service.ADMINISTRATORS_SID)
+    service.secure_service_folder(folder)
+    assert folder.is_dir()
+    parent = str(folder.parent)
+    assert ran == [[parent, "/setowner", "*S-1-5-32-544"], [parent, "/inheritance:r", "/grant:r"],
+                   ("remove others", folder.parent),
+                   [str(folder), "/setowner", "*S-1-5-32-544"], [str(folder), "/inheritance:r", "/grant:r"],
+                   ("remove others", folder)]
 
 
 def test_waiting_laptops_hear_about_changes_at_once(server, tmp_path):

@@ -4,6 +4,12 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [1.38.1] - 2026-11-03
+
+- **Security:** SCP downloads can no longer be saved outside the folder you chose. A server's file name that Windows can't use as it is (with `\`, `:` or `..` in it, for example) is listed as Failed with the reason, and nothing is saved for it.
+- **Security:** the tribe server's and Map Watcher's folders are locked to administrators from the moment they're made, and **Update Service** takes off anyone else given access. Run **Update Service** on the tribe server to apply it there. Laptops need nothing new.
+- **Security:** the SCP page never runs a file from a server when you edit it. For a program, script or installer, **Edit With > Windows' Default Program** offers Notepad or a program you choose. A file too big for NOMAD's editor asks you to pick an editor if you haven't.
+
 ## [1.38.0] - 2026-11-02
 
 - **New:** right-click a switch or router on the map > **Tools** > **Generate SNMP Config...** (or right-click the map's background) to open the SNMP Config page with the map's credentials. From a device, its Location comes from its Site / Building / Room on the map.

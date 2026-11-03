@@ -31,8 +31,14 @@ START_WAIT_SECONDS = 20
 KILL_WAIT_SECONDS = 10  # After ending a service's process that wouldn't stop, for Windows to see it stopped
 COPY_TRIES = 40  # 250 ms apart: the exe can stay locked a moment after its process ends
 NOT_INSTALLED, STOPPED, STARTING, RUNNING, STOPPING = "Not installed", "Stopped", "Starting", "Running", "Stopping"
+SYSTEM_SID, ADMINISTRATORS_SID, NETWORK_SERVICE_SID, USERS_SID = "S-1-5-18", "S-1-5-32-544", "S-1-5-20", "S-1-5-32-545"
+TRUSTED_INSTALLER_SID = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 # icacls grants by SID, so they work in any Windows language: SYSTEM, Administrators, Network Service
-FOLDER_GRANTS = ["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-20:(OI)(CI)M"]
+FOLDER_GRANTS = [f"*{SYSTEM_SID}:(OI)(CI)F", f"*{ADMINISTRATORS_SID}:(OI)(CI)F", f"*{NETWORK_SERVICE_SID}:(OI)(CI)M"]
+# %ProgramData%\NOMAD: everyone may see the server's and watcher's folders are there (this folder alone), but nobody
+# else may make anything in it, so no one can set a folder up there before NOMAD does
+PARENT_GRANTS = [f"*{SYSTEM_SID}:(OI)(CI)F", f"*{ADMINISTRATORS_SID}:(OI)(CI)F", f"*{USERS_SID}:RX"]
+TRUSTED_OWNERS = {SYSTEM_SID, ADMINISTRATORS_SID, TRUSTED_INSTALLER_SID}
 
 
 class ServiceError(Exception):
@@ -173,16 +179,95 @@ def shared_exe_specs():
     return [IPAM, watcher_spec()]
 
 
-def secure_folder(directory, grants=FOLDER_GRANTS):
+def secure_folder(directory, grants=FOLDER_GRANTS, owner=ADMINISTRATORS_SID):
     """Only Administrators, SYSTEM and the service may read the server's folder (it holds the secrets).
 
     The permissions are set on the folder alone, then everything in it is reset to inherit them (so files the
     server creates later get them too). Setting them on the files directly doesn't work: icacls gives a file no
-    permissions at all when handed the folder-only (OI)(CI) flags.
+    permissions at all when handed the folder-only (OI)(CI) flags. Anyone else given access by hand is taken off.
+
+    A folder owned by someone who isn't an administrator is refused (ServiceError): they could have put settings or
+    a certificate there before NOMAD did, to know the tribe's secrets. Otherwise the folder and everything in it is
+    then owned by `owner` (the Administrators group; None leaves owners as they are), so no one else can give
+    themselves access later.
     """
+    problem = owner_problem(directory)
+    if problem:
+        raise ServiceError(problem)
+    if owner:
+        _run(["icacls", str(directory), "/setowner", f"*{owner}", "/T", "/C", "/Q"])
     _run(["icacls", str(directory), "/inheritance:r", "/grant:r", *grants, "/C", "/Q"])
+    _remove_others(directory, grants)
     if any(Path(directory).iterdir()):
         _run(["icacls", str(Path(directory) / "*"), "/reset", "/T", "/C", "/Q"])
+
+
+def secure_service_folder(directory):
+    """Lock down a NOMAD service's folder in %ProgramData%\\NOMAD, and that folder too, before anything secret goes
+    in it."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    parent = directory.parent
+    _run(["icacls", str(parent), "/setowner", f"*{ADMINISTRATORS_SID}", "/C", "/Q"])
+    _run(["icacls", str(parent), "/inheritance:r", "/grant:r", *PARENT_GRANTS, "/C", "/Q"])
+    _remove_others(parent, PARENT_GRANTS)
+    secure_folder(directory)
+
+
+def _granted_sids(grants):
+    return {grant[1:].partition(":")[0] for grant in grants}
+
+
+def _remove_others(directory, grants):
+    """Take every account not in grants off a folder's permissions (the folder alone; its contents inherit)."""
+    import win32security
+    descriptor = win32security.GetNamedSecurityInfo(str(directory), win32security.SE_FILE_OBJECT,
+                                                    win32security.DACL_SECURITY_INFORMATION)
+    dacl = descriptor.GetSecurityDescriptorDacl()
+    found = {win32security.ConvertSidToStringSid(dacl.GetAce(index)[-1]) for index in range(dacl.GetAceCount())} \
+        if dacl is not None else set()
+    for sid in sorted(found - _granted_sids(grants)):
+        _run(["icacls", str(directory), "/remove", f"*{sid}", "/C", "/Q"])
+
+
+def _sid_text(sid):
+    import win32security
+    return win32security.ConvertSidToStringSid(sid)
+
+
+def _account_name(sid):
+    import win32security
+    try:
+        name, domain, _ = win32security.LookupAccountSid(None, win32security.ConvertStringSidToSid(sid))
+        return f"{domain}\\{name}" if domain else name
+    except win32security.error:
+        return sid
+
+
+def _current_user_sid():
+    import win32api
+    import win32security
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32security.TOKEN_QUERY)
+    return _sid_text(win32security.GetTokenInformation(token, win32security.TokenUser)[0])
+
+
+def folder_owner(directory):
+    import win32security
+    descriptor = win32security.GetNamedSecurityInfo(str(directory), win32security.SE_FILE_OBJECT,
+                                                    win32security.OWNER_SECURITY_INFORMATION)
+    return _sid_text(descriptor.GetSecurityDescriptorOwner())
+
+
+def owner_problem(directory, owner=None, me=None):
+    """Why a service's folder can't be trusted with secrets, or "": it's owned by someone other than SYSTEM, the
+    Administrators group, Windows itself, or whoever is setting it up now (an administrator, to be doing it)."""
+    owner = owner or folder_owner(directory)
+    if owner in TRUSTED_OWNERS or owner == (me or _current_user_sid()):
+        return ""
+    return (f"{directory} belongs to {_account_name(owner)}, not an administrator, so they may have put settings "
+            "or a certificate in it before NOMAD did, to know the tribe's secrets. If you know why it's theirs, "
+            "take ownership of it (Properties > Security > Advanced > Owner) and try again. Otherwise rename it "
+            "and try again, to start afresh.")
 
 
 def open_firewall(port, rule=FIREWALL_RULE, protocol="TCP"):
@@ -244,8 +329,7 @@ def register(spec):
 def install(port=None):
     """Install (or update) and start the service. Returns the server's config."""
     directory = server_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    secure_folder(directory)  # First, so it also repairs a folder whose files can't be read
+    secure_service_folder(directory)  # First, so it also repairs a folder whose files can't be read
     config = set_up(directory, port or 8443)
     if port and config["port"] != port:
         from .server import save_config

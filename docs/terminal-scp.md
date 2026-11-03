@@ -134,6 +134,8 @@ A WinSCP-style file manager using the same saved sessions.
 - **Work as Root** (sudo) browses, copies and edits as root.
 - **Transfers** queue with progress, can be paused and resumed, and can be checked with SHA-256.
 - **Synchronize** compares a local and a remote folder and copies the differences.
+- **Edit With** opens a remote file in a program on your computer. NOMAD uploads it again each time you save it there. **Windows' Default Program** uses the program Windows edits that kind of file with. It's never used for a file Windows would run instead of open (a program, script, installer or shortcut): NOMAD offers Notepad or a program you choose instead. A file too big for the built-in editor opens in the program you chose with **Choose Program...**, and NOMAD asks you to choose one first if you haven't.
+- A file whose name Windows can't use (with `\` or `:` in it, for example) isn't copied to your computer. It shows as **Failed** in the queue, with the reason.
 
 ## RDP
 

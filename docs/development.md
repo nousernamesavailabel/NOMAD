@@ -53,7 +53,7 @@ Upload `dist\NOMAD-<version>.exe` to a new GitHub release, so the README's quick
 
 ## Services in a console
 
-To try out or troubleshoot a service, stop it and run it in a console:
+To try out or troubleshoot a service, stop it and run it in a console opened as administrator:
 
 ```powershell
 NOMAD.exe --ipam-server

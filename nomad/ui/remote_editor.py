@@ -1,6 +1,7 @@
 """Editing files on the server: a built-in text editor (saving uploads straight back), or any program on this
 computer (NOMAD watches the downloaded copy and uploads it each time it's saved)."""
 import codecs
+import ctypes
 import logging
 import os
 import shutil
@@ -21,6 +22,14 @@ log = logging.getLogger(__name__)
 
 EDITOR_LIMIT = 10 * 1024 * 1024  # Bigger files are better in an external editor
 EDIT_FOLDER = os.path.join(tempfile.gettempdir(), "NOMAD edits")
+# Types that run something when opened, never opened with Windows' default program: Windows' own list
+# (AssocIsDangerous) has most of these, but not all on every version
+RUNS_WHEN_OPENED = {
+    ".exe", ".com", ".scr", ".pif", ".cpl", ".msi", ".msp", ".mst", ".msc", ".bat", ".cmd", ".ps1", ".psm1", ".psd1",
+    ".ps1xml", ".psc1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".wsc", ".hta", ".jar", ".reg", ".inf", ".lnk",
+    ".url", ".scf", ".chm", ".hlp", ".application", ".appref-ms", ".appx", ".appxbundle", ".msix", ".msixbundle",
+    ".settingcontent-ms", ".library-ms", ".search-ms", ".searchconnector-ms", ".diagcab", ".gadget", ".iso", ".img",
+    ".vhd", ".vhdx", ".xbap", ".website", ".ins", ".isp", ".crt", ".cer", ".der", ".pfx", ".p12", ".sct", ".shb"}
 
 
 def decode(data):
@@ -362,13 +371,42 @@ def clean_old_edits(max_age=2 * 86400, now=None):
     return removed
 
 
+def runs_when_opened(path):
+    """Whether opening a file with Windows' default program would run something (a program, script, installer,
+    shortcut, disk image...) rather than show it: Windows' own list of dangerous types, and NOMAD's."""
+    extension = os.path.splitext(path)[1].lower()
+    if not extension:
+        return False  # Windows asks which program to use
+    if extension in RUNS_WHEN_OPENED:
+        return True
+    try:
+        is_dangerous = ctypes.windll.shlwapi.AssocIsDangerous
+    except (AttributeError, OSError):  # Not Windows
+        return False
+    is_dangerous.argtypes, is_dangerous.restype = [ctypes.c_wchar_p], ctypes.c_bool
+    return bool(is_dangerous(extension))
+
+
+def notepad():
+    return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "notepad.exe")
+
+
 def open_in_program(path, program=""):
-    """Open a file in a program (or Windows' choice for its type). Returns an error message, or ""."""
+    """Open a file in a program. With none, a folder opens in Explorer, and a file in the program Windows edits its
+    type with (else the one it opens it with), but never one that would run it. Returns an error message, or ""."""
     try:
         if program:
             subprocess.Popen([program, path], close_fds=True)
-        else:
+        elif os.path.isdir(path):
             os.startfile(path)
+        elif runs_when_opened(path):
+            return f"{os.path.basename(path)} wasn't opened: Windows would run it rather than show it. Use Edit " \
+                   "With > Choose Program... to open it in an editor."
+        else:
+            try:
+                os.startfile(path, "edit")  # Scripts and the like open in Notepad, not run
+            except OSError:  # No edit verb for this type (on many PCs, not even .txt)
+                os.startfile(path)
     except OSError as error:
         return f"Couldn't open {os.path.basename(path)}{' in ' + os.path.basename(program) if program else ''}: " \
                f"{error.strerror or error}"

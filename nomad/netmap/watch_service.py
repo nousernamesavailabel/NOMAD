@@ -418,8 +418,7 @@ def install(config):
     """Install (or update) and start the service with this config (needs administrator rights)."""
     from ..ipam import service
     directory = watcher_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    service.secure_folder(directory)
+    service.secure_service_folder(directory)
     save_config(config, directory)
     service.register(spec())
     for rule, port in FIREWALL_RULES.items():

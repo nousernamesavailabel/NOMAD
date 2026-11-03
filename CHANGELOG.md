@@ -6,6 +6,14 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [1.38.1] - 2026-11-03
+
+### Security
+
+- **SCP downloads stay in the folder you chose:** a server's file or folder name that Windows would read differently (one with `\`, `:`, a drive letter, `..`, a control character, a trailing space or dot, or a device name such as CON or NUL) could be saved outside the download folder, or over another file. Such names are allowed on Linux, and a hostile server could use them on purpose, for example to put a file in the Startup folder. Downloads, folder downloads, Synchronize and Edit now refuse them: each one shows in the queue as **Failed** with the reason, saves nothing, and still saves nothing if retried. The rest of the folder is copied as usual.
+- **Tribe server and Map Watcher folders locked down from the start:** the folders in `%ProgramData%\NOMAD` that hold the tribe's secrets are now locked before anything goes in them, including when a server is set up from a move file or run with `--ipam-server`. Before, they could briefly be readable by everyone on the computer, or stay that way if `--ipam-server` made them. `%ProgramData%\NOMAD` and everything in the two folders now belong to the Administrators group. Other users can no longer create anything in `%ProgramData%\NOMAD`, so nobody can set up a folder there first to learn the secrets. Install Service, Update Service and the Map Watcher's install also take off anyone else given access by hand. They refuse a folder owned by someone who isn't an administrator, and say how to check it. `--ipam-server` now needs a console opened as administrator. Nothing changes for laptops: the tribe key, certificate and port stay the same.
+- **SCP: a remote file is never run to edit it:** **Edit With > Windows' Default Program** handed the downloaded copy to whatever Windows does when a file is opened, which for a program, script, installer, shortcut or disk image is to run it. It now opens the file in the program Windows edits that type with (Notepad for scripts), or the one that opens it when there's no editing program. For a type Windows would run (its own list of dangerous types, plus NOMAD's), it offers **Notepad** or **Choose Program...** instead. A file too big for the built-in editor used to go to Windows' default program too when no editor had been chosen, one Enter away. It now opens in your chosen editor, or asks you to choose one first.
+
 ## [1.38.0] - 2026-11-02
 
 ### Added
