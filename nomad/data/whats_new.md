@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-04
+
+- **New:** pop any tool out to a window of its own, such as the Network Map on a second screen. Click the button at the right of the tool's title, press **Ctrl+Shift+Enter**, or right-click the tool in the rail or drawer. Whatever it's doing carries on. Close its window to put it back. Terminal, SCP and RDP pop out their sessions instead, as before.
+
 ## [1.38.1] - 2026-11-03
 
 - **Security:** SCP downloads can no longer be saved outside the folder you chose. A server's file name that Windows can't use as it is (with `\`, `:` or `..` in it, for example) is listed as Failed with the reason, and nothing is saved for it.

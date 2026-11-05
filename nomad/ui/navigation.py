@@ -296,6 +296,8 @@ class SidebarNavigator(QWidget):
 
 class Navigator(SidebarNavigator):
     """Compact favorites rail and a searchable drawer over the current page."""
+    popOutRequested = pyqtSignal(object)  # A page to open in a window of its own
+    bringBackRequested = pyqtSignal(object)  # A popped-out page to put back in the main window
 
     def __init__(self, parent=None):
         from PyQt5.QtWidgets import QApplication, QCheckBox, QLabel, QLineEdit
@@ -308,14 +310,28 @@ class Navigator(SidebarNavigator):
         self.sections = {}
         self.section = ""
         self.collapsed_sections = set()
+        self.popped = {}  # Page -> the window it's popped out into, out of the page stack meanwhile
+        self.fixed_pages = set()  # Pages that can't be popped out (Terminal, SCP and RDP pop out their sessions)
         self.layout().removeWidget(self.panel)
         self.layout().removeWidget(self.stack)
         self.content = QWidget(self)
         content_layout = QVBoxLayout(self.content)
         content_layout.setContentsMargins(0, 0, 0, 0)
+        self.title_bar = QWidget()
+        title_layout = QHBoxLayout(self.title_bar)
+        title_layout.setContentsMargins(0, 0, 6, 0)
         self.page_title = QLabel()
         self.page_title.setContentsMargins(12, 6, 12, 6)
-        content_layout.addWidget(self.page_title)
+        title_layout.addWidget(self.page_title, 1)
+        self.pop_button = QToolButton()
+        self.pop_button.setIcon(tool_icon("pop out"))
+        self.pop_button.setIconSize(QSize(18, 18))
+        self.pop_button.setAutoRaise(True)
+        self.pop_button.setToolTip("Pop this tool out to a window of its own (Ctrl+Shift+Enter)")
+        self.pop_button.setAccessibleName("Pop out to a window")
+        self.pop_button.clicked.connect(self.pop_out_current)
+        title_layout.addWidget(self.pop_button)
+        content_layout.addWidget(self.title_bar)
         content_layout.addWidget(self.stack, 1)
         self.layout().addWidget(self.content, 1)
         self.panel.setParent(self.content)
@@ -438,7 +454,7 @@ class Navigator(SidebarNavigator):
             return super().apply_navigation()
         self.rail.setVisible(not self.navigation_hidden)
         self.panel.setVisible((self.drawer_open or self.sidebar_visible()) and not self.navigation_hidden)
-        self.page_title.setVisible(not self.navigation_hidden)
+        self.title_bar.setVisible(not self.navigation_hidden)
         self.content.layout().setContentsMargins(360 if self.sidebar_visible() and not self.navigation_hidden else 0, 0, 0, 0)
         self.position_drawer()
 
@@ -572,8 +588,9 @@ class Navigator(SidebarNavigator):
         item.setData(Qt.UserRole, title)
         item.setData(RAIL_PINNED_ROLE, pinned)
         item.setData(Qt.AccessibleTextRole, title)
-        item.setToolTip(title + (" — drag to reorder; right-click to unpin" if pinned else
-                                 " — recently used; drag up or right-click to pin"))
+        item.setToolTip(title + (" — open in its own window" if self.popped_title(title) else "") +
+                        (" — drag to reorder; right-click to unpin" if pinned else
+                         " — recently used; drag up or right-click to pin"))
         item.setTextAlignment(Qt.AlignCenter)
         item.setSizeHint(QSize(48, max(44, self.fontMetrics().height() + 16)))
         if not pinned:
@@ -612,6 +629,7 @@ class Navigator(SidebarNavigator):
         menu = QMenu(self)
         menu.addAction("Unpin from Favorites" if title in self.favorites else "Pin to Favorites",
                        lambda: self.toggle_favorite(title))
+        self.add_window_action(menu, item.data(PAGE_ROLE))
         menu.exec_(listing.mapToGlobal(pos))
 
     def rail_menu(self, pos):
@@ -623,6 +641,8 @@ class Navigator(SidebarNavigator):
         elif title is not None:
             menu.addAction("Pin " + title + " to Favorites", lambda: self.toggle_favorite(title))
             menu.addAction("Remove from Recent", lambda: self.forget_recent(title))
+        if title is not None:
+            self.add_window_action(menu, self.page_titled(title))
         if not menu.isEmpty():
             menu.addSeparator()
         shown = menu.addAction("Show Recent Tools Here", self.toggle_recent_on_rail)
@@ -638,6 +658,71 @@ class Navigator(SidebarNavigator):
     def toggle_recent_on_rail(self):
         self.recent_on_rail = not self.recent_on_rail
         self.rebuild_rail()
+
+    # ----------------------------------------------------------------- Tools popped out to windows of their own
+
+    def page_titled(self, title):
+        return next((self.sidebar.item(row).data(PAGE_ROLE) for row in self.page_rows()
+                     if self.sidebar.item(row).text() == title), None)
+
+    def popped_title(self, title):
+        page = self.page_titled(title)
+        return page is not None and page in self.popped
+
+    def can_pop_out(self, widget):
+        return widget is not None and widget not in self.fixed_pages and self._row_of(widget) is not None
+
+    def add_window_action(self, menu, widget):
+        """Pop Out to a Window, or Bring Back to the Main Window, on a tool's right-click menu."""
+        if widget in self.popped:
+            menu.addAction("Bring Back to the Main Window", lambda: self.bringBackRequested.emit(widget))
+        elif self.can_pop_out(widget):
+            menu.addAction("Pop Out to a Window", lambda: self.popOutRequested.emit(widget))
+
+    def pop_out_current(self):
+        if self.can_pop_out(self.currentWidget()):
+            self.popOutRequested.emit(self.currentWidget())
+
+    def detach(self, widget, window):
+        """Take a page out of the stack, as it's shown in window now. The page shown before it takes its place if it
+        was showing."""
+        self.popped[widget] = window
+        if self.stack.currentWidget() is widget:
+            others = [self.page_titled(title) for title in self.recent] + \
+                     [self.sidebar.item(row).data(PAGE_ROLE) for row in self.page_rows()]
+            other = next((page for page in others if page is not None and page is not widget
+                          and page not in self.popped), None)
+            if other is not None:
+                self.setCurrentWidget(other)
+        self.stack.removeWidget(widget)
+        self.rebuild_rail()
+
+    def attach(self, widget):
+        """Put a popped-out page back in the stack, in its place among the others."""
+        if self.popped.pop(widget, None) is None:
+            return
+        row = self._row_of(widget)
+        index = sum(1 for other in self.page_rows() if other < row
+                    and self.sidebar.item(other).data(PAGE_ROLE) not in self.popped)
+        self.stack.insertWidget(index, widget)
+        self.rebuild_rail()
+
+    def setCurrentWidget(self, widget):
+        """A popped-out page: its window is brought to the front instead (for the pages' Ping, ACLs... links)."""
+        window = self.popped.get(widget)
+        if window is not None:
+            window.show_window()
+        else:
+            super().setCurrentWidget(widget)
+
+    def step(self, direction):
+        """Ctrl+Tab: through the pages in this window."""
+        rows = [row for row in self.page_rows() if self.sidebar.item(row).data(PAGE_ROLE) not in self.popped]
+        if not rows:
+            return
+        current = self.sidebar.currentRow()
+        position = rows.index(current) if current in rows else 0
+        self.sidebar.setCurrentRow(rows[(position + direction) % len(rows)])
 
     def restore_settings(self, settings):
         favorites = settings.value("navigation/favorites", self.favorites)
@@ -659,9 +744,19 @@ class Navigator(SidebarNavigator):
         settings.setValue("navigation/keep_open", self.sidebar_visible())
 
     def _on_row_changed(self, row):
+        item = self.sidebar.item(row)
+        widget = item.data(PAGE_ROLE) if item is not None else None
+        if widget is not None and widget in self.popped:  # Its window instead, the row back on the page showing
+            showing = self._row_of(self.stack.currentWidget())
+            self.sidebar.blockSignals(True)
+            self.sidebar.setCurrentRow(showing if showing is not None else -1)
+            self.sidebar.blockSignals(False)
+            self.popped[widget].show_window()
+            return
         super()._on_row_changed(row)
         if hasattr(self, "page_title"):
             title = self.title(self.currentWidget())
             self.page_title.setText(title)
+            self.pop_button.setVisible(self.can_pop_out(self.currentWidget()))
             self.recent = [title] + [name for name in self.recent if name != title][:4]
             self.rebuild_rail()

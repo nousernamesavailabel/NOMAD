@@ -11,10 +11,10 @@ SHORTCUT_SECTIONS = [
     ("Everyday actions", [
         ("Shift+Enter", "Start the current tool", "Diagnostics, discovery and Packet Capture"),
         ("Shift+Esc", "Stop the current tool; capture stops and saves", "Diagnostics, discovery and capture tools with a Stop button"),
-        ("Alt+A", "Focus the adapter picker (arrows select)", "Main window; leaves focus mode if needed"),
+        ("Alt+A", "Focus the adapter picker (arrows select)", "Main window and popped-out tools; leaves focus mode if needed"),
         ("Ctrl+F", "Focus the page's main input, search or filter", "See Find targets below"),
-        ("F1", "Open this keyboard guide", "Main window and popped-out Terminal/SCP windows"),
-        ("F5", "Refresh network settings", "Main window; SCP file lists use F5 to copy"),
+        ("F1", "Open this keyboard guide", "Main window and popped-out windows"),
+        ("F5", "Refresh network settings", "Main window and popped-out tools; SCP file lists use F5 to copy"),
         ("Ctrl+R", "Run a diagnostics report", "Main window; SCP file lists use Ctrl+R to refresh"),
     ]),
     ("Navigation and view", [
@@ -23,7 +23,8 @@ SHORTCUT_SECTIONS = [
         ("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous tool", "Main window; Ctrl+Tab in a pop-out cycles sessions"),
         ("Ctrl+PageDown / Ctrl+PageUp", "Next / previous tool", "Main window, outside terminal text"),
         ("F11", "Toggle focus mode", "Main window; toggles full screen in a pop-out"),
-        ("Ctrl+= / Ctrl+- / Ctrl+0", "Larger / smaller / default text size", "Main window, outside terminal text"),
+        ("Ctrl+Shift+Enter", "Pop the current tool out to a window of its own; put a popped-out tool back", "Main window and popped-out tools; on Terminal and SCP it pops out the session"),
+        ("Ctrl+= / Ctrl+- / Ctrl+0", "Larger / smaller / default text size", "Main window and popped-out tools, outside terminal text"),
         ("Tab / Shift+Tab", "Next / previous input or control", "Forms; plain Tab in terminal text goes to the remote host"),
     ]),
     ("Saved sessions and terminal windows", [

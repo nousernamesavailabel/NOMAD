@@ -36,6 +36,18 @@ What each page in NOMAD does, and how to get around them. The bigger pages have 
 
 The drawer closes when you choose a tool, click outside it or press Escape. To keep it open, choose **Keep drawer open**, **View** > **Keep Tool Drawer Open**, or press **Ctrl+B**. The preference is saved.
 
+### Pop a tool out to its own window
+
+Any tool except Terminal, SCP and RDP can move to a window of its own, for example to keep the Network Map on a second screen while you work in the main window. Terminal and SCP pop out single sessions instead (right-click the session's tab).
+
+1. Open the tool, then click the pop-out button at the right end of its title, or press **Ctrl+Shift+Enter**. You can also right-click the tool in the rail or the drawer and choose **Pop Out to a Window**.
+2. The tool moves to its own window, and the main window goes back to the tool you used before it. Anything the tool was doing, such as a ping or a crawl, carries on.
+3. To put it back, close its window, click **Back to Main Window**, or press **Ctrl+Shift+Enter** in it.
+
+A popped-out tool works the same as it does in the main window. Its window has the adapter picker, which is the same choice as the main window's, and a status bar for its messages. F5, Ctrl+F, Shift+Enter, Shift+Esc, Alt+A, F1 and the text size keys work there too, and F11 makes the window full screen. Links from other tools, such as **Ping** on a right-click menu, bring the tool's window to the front. Choosing the tool in the rail or the drawer does the same. Questions and dialogs the tool asks open over its own window.
+
+Tools that are popped out when you close NOMAD open in their own windows again, in the same places, the next time it starts.
+
 ### Adapter and view
 
 - Pick an **adapter** at the top of the window. Interfaces, MTU, Ping, Sweep, DHCP Servers and other pages work with it.

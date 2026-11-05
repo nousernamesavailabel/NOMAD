@@ -126,7 +126,7 @@ class ConnectionsTab(QWidget):
     # ----------------------------------------------------------------- Loading
 
     def update_timer(self):
-        if self.auto_check.isChecked() and self.window.navigator.currentWidget() is self:
+        if self.auto_check.isChecked() and self.window.is_page_showing(self):
             if not self.timer.isActive():
                 self.timer.start(AUTO_REFRESH_MILLISECONDS)
         else:

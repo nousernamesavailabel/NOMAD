@@ -57,6 +57,7 @@ from .theme import COLORS, DEFAULT_TEXT_SCALE, TEXT_SCALES, closest_text_scale, 
 from .traceroute_tab import TracerouteTab
 from .tribe_version import TribeUpdateBanner
 from .terminal_tab import TerminalTab
+from .tool_window import OPEN_SETTING, DialogsFollowTools, ToolWindow, show_status_on
 from .rdp_tab import RdpTab
 from .terminal_transfer import export_securecrt, export_terminal, import_terminal
 from .vlan_tab import VlanTab
@@ -112,8 +113,11 @@ class MainWindow(QMainWindow):
         self.init_ui()
         self.startup_step("Restoring your settings...", 0.94)
         self.ip_context_menus = IpContextMenus(self)
+        self.dialogs_follow_tools = DialogsFollowTools(self)  # Over a popped-out tool's window, while it's in use
+        QApplication.instance().installEventFilter(self.dialogs_follow_tools)
         self.init_menus()
         self.restore_settings()
+        QTimer.singleShot(0, self.restore_tool_windows)  # Once the main window is up
         # Windows logging off or restarting (for updates, say) with NOMAD open: it may never get to close the window
         QApplication.instance().commitDataRequest.connect(lambda manager: self.save_settings())
         log.info("%s started (administrator: %s)", APP_NAME, self.admin)
@@ -242,12 +246,15 @@ class MainWindow(QMainWindow):
             ("Utilities", [(self.subnet_tab, "Subnet Calculator")]),
         ]
         self.all_tabs = []
+        self.navigator.fixed_pages = {self.terminal_tab, self.scp_tab, self.rdp_tab}  # Their sessions pop out
         for section, pages in sections:
             self.navigator.add_section(section)
             for page, title in pages:
                 self.navigator.add_page(page, title)
                 self.all_tabs.append(page)
         self.navigator.currentChanged.connect(self.on_tab_changed)
+        self.navigator.popOutRequested.connect(self.pop_out_tool)
+        self.navigator.bringBackRequested.connect(self.bring_back_tool)
         layout.addWidget(self.navigator, 1)
         self.setCentralWidget(central)
 
@@ -311,6 +318,14 @@ class MainWindow(QMainWindow):
         self.focus_action.triggered.connect(self.set_focus_mode)
         view_menu.addAction(self.focus_action)
         self.addAction(self.focus_action)
+        self.pop_out_action = QAction("&Pop Out This Tool", self)
+        self.pop_out_action.setShortcuts(["Ctrl+Shift+Return", "Ctrl+Shift+Enter"])
+        self.pop_out_action.setToolTip("Move the tool showing to a window of its own (the Terminal and SCP pop out "
+                                       "their sessions instead)")
+        self.pop_out_action.triggered.connect(self.pop_out_current_tool)
+        view_menu.addAction(self.pop_out_action)
+        self.addAction(self.pop_out_action)
+        self.update_pop_out_action()
         # Also beside the Terminal page's tabs; here too so it can always be reached
         layout_menu = view_menu.addMenu("Terminal &Layout")
         layout_group = QActionGroup(self)
@@ -444,6 +459,9 @@ class MainWindow(QMainWindow):
     def save_settings(self):
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.navigator.save_settings(self.settings)
+        self.settings.setValue(OPEN_SETTING, [window.title for window in self.navigator.popped.values()])
+        for window in self.navigator.popped.values():
+            window.save_geometry()
         adapter = self.current_adapter()
         if adapter is not None:
             self.settings.setValue("window/adapter", adapter.name)
@@ -457,6 +475,9 @@ class MainWindow(QMainWindow):
             return
         self.save_settings()
         self.tribe_banner.stop()
+        for window in list(self.navigator.popped.values()):  # Their pages back first, to shut down with the rest
+            window.closing_app = True
+            window.close()
         for tab in self.all_tabs:
             tab.shutdown()
         super().closeEvent(event)
@@ -516,6 +537,56 @@ class MainWindow(QMainWindow):
     def set_terminal_layout(self, key):
         self.terminal_tab.tabs.set_layout(key)
         self.navigator.setCurrentWidget(self.terminal_tab)
+
+    # ----------------------------------------------------------------- Tools popped out to windows of their own
+
+    def pop_out_tool(self, page):
+        """Move a tool's page to a window of its own (or bring its window forward if it's popped out already)."""
+        if page in self.navigator.popped:
+            self.navigator.popped[page].show_window()
+            return
+        if not self.navigator.can_pop_out(page):
+            return
+        window = ToolWindow(self, page, self.navigator.title(page))
+        self.navigator.detach(page, window)
+        window.open()
+        log.info("Popped out %s", window.title)
+
+    def pop_out_current_tool(self):
+        self.pop_out_tool(self.navigator.currentWidget())
+
+    def bring_back_tool(self, page):
+        window = self.navigator.popped.get(page)
+        if window is not None:
+            window.close()  # tool_window_closed puts the page back
+
+    def tool_window_closed(self, window):
+        """A tool's window is closing: its page goes back in the main window, shown there unless NOMAD is closing."""
+        self.navigator.attach(window.page)
+        if not window.closing_app:
+            self.navigator.setCurrentWidget(window.page)
+            self.bring_to_front()
+        log.info("Brought %s back to the main window", window.title)
+
+    def restore_tool_windows(self):
+        """Pop out again the tools that were popped out when NOMAD last closed."""
+        titles = self.settings.value(OPEN_SETTING, [])
+        if isinstance(titles, str):
+            titles = [titles]
+        for title in titles or []:
+            page = self.navigator.page_titled(title)
+            if page is not None:
+                self.pop_out_tool(page)
+        if titles:
+            self.activateWindow()
+
+    def update_pop_out_action(self):
+        """Ctrl+Shift+Enter pops out the tool showing; on the Terminal and SCP pages it's theirs, for a session."""
+        self.pop_out_action.setEnabled(self.navigator.can_pop_out(self.navigator.currentWidget()))
+
+    def is_page_showing(self, page):
+        """Whether a page is on screen: the main window's current page, or popped out to a window of its own."""
+        return page is self.navigator.currentWidget() or page in self.navigator.popped
 
     def on_sidebar_toggled(self, visible):
         self.sidebar_action.setChecked(visible)
@@ -599,8 +670,13 @@ class MainWindow(QMainWindow):
         return self.snapshot.adapters.get(self.adapter_combo.currentData())
 
     def on_tab_changed(self, index):
-        """Refresh data that may have changed outside the app when switching to a page that shows it."""
-        widget = self.navigator.widget(index)
+        self.page_shown(self.navigator.widget(index))
+        if hasattr(self, "pop_out_action"):  # Not while the pages are first added
+            self.update_pop_out_action()
+
+    def page_shown(self, widget):
+        """Refresh data that may have changed outside the app when switching to a page that shows it (in the main
+        window, or its own)."""
         if widget in (self.adapter_tab, self.routing_tab):
             if time.monotonic() - self.last_refresh > AUTO_REFRESH_AFTER_SECONDS:
                 self.refresh()
@@ -751,9 +827,11 @@ class MainWindow(QMainWindow):
         self.refresh_button.setEnabled(not self.refreshing)
 
     def show_status(self, message, kind="success", timeout=10000):
-        colors = {"success": COLORS["success"], "error": COLORS["error"], "warning": COLORS["warning"], "info": ""}
-        self.statusBar().setStyleSheet(f"QStatusBar {{ color: {colors.get(kind, '')}; }}")
-        self.statusBar().showMessage(message, timeout)
+        """A message on the status bar, and on a popped-out tool's when that window is the one in use."""
+        show_status_on(self.statusBar(), message, kind, timeout)
+        for window in self.navigator.popped.values():
+            if window.isActiveWindow():
+                window.show_status(message, kind, timeout)
         log.info("Status: %s", message)
 
     # ----------------------------------------------------------------- Menu actions

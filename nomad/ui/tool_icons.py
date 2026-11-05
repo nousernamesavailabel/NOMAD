@@ -98,6 +98,7 @@ CONTROL_ART = {
              '<rect x="3" y="15" width="6" height="6" rx="1"/>'
              '<rect x="15" y="15" width="6" height="6" rx="1"/>',
     "close": '<path d="m6 6 12 12M6 18 18 6"/>',
+    "pop out": '<path d="M14 3h7v7 M21 3l-9 9 M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/>',
 }
 FALLBACK_ART = '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 12h8m-4-4v8"/>'
 

@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-04
+
+### Added
+
+- **Pop any tool out to a window of its own:** click the pop-out button at the right of a tool's title, press **Ctrl+Shift+Enter**, or right-click the tool in the rail or drawer > **Pop Out to a Window**. This works for every tool except Terminal, SCP and RDP, whose sessions pop out on their own. The page itself moves, so a running ping, capture, crawl or watch carries on. The main window goes back to the tool used before it. The tool's window has the adapter picker (the same choice as the main window's), Refresh, **Back to Main Window** and a status bar for its messages. F5, Ctrl+F, Shift+Enter / Shift+Esc, Alt+A, F1, the text size keys and Ctrl+Shift+Enter (to put it back) work there, and F11 makes it full screen. Links from other tools (Ping, ACLs, VPNs, Mirror Ports...) and choosing the tool in the rail or drawer bring its window forward. Ctrl+Tab in the main window skips it. Dialogs a tool opens over the main window open over its own window while that's the one in use. Connections keeps refreshing while it's popped out. Closing the window puts the tool back. Tools popped out when NOMAD closes open in their own windows again, where they were, next time.
+
 ## [1.38.1] - 2026-11-03
 
 ### Security
