@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-11-06
+
+- **Fixed:** VPNs, ACLs & Route Maps and Port Mirroring now use a password saved in a router's session after you first clicked Read, instead of saying there's no password until NOMAD is restarted. Changing **Log in with** or the enable password there now takes effect straight away too.
+
 ## [2.0.0] - 2026-11-04
 
 - **New:** pop any tool out to a window of its own, such as the Network Map on a second screen. Click the button at the right of the tool's title, press **Ctrl+Shift+Enter**, or right-click the tool in the rail or drawer. Whatever it's doing carries on. Close its window to put it back. Terminal, SCP and RDP pop out their sessions instead, as before.

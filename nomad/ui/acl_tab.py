@@ -291,6 +291,7 @@ class AclTab(QWidget):
         row.addWidget(self.add_button)
         layout.addLayout(row)
         self.login_row = LoginRow(self, self.sessions, "The ACLs page", stacked=True)
+        self.login_row.changed.connect(self.on_login_changed)
         layout.addWidget(self.login_row)
         return box
 
@@ -964,6 +965,9 @@ class AclTab(QWidget):
         return dict(hints, address=target.address)
 
     # ----------------------------------------------------------------- Reading
+
+    def on_login_changed(self):
+        self.saved_logins = None  # Asked again with the new choice
 
     def logins(self):
         return self.login_row.logins(self.status_label)

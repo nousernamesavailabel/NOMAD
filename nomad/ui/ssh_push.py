@@ -66,6 +66,25 @@ class PushThread(StoppableThread):
             pusher.close()
 
 
+def saved_ssh_sessions(store):
+    """The saved SSH sessions as they are now, with their credentials filled in (copies)."""
+    return [store.credentials.apply(session.copy()) for session in store.sessions if session.protocol == SSH]
+
+
+class SavedLogins(macssh.SshLogins):
+    """SshLogins that look up the saved SSH sessions (and the chosen credential) at each login, not as they were when
+    the page first asked: pages keep their logins until NOMAD closes, so a password saved since is used."""
+
+    def __init__(self, store, fallback=None, password=None, fallback_label=""):
+        super().__init__(saved_ssh_sessions(store), fallback, password, fallback_label)
+        self.store = store
+
+    def login_for(self, address, names=()):
+        fallback = self.store.credentials.apply(self.fallback.copy()) if self.fallback is not None else None
+        return macssh.SshLogins(saved_ssh_sessions(self.store), fallback, self.password,
+                                self.fallback_label).login_for(address, names)
+
+
 class LoginRow(QWidget):
     """How NOMAD logs in to devices without a saved SSH session, and their enable password. stacked lays it out as a
     form (for a narrow column) instead of one row."""
@@ -122,7 +141,7 @@ class LoginRow(QWidget):
                 set_hint(status_label, "Saved sessions aren't available, so NOMAD can't log in to the devices.",
                          "error")
             return None
-        sessions = [store.credentials.apply(session.copy()) for session in store.sessions if session.protocol == SSH]
+        sessions = saved_ssh_sessions(store)
         credential = self.picker.credential() if self.picker is not None else None
         password = None
         if credential is None:
@@ -143,7 +162,7 @@ class LoginRow(QWidget):
         secrets = any(item.saved_password or item.saved_passphrase for item in sessions + [fallback])
         if secrets and not ensure_unlocked(self, store, f"{self.purpose} logs in to devices with saved passwords."):
             return None
-        return macssh.SshLogins(sessions, fallback, password, label), self.enable_input.text()
+        return SavedLogins(store, fallback, password, label), self.enable_input.text()
 
     def ask_login(self):
         dialog = QDialog(self)
@@ -174,11 +193,10 @@ class LoginRow(QWidget):
         store = self.sessions
         if store is None or (store.vault.enabled and not store.vault.unlocked):
             return None
-        sessions = [store.credentials.apply(session.copy()) for session in store.sessions if session.protocol == SSH]
         credential = self.picker.credential() if self.picker is not None else None
         fallback = store.credentials.apply(Session("", credential_id=credential.id)) if credential is not None and \
             credential.saved_password else None
-        return macssh.SshLogins(sessions, fallback, None, "saved"), self.enable_input.text()
+        return SavedLogins(store, fallback, None, "saved"), self.enable_input.text()
 
     def pusher_maker(self, logins, shell_factory=configpush.ConfigShell):
         """make(should_stop) -> a configpush.Pusher logging in with logins, for PushThread (and the like)."""

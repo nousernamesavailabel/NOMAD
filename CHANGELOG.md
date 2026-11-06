@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-11-06
+
+### Fixed
+
+- **VPNs, ACLs & Route Maps and Port Mirroring use a password saved after the first Read:** these pages kept a copy of the saved SSH sessions from the first time they logged in until NOMAD closed. A password saved in a router's session (or its credential) after that, or a session saved since, wasn't used, so Read said NOMAD needed a password it didn't have, even though **Open SSH Session** logged straight in. They now look up the saved sessions and credentials at each login. Changing **Log in with** or the enable password on these pages now takes effect at the next Read or send, too; before, the first choice stuck until NOMAD closed.
+
 ## [2.0.0] - 2026-11-04
 
 ### Added

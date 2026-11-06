@@ -400,6 +400,7 @@ class MirrorTab(QWidget):
                                    "session all), so a free session number is used and a busy port isn't")
         login.addWidget(self.read_check)
         self.login_row = LoginRow(self, self.sessions, "Port Mirroring")
+        self.login_row.changed.connect(self.on_login_changed)
         self.login_picker = self.login_row.picker
         self.enable_input = self.login_row.enable_input
         self.trust_check = self.login_row.trust_check
@@ -1065,6 +1066,9 @@ class MirrorTab(QWidget):
             log.exception("Drawing the RSPAN way failed")
 
     # ----------------------------------------------------------------- Logging in
+
+    def on_login_changed(self):
+        self.saved_logins = None  # Asked again with the new choice
 
     def logins(self):
         """(macssh.SshLogins, enable secret) for the switches, asking what's needed now; None if cancelled."""
