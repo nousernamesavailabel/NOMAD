@@ -281,6 +281,14 @@ class AddressModel(QAbstractTableModel):
                                     " No sweep has ever heard from it."))
         return text, "muted", f"Nothing answered here in the sweep {when_text(swept)}."
 
+    def swept_mac(self, address):
+        """The MAC answering now at a recorded address that has no MAC recorded, or ""."""
+        record = self.recorded.get(address)
+        if record is None or record.mac or self.sweep is None:
+            return ""
+        current = self.sweep.current(address)
+        return current[1] if current else ""
+
     def map_result(self, address):
         """(where the open map has it, color name or "", explanation) for the On Map column, or None."""
         if self.places_from is None:
@@ -333,17 +341,21 @@ class AddressModel(QAbstractTableModel):
                 return f"{record.modified[:10]} {record.modified_by}" if record.modified else ""
             if column >= len(ADDRESS_COLUMNS) - 1:
                 return ""
+            if column == 4 and not record.mac:
+                return self.swept_mac(address)  # What a sweep found, not yet in IPAM
             return (record.name, record.mac, record.description)[column - 3]
         if role == Qt.ForegroundRole:
             if str(address) in self.pending and column == 1:
                 return QColor(COLORS["link"])
-            if record is None:
+            if record is None or column == 4 and self.swept_mac(address):
                 return QColor(COLORS["muted"])
             if record.status == RESERVED and column == 1:
                 return QColor(COLORS["warning"])
         if role == Qt.ToolTipRole and record is None and column in (3, 4) and self.sweep is not None and \
                 address in self.sweep.hosts:
             return "Found by a sweep; not in IPAM yet (Record Answering Devices, or right-click, records it)."
+        if role == Qt.ToolTipRole and column == 4 and self.swept_mac(address):
+            return "Found by a sweep; IPAM has no MAC recorded here (Update MACs, or right-click, records it)."
         if role == Qt.FontRole and record is None and address in self.special:
             font = QFont()
             font.setItalic(True)
@@ -721,7 +733,8 @@ class IpamTab(QWidget):
         self.record_found_button.setToolTip("Record every device the sweep found that IPAM doesn't have, as used, "
                                             "with its host name and MAC address.")
         self.update_macs_button = QPushButton()
-        self.update_macs_button.setToolTip("Update the MAC address IPAM records wherever a different one answered.")
+        self.update_macs_button.setToolTip("Update the MAC address IPAM records wherever a different one answered, "
+                                           "and fill it in where IPAM has none.")
         sweep_row.addWidget(self.sweep_progress, 1)
         sweep_row.addWidget(self.sweep_status)
         sweep_row.addStretch()
@@ -1860,8 +1873,8 @@ class IpamTab(QWidget):
         self.update_buttons()
 
     def sweep_findings(self):
-        """(addresses answering now that aren't in IPAM, [(address, MAC)] answering with a different MAC) in the
-        selected subnet, from the latest sweeps."""
+        """(addresses answering now that aren't in IPAM, [(address, MAC)] answering with a different MAC, or with one
+        where IPAM has none) in the selected subnet, from the latest sweeps."""
         results = self.model.sweep
         subnet = self.selected_subnet()
         if results is None or subnet is None or self.as_of is not None:
@@ -1876,7 +1889,7 @@ class IpamTab(QWidget):
             record = self.model.recorded.get(address)
             if record is None:
                 missing.append(address)
-            elif mac and record.mac and normalize_mac(mac) != normalize_mac(record.mac):
+            elif mac and (not record.mac or normalize_mac(mac) != normalize_mac(record.mac)):
                 different.append((address, mac))
         return missing, different
 
@@ -1930,7 +1943,8 @@ class IpamTab(QWidget):
         _, different = self.sweep_findings()
         if not different:
             return
-        listing = "\n".join(f"{address}  {self.model.recorded[address].mac} → {mac}" for address, mac in different)
+        listing = "\n".join(f"{address}  {self.model.recorded[address].mac or '(none)'} → {mac}"
+                            for address, mac in different)
         if QMessageBox.question(self, "Update MACs", f"Update these MAC addresses in IPAM?\n\n{listing}") != \
                 QMessageBox.Yes:
             return
@@ -2156,7 +2170,7 @@ class IpamTab(QWidget):
             if record is None:
                 menu.addAction("Record from Sweep...", lambda: self.record_from_sweep(selected[0])).setEnabled(
                     self.can_edit_addresses())
-            elif found[1] and record.mac and normalize_mac(found[1]) != normalize_mac(record.mac):
+            elif found[1] and (not record.mac or normalize_mac(found[1]) != normalize_mac(record.mac)):
                 menu.addAction(f"Update MAC from Sweep ({found[1]})",
                                lambda: self.update_mac_from_sweep(selected[0], found[1])).setEnabled(
                     self.can_edit_addresses())

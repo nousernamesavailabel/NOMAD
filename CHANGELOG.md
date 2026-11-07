@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-11-07
+
+### Fixed
+
+- IP Addresses: an address recorded without a MAC now shows, grayed, the MAC a sweep found answering there, instead of a blank that made the sweep look as though it found fewer MACs than the Sweep page. **Update MACs** (and right-click **Update MAC from Sweep**) now fill in a missing MAC as well as replacing a different one.
+
 ## [2.0.1] - 2026-11-06
 
 ### Fixed

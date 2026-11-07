@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-11-07
+
+- **Fixed:** after **Sweep Subnet**, IP Addresses shows the MAC a sweep found at an address IPAM has no MAC for, in gray. **Update MACs** fills these in, as well as replacing MACs that changed.
+
 ## [2.0.1] - 2026-11-06
 
 - **Fixed:** VPNs, ACLs & Route Maps and Port Mirroring now use a password saved in a router's session after you first clicked Read, instead of saying there's no password until NOMAD is restarted. Changing **Log in with** or the enable password there now takes effect straight away too.

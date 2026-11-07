@@ -15,7 +15,7 @@ from nomad.ipam.compare import ADD, ADDRESS, NETWORK, REMOVE, SUBNET, UPDATE, ap
 from nomad.ipam.spreadsheet import DETAIL, SUMMARY, import_page, import_plan, parse_page, read_pages  # noqa: E402
 from nomad.ipam.store import RESERVED, USED, IpamStore, parse_subnet  # noqa: E402
 from nomad.ipam.workbook import export_workbook, outside_subnets  # noqa: E402
-from nomad.ui.ipam_tab import SweepResults  # noqa: E402
+from nomad.ui.ipam_tab import AddressModel, SweepResults  # noqa: E402
 from nomad.ui.ipam_tools import AddressPickerDialog, apply_to_addresses, apply_to_subnets  # noqa: E402
 
 
@@ -281,6 +281,23 @@ def test_sweep_results_last_across_sessions(store):
     again = SweepResults.load(store, network.id)
     assert again.result(six)[0] == "answered" and again.names[six] == "sw2"
     assert again.result(five)[0] == "silent" and again.result(five)[2] == pytest.approx(swept)
+
+
+def test_swept_mac_shows_where_ipam_has_none(app, store):
+    network = store.add_network("Lab")
+    store.add_subnet(network.id, "10.0.0.0/24", "LAN")
+    store.set_address(network.id, "10.0.0.5", USED, "blank", "")
+    store.set_address(network.id, "10.0.0.6", USED, "kept", "AA-AA-AA-AA-AA-AA")
+    results = SweepResults()
+    results.start(parse_subnet("10.0.0.0/24"))
+    results.found("10.0.0.5", 3, "BB-BB-BB-BB-BB-BB")
+    results.found("10.0.0.6", 3, "CC-CC-CC-CC-CC-CC")
+    results.finish(parse_subnet("10.0.0.0/24"))
+    model = AddressModel()
+    recorded = {ipaddress.ip_address(item.ip): item for item in store.addresses(network.id)}
+    model.load(ipaddress.ip_network("10.0.0.0/24"), recorded, {}, [], False, sweep=results)
+    macs = {model.data(model.index(row, 0)): model.data(model.index(row, 4)) for row in range(model.rowCount())}
+    assert macs == {"10.0.0.5": "BB-BB-BB-BB-BB-BB", "10.0.0.6": "AA-AA-AA-AA-AA-AA"}  # IPAM's own MAC wins
 
 
 # --------------------------------------------------------------------- An address for an adapter
