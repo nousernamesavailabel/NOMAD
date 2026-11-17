@@ -65,6 +65,7 @@ class NewVpnDialog(QDialog):
             role = QComboBox()
             role.addItem("Spoke", vpn.SPOKE)
             role.addItem("Hub", vpn.HUB)
+            role.currentIndexChanged.connect(self.on_role)  # A cell widget: no itemChanged when it changes
             self.table.setCellWidget(row, 1, role)
         self.table.resizeColumnsToContents()
         self.table.itemChanged.connect(self.check)
@@ -144,6 +145,17 @@ class NewVpnDialog(QDialog):
                 found.append((item.data(Qt.UserRole), role))
         return found
 
+    def on_role(self, *_):
+        """A router's role was picked: tick it (picking a role means it's wanted in the VPN), then re-check."""
+        combo = self.sender()
+        for row in range(self.table.rowCount()):
+            if self.table.cellWidget(row, 1) is combo:
+                item = self.table.item(row, 0)
+                if item.checkState() != Qt.Checked:
+                    item.setCheckState(Qt.Checked)  # itemChanged runs check() too
+                break
+        self.check()
+
     def check(self, *_):
         chosen = self.chosen()
         dmvpn = self.kind() == vpn.DMVPN
@@ -208,6 +220,8 @@ class MemberDialog(QDialog):
             self.hub_order.setValue(member.hub_order or 1)
             self.hub_order.setToolTip("With two hubs: 1 is preferred (listed first on the spokes)")
             form.addRow("Hub order:", self.hub_order)
+            self.role_combo.currentIndexChanged.connect(self.on_role)
+            self.on_role()
         self.wan_combo = QComboBox()
         self.wan_combo.setEditable(True)
         for name, address in vpn.wan_choices(device):
@@ -288,6 +302,10 @@ class MemberDialog(QDialog):
         data = self.wan_combo.currentData()
         text = self.wan_combo.currentText().split("  (")[0].strip()
         return data if data and self.wan_combo.currentText().startswith(data) else vpn.full_interface(text)
+
+    def on_role(self, *_):
+        """Hub order only means something for a hub."""
+        self.hub_order.setEnabled(self.role_combo.currentData() == vpn.HUB)
 
     def on_wan(self, *_):
         if self.free:

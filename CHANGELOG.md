@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-11-17
+
+### Fixed
+
+- **VPNs: New VPN notices a DMVPN role change straight away.** Changing a router from Spoke to Hub (or back) in the New VPN dialog didn't count until another router was ticked or unticked, so the hub's WAN address box, the hint and the OK button stayed out of date. They now update as soon as you pick a role. Picking a role for a router that isn't ticked now ticks it. In a router's own dialog, **Hub order** is grayed out unless its role is Hub.
+
 ## [2.0.2] - 2026-11-07
 
 ### Fixed

@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-11-17
+
+- **Fixed:** in **New VPN**, changing a DMVPN router between Spoke and Hub now takes effect at once, instead of only after another router is ticked. Picking a role also ticks the router.
+
 ## [2.0.2] - 2026-11-07
 
 - **Fixed:** after **Sweep Subnet**, IP Addresses shows the MAC a sweep found at an address IPAM has no MAC for, in gray. **Update MACs** fills these in, as well as replacing MACs that changed.
