@@ -6,10 +6,18 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-17
+
 ### Added
 
 - **VPNs: a template for the next spoke, or the missing far end.** A DMVPN with a hub now has **New spoke (template)** in the Changes list, even before any spoke is added. A two-router VPN with only one side has **Far end (template)**. The lines use the VPN's real settings (the hub's tunnel and NBMA addresses, keys, NHRP, crypto, routing, and the tunnel key when one is needed). Only the new router's own details are placeholders, and the legend suggests the next free tunnel address. It works for VPNs read from the routers as well as new ones. The lines can be copied or exported, but not sent, because they still have placeholders.
 - **Find switch port from the right-click menu.** Right-click a host in Sweep results, IPAM's IP Addresses, or the Network Map's hosts, and choose **Tools** > **Find switch port** to find the switch and port it's plugged into on the MAC Finder page. It searches by the host's MAC address when the page knows it. In IP Addresses, that's the recorded MAC, or the MAC a sweep found if none is recorded. When there's no MAC, it searches by the IP address, and MAC Finder gets the MAC from ARP. Other right-click menus with an IP address (such as the "IP:" submenus) have the entry too, and search by the address. MAC Finder runs **Locate Now** when it has switches to ask. Otherwise it runs **Find**, which searches the open map and the history. The entry isn't shown for switches and routers on the map.
+- **VPNs: name each spoke as a BGP neighbor on a DMVPN hub.** With BGP routing on a DMVPN, the new **Name each spoke as a BGP neighbor on the hub** box (under Routing Across It) gives the hub a `neighbor <tunnel address> remote-as <AS>` line, plus its outbound prefix list, for every spoke, using the tunnel address and BGP AS already set for it. An iBGP spoke is made a route reflector client. Unticked, the hub keeps using a listen range and peer group. A hub found with named spokes is read back with the box ticked, and the spoke template's legend says which lines to add on the hub. Checks warn about a spoke with no tunnel address or AS when the box is ticked, and about more than 6 spoke ASes when it isn't (a peer group can't take more).
+- **VPNs: export every router's lines at once.** The Export button under Changes is now a menu. **Every Router to a Folder...** saves a file for each router (`<VPN> - <router>.txt`) and one with the lines that undo the change (`<VPN> - <router> (undo).txt`). By-hand far ends are included. The new spoke or far end template and every side of a template get a file too, with no undo file. Each file starts with a `!` line naming the VPN, the router, its role and when it was exported. Keys follow **Show keys**, and NOMAD asks before writing them in plain text. It also asks once before replacing files already in the folder. Characters Windows doesn't allow in file names are swapped for `_`. **This View...** saves what the Changes list shows, as Export did before.
+
+### Changed
+
+- **Configuration has `!` lines between blocks, like a running-config.** The configuration NOMAD writes (VPNs, ACLs & Route Maps, Port Mirroring, Carry VLAN, router probes, and the SNMP config builder) now has a `!` line after each block (an interface, a crypto profile, an ACL...) and between groups of different single-line commands. The preview, copied text, exported files and lines sent to a session all have them. IOS treats `!` as a comment, so pasting works as before. When NOMAD sends the lines itself over SSH, it skips the `!` lines.
 
 ## [2.0.3] - 2026-11-17
 

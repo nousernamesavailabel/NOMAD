@@ -170,7 +170,7 @@ def test_setup_lines_put_the_threshold_before_the_timeout():
     text = probes.setup_text(9000, "10.20.5.11", "MGMT-B", "NOMAD sw-b", "NOMAD jared", 30)
     assert text.splitlines() == ["configure terminal", "ip sla 9000", " icmp-echo 10.20.5.11", "  vrf MGMT-B",
                                  "  tag NOMAD sw-b", "  owner NOMAD jared", "  threshold 1000", "  timeout 1000",
-                                 "  frequency 30", " exit", "ip sla schedule 9000 life forever start-time now", "end"]
+                                 "  frequency 30", " exit", "!", "ip sla schedule 9000 life forever start-time now", "end"]
     assert "vrf" not in probes.setup_text(9000, "10.20.5.11", "", "NOMAD x", "")
     assert " icmp-echo 10.20.5.11 source-interface Loopback0" in \
         probes.setup_text(9000, "10.20.5.11", "", "NOMAD x", "", source="Loopback0").splitlines()

@@ -13,6 +13,7 @@ Qt-free, so it can be tested without a network.
 import heapq
 from dataclasses import dataclass, field
 
+from ..configtext import separated
 from .collect import BLOCKING
 from .model import FIREWALL, KIND_NAMES, ROUTER, SNMP, SWITCH, port_key, port_sort_key
 from .vlans import ACCESS, ERROR, INFO, MAX_VLAN, TRUNK, WARNING, Finding, allowed, domain_of, gateways, port_info, \
@@ -748,7 +749,7 @@ def config(step, vlan, save=False):
     lines.append("end")
     if save:
         lines.append("write memory")
-    return "\n".join(lines)
+    return "\n".join(separated(lines))
 
 
 def undo(step, vlan, save=False):
@@ -768,7 +769,7 @@ def undo(step, vlan, save=False):
     lines.append("end")
     if save:
         lines.append("write memory")
-    return "\n".join(lines)
+    return "\n".join(separated(lines))
 
 
 def vlan_name_text(name):

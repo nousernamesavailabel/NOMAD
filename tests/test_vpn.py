@@ -2,7 +2,7 @@
 VPNs found on routers coming back as the same design (so an unchanged VPN plans no lines)."""
 import pytest
 
-from nomad.netmap import vpn, vpnfind
+from nomad.netmap import vpn, vpncheck, vpnfind
 from nomad.netmap.vpn import BGP, CRYPTO_MAP, DMVPN, EIGRP, GRE, GRE_IPSEC, HUB, IKEV1, NO_ROUTING, OSPF, SPOKE, \
     STATIC, VTI, Member, Vpn
 
@@ -213,6 +213,51 @@ def test_bgp_keeps_the_vpn_lans_from_the_isp():
     assert " neighbor 8.0.0.1 prefix-list NOMAD-VPN-GUARD out" in hub
     assert hub.index("neighbor T-dmvpn-SPOKES peer-group") < hub.index("bgp listen range")
     assert " neighbor T-dmvpn-SPOKES remote-as 180 alternate-as 181" in hub
+
+
+def test_a_dmvpn_hub_can_name_each_spoke_as_a_bgp_neighbor():
+    item, found = design(DMVPN, BGP)
+    item.routing.bgp_static = True
+    r6, r7 = item.member("R6"), item.member("R7")
+    hub = vpn.vpn_changes(None, item, found)["R5"].text()
+    assert "bgp listen range" not in hub and "peer-group" not in hub.replace("neighbor ISP", "")
+    assert f" neighbor {r6.tunnel_ip} remote-as 180" in hub and f" neighbor {r7.tunnel_ip} remote-as 181" in hub
+    plist = vpn.names(item, item.member("R5"))["prefix_list"]
+    assert f" neighbor {r6.tunnel_ip} prefix-list {plist} out" in hub
+    assert "route-reflector-client" not in hub  # eBGP spokes
+    # An iBGP spoke is a route reflector client
+    r7.bgp_as = "18"
+    assert f" neighbor {r7.tunnel_ip} route-reflector-client" in vpn.vpn_changes(None, item, found)["R5"].text()
+    r7.bgp_as = "181"
+    # Read back: found as named neighbors, nothing to send, taken away cleanly
+    after = vpn.devices_after(None, item, found)
+    again = vpnfind.find(reads(after))[0]
+    assert again.routing.bgp_static
+    for key, change in vpn.vpn_changes(again, again, after).items():
+        assert not change.lines, (key, change.lines)
+    # Switching it back to a listen range replaces the neighbors
+    dynamic = again.copy()
+    dynamic.routing.bgp_static = False
+    lines = vpn.vpn_changes(again, dynamic, after)["R5"].lines
+    assert any(line.strip().startswith("bgp listen range") for line in lines)
+    assert any(line.strip() == f"no neighbor {r6.tunnel_ip} remote-as 180" for line in lines)
+    # A listen range hub is read back as one
+    plain, _ = design(DMVPN, BGP)
+    assert not vpnfind.find(reads(vpn.devices_after(None, plain, found)))[0].routing.bgp_static
+
+
+def test_bgp_hub_checks_for_spokes_it_cannot_name():
+    item, found = design(DMVPN, BGP)
+    item.routing.bgp_static = True
+    item.member("R7").bgp_as = ""
+    texts = [finding.text for finding in vpncheck.check(item, found)]
+    assert any("R7 has no BGP AS: the hub gets no neighbor line" in text for text in texts), texts
+    item.routing.bgp_static = False
+    item.member("R7").bgp_as = "181"
+    for number in range(8):
+        item.members.append(Member(f"S{number}", f"S{number}", "", SPOKE, bgp_as=str(65000 + number)))
+    texts = [finding.text for finding in vpncheck.check(item, found)]
+    assert any("at most 6 spoke ASes" in text for text in texts), texts
 
 
 def test_a_single_address_lan_is_kept_from_the_isp_without_le_32():

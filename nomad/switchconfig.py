@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .configtext import separated
 from .snmp import community_is_valid
 from .snmpv3 import AUTH_PRIV, AUTH_NO_PRIV, NO_AUTH, V3User
 
@@ -259,7 +260,7 @@ def build(options, now=None):
     lines.append("end")
     if options.write_memory:
         lines.append("write memory")
-    return lines
+    return separated(lines)
 
 
 def undo(options):
@@ -302,4 +303,4 @@ def undo(options):
     lines.append("end")
     if options.write_memory:
         lines.append("write memory")
-    return lines
+    return separated(lines)

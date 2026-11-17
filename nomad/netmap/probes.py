@@ -15,6 +15,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from ..configtext import separated
 from ..snmp import SnmpError, parse_oid
 from .collect import text
 from .model import FIREWALL, NETWORK_KINDS, SNMP, port_key, short_port
@@ -379,7 +380,7 @@ def setup_text(entry, target, vrf, tag, owner, frequency=DEFAULT_FREQUENCY, time
         lines.append(f"  owner {owner}")
     lines += [f"  threshold {timeout}", f"  timeout {timeout}", f"  frequency {frequency}", " exit",
               f"ip sla schedule {entry} life forever start-time now", "end"]
-    return "\n".join(lines)
+    return "\n".join(separated(lines))
 
 
 def removal_text(entry):

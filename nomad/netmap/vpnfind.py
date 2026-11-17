@@ -883,6 +883,10 @@ def fill_routing(vpn, members, by_key):
         for member in vpn.members:
             if member.tunnel_ip in far_lans and not member.lans:
                 member.lans = far_lans[member.tunnel_ip]
+    if vpn.kind == V.DMVPN and vpn.routing.kind == V.BGP:  # A hub naming its spokes rather than a listen range
+        hub_lines = [line.strip() for member in vpn.hubs() for line in member.names.get("routing_lines") or []]
+        vpn.routing.bgp_static = bool(hub_lines) and not any(line.startswith("bgp listen range ")
+                                                             for line in hub_lines)
     for info, read in members:  # Now the LANs are known, what those lines stand for
         member = vpn.member(read.key)
         if "routing_lines" in member.names:

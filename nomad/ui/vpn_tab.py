@@ -19,13 +19,14 @@ designs to reuse; Changes Sent keeps every change with what undoes it (keys kept
 import copy
 import datetime
 import logging
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, \
+from PyQt5.QtWidgets import QAbstractItemView, QAction, QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, \
     QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, \
     QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, \
     QTableWidgetItem, QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
@@ -33,6 +34,8 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBo
 from ..netmap import configpush, vpn, vpncheck, vpnfind, vpnpki, vpnstatus
 from ..netmap.model import ROUTER, SWITCH
 from ..netmap.vpnstatus import DOWN, ERROR, GOOD, INFO, NEGOTIATING, UNKNOWN, UP, WARNING
+from ..system import replace_file
+from ..terminal.files import NOT_IN_WINDOWS_NAMES, WINDOWS_DEVICE_NAMES
 from ..terminal.sessions import SSH
 from .common import StoppableThread, local_address_toward, read_only_table, release_thread, set_hint
 from .session_send import SessionSender
@@ -58,6 +61,20 @@ SEVERITY_COLOR = {ERROR: "error", WARNING: "warning", INFO: "muted", GOOD: "succ
 NEW = "new"  # A draft's origin: not on the routers yet
 CA_CHOICES = [("router", "A CA NOMAD sets up on one of the routers"), ("scep", "A CA's SCEP URL"),
               ("paste", "By hand (paste the certificates)")]
+
+
+def export_file_name(text, taken):
+    """A file name (no extension) for text that Windows takes: characters it doesn't allow made _, no space or dot
+    at the end, not a device's name, and a number added when one already in taken (as Windows sees names) has it."""
+    name = "".join("_" if character in NOT_IN_WINDOWS_NAMES or ord(character) < 32 else character
+                   for character in text).strip(" .") or "vpn"
+    if name.split(".")[0].rstrip(" ").upper() in WINDOWS_DEVICE_NAMES:
+        name = "_" + name
+    base, number = name, 2
+    while name.casefold() in taken:
+        name, number = f"{base} {number}", number + 1
+    taken.add(name.casefold())
+    return name
 
 
 @dataclass
@@ -439,6 +456,7 @@ class VpnTab(QWidget):
         self.found = []  # [vpn.Vpn] on the routers read
         self.originals = {}  # VPN id -> the Vpn as found (None: a new one)
         self.drafts = {}  # VPN id -> the Vpn as edited (None: to be taken away)
+        self.export_folder = ""  # Where Export > Every router to a folder last saved (this run)
         self.current_id = ""
         self.reader = self.sender = self.actor = self.pki = None
         self.saved_logins = None
@@ -816,6 +834,12 @@ class VpnTab(QWidget):
         self.guard_check = QCheckBox("Keep the VPN's LANs from the routers' other BGP neighbors (such as an ISP)")
         self.guard_check.toggled.connect(self.edited)
         routing_layout.addRow("", self.guard_check)
+        self.bgp_static_check = QCheckBox("Name each spoke as a BGP neighbor on the hub (its tunnel address and AS)")
+        self.bgp_static_check.setToolTip(
+            "Ticked: the hub gets neighbor <spoke tunnel address> remote-as <spoke AS> for every spoke.\n"
+            "Unticked: the hub takes any spoke in the tunnel subnet (bgp listen range + a peer group).")
+        self.bgp_static_check.toggled.connect(self.edited)
+        routing_layout.addRow("", self.bgp_static_check)
         editor.addWidget(routing)
         # DMVPN
         dmvpn = QGroupBox("DMVPN")
@@ -887,8 +911,19 @@ class VpnTab(QWidget):
         self.copy_button = QPushButton("Copy")
         self.copy_button.clicked.connect(self.copy_preview)
         top.addWidget(self.copy_button)
-        self.export_button = QPushButton("Export...")
-        self.export_button.clicked.connect(self.export_preview)
+        self.export_button = QToolButton()
+        self.export_button.setText("Export")
+        self.export_button.setPopupMode(QToolButton.InstantPopup)
+        export_menu = QMenu(self.export_button)
+        self.export_view_action = QAction("This View...", self)
+        self.export_view_action.setToolTip("The lines shown, in one file")
+        self.export_view_action.triggered.connect(self.export_preview)
+        export_menu.addAction(self.export_view_action)
+        self.export_all_action = QAction("Every Router to a Folder...", self)
+        self.export_all_action.setToolTip("A file for each router (and one with the lines that undo it)")
+        self.export_all_action.triggered.connect(self.export_all)
+        export_menu.addAction(self.export_all_action)
+        self.export_button.setMenu(export_menu)
         top.addWidget(self.export_button)
         self.discard_button = QPushButton("Discard Changes")
         self.discard_button.clicked.connect(self.discard_changes)
@@ -1546,6 +1581,8 @@ class VpnTab(QWidget):
         self.area_input.setText(design.routing.area)
         self.eigrp_name_input.setText(design.routing.eigrp_name)
         self.guard_check.setChecked(design.routing.guard)
+        self.bgp_static_check.setChecked(design.routing.bgp_static)
+        self.show_routing_fields(design)
         self.dmvpn_box.setVisible(design.kind == vpn.DMVPN)
         self.phase_combo.setCurrentIndex(max(0, self.phase_combo.findData(design.dmvpn.phase)))
         self.network_id_spin.setValue(design.dmvpn.network_id)
@@ -1566,6 +1603,9 @@ class VpnTab(QWidget):
         for widget in (self.ca_name_input, self.trustpoint_input, self.revocation_combo, self.certs_button):
             widget.setEnabled(cert)
         self.certs_button.setText("Certificates by Hand..." if kind == "paste" else "Get Certificates")
+
+    def show_routing_fields(self, design):
+        self.bgp_static_check.setVisible(design.kind == vpn.DMVPN and design.routing.kind == vpn.BGP)
 
     def fill_members(self, design):
         self.member_table.setRowCount(len(design.members))
@@ -1623,6 +1663,7 @@ class VpnTab(QWidget):
         routing.area = self.area_input.text().strip() or "0"
         routing.eigrp_name = self.eigrp_name_input.text().strip()
         routing.guard = self.guard_check.isChecked()
+        routing.bgp_static = self.bgp_static_check.isChecked()
         settings = design.dmvpn
         settings.phase = self.phase_combo.currentData()
         settings.network_id = self.network_id_spin.value()
@@ -1645,6 +1686,7 @@ class VpnTab(QWidget):
             return
         self.form_to_design(design)
         self.show_auth_fields()
+        self.show_routing_fields(design)
         self.fill_members(design)
         self.refresh_changes()
         self.mark_current()
@@ -2100,9 +2142,10 @@ class VpnTab(QWidget):
             log.exception("Making a VPN side's lines failed")
             return ""
 
-    def preview_text(self, undo=None, reveal=None):
+    def preview_text(self, undo=None, reveal=None, key=None):
+        """The Changes list's lines for key (one of the router list's: "" for every router; None: the one shown)."""
         changes = self.changes_for(self.current_id)
-        key = self.preview_combo.currentData()
+        key = self.preview_combo.currentData() if key is None else key
         undo = self.undo_radio.isChecked() if undo is None else undo
         reveal = self.show_keys_check.isChecked() if reveal is None else reveal
         design = self.design()
@@ -2143,6 +2186,83 @@ class VpnTab(QWidget):
             set_hint(self.status_label, f"Couldn't save it: {error}", "error")
             return
         set_hint(self.status_label, f"Saved to {path}.", "success")
+
+    def export_keys(self):
+        """The routers and sides the Changes list can show one at a time (no "Every router"), in its order."""
+        keys = [self.preview_combo.itemData(row) for row in range(self.preview_combo.count())]
+        return [key for key in keys if key]
+
+    def export_label(self, key):
+        """(title, role) of a router or side in the Changes list, for its file's name and first line."""
+        design = self.design() or self.original(self.current_id)
+        if key.startswith("side:"):
+            side = key[5:]
+            member = vpn.new_side(design) if side.startswith(vpn.NEW_SIDE_PREFIX) else design.member(side)
+            if member is None:
+                return side, ""
+            how = "template" if design.template or side.startswith(vpn.NEW_SIDE_PREFIX) else "by hand"
+            return member.title(), f"{member.role}, {how}"
+        member = design.member(key) if design is not None else None
+        return self.title(key), member.role if member is not None else "taken out of the VPN"
+
+    def export_all(self):
+        """Every router's lines (and the lines that undo them) to a folder, a file each."""
+        keys = self.export_keys()
+        if not keys:
+            return
+        reveal = self.show_keys_check.isChecked()
+        if reveal and QMessageBox.question(
+                self, "Export Every Router",
+                "The files will hold the pre-shared keys in plain text. Export anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) != QMessageBox.Yes:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Export Every Router's Lines to a Folder", self.export_folder)
+        if not folder:
+            return
+        self.export_folder = folder
+        design = self.design() or self.original(self.current_id)
+        name = design.name if design is not None else "vpn"
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        files, taken = [], set()
+        for key in keys:
+            title, role = self.export_label(key)
+            base = export_file_name(f"{name} - {title}", taken)
+            heading = f"! VPN {name}: {title}" + (f" ({role})" if role else "") + f", exported {stamp}\n"
+            text = self.preview_text(undo=False, reveal=reveal, key=key)
+            if text:
+                files.append((f"{base}.txt", heading + text))
+            placeholders = key.startswith("side:") and (design.template or key[5:].startswith(vpn.NEW_SIDE_PREFIX))
+            undo = "" if placeholders else self.preview_text(undo=True, reveal=reveal, key=key)
+            if undo.strip():  # Not for a template's sides: there's nothing on a router yet to undo
+                files.append((f"{base} (undo).txt", heading.replace(", exported", ", the lines that undo it, "
+                                                                                  "exported", 1) + undo))
+        there = [file_name for file_name, _ in files if os.path.exists(os.path.join(folder, file_name))]
+        if there:
+            one = len(there) == 1
+            listed = ", ".join(there[:3]) + (", ..." if len(there) > 3 else "")
+            if QMessageBox.question(self, "Export Every Router",
+                                    f"{len(there)} of these files {'is' if one else 'are'} in {folder} already "
+                                    f"({listed}). Replace {'it' if one else 'them'}?",
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) != QMessageBox.Yes:
+                return
+        saved = 0
+        for file_name, text in files:
+            path = os.path.join(folder, file_name)
+            try:
+                with open(path + ".tmp", "w", encoding="utf-8") as file:
+                    file.write(text + "\n")
+                replace_file(path + ".tmp", path)
+            except OSError as error:
+                try:
+                    os.remove(path + ".tmp")
+                except OSError:
+                    pass
+                set_hint(self.status_label, f"Saved {saved} of {len(files)} files, then couldn't save {file_name}: "
+                                            f"{error}", "error")
+                return
+            saved += 1
+        set_hint(self.status_label, f"Saved {saved} file{'' if saved == 1 else 's'} to {folder}" +
+                 (" (keys hidden: tick Show keys to export them)." if not reveal else "."), "success")
 
     def revert_minutes(self):
         return self.minutes_input.value() if self.revert_check.isChecked() else 0
@@ -3018,7 +3138,10 @@ class VpnTab(QWidget):
         self.discard_button.setEnabled(vpn_id in self.drafts)
         text = self.preview.toPlainText()
         self.copy_button.setEnabled(bool(text))
-        self.export_button.setEnabled(bool(text))
+        every = bool(self.export_keys())
+        self.export_view_action.setEnabled(bool(text))
+        self.export_all_action.setEnabled(every)
+        self.export_button.setEnabled(bool(text) or every)
         self.certs_button.setEnabled(design is not None and design.auth.method == vpn.CERT and not busy and
                                      not design.template)
         if design is not None and design.auth.method == vpn.CERT:

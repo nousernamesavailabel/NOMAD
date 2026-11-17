@@ -399,6 +399,15 @@ def test_enable_then_configure(monkeypatch):
     assert sorted(mirror.parse_sessions(state_text)) == [1, 2, 3]
 
 
+def test_separator_lines_are_not_typed(monkeypatch):
+    channel = ConfigChannel(start="sw1#")
+    shell = config_shell(channel, monkeypatch)
+    _, refused = shell.configure("configure terminal\ninterface Gi1/0/1\n description X\n!\n! A comment\n"
+                                 "monitor session 1 source interface Gi1/0/1 both\nend")
+    assert refused == [] and channel.mode == "sw1#"
+    assert not any(text.strip().startswith("!") for text in channel.sent)
+
+
 def test_a_refused_line_stops_and_leaves_config_mode(monkeypatch):
     channel = ConfigChannel(start="sw1#", refuse={"monitor session 1 type erspan-source"})
     shell = config_shell(channel, monkeypatch)

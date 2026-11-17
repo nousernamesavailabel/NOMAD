@@ -23,6 +23,7 @@ import re
 import uuid
 from dataclasses import asdict, dataclass, field, fields
 
+from ..configtext import separated
 from . import vlan_path
 from .model import AP, FIREWALL, KIND_NAMES, ROUTER, SHARED_PORT_HOSTS, SWITCH, WLC, port_key, short_port
 from .vlans import ERROR, INFO, MAX_VLAN, TRUNK, WARNING, Finding, port_info, vlan_names
@@ -779,7 +780,7 @@ def config_text(step, applet=True):
     lines = ["configure terminal", *step.lines]
     if applet and step.applet:
         lines += step.applet
-    return "\n".join(lines + ["end"])
+    return "\n".join(separated(lines + ["end"]))
 
 
 def undo_text(step, applet=True):
@@ -787,7 +788,7 @@ def undo_text(step, applet=True):
     lines = ["configure terminal"]
     if applet and step.applet_name:
         lines.append(f"no event manager applet {step.applet_name}")
-    return "\n".join(lines + step.undo_lines + ["end"])
+    return "\n".join(separated(lines + step.undo_lines + ["end"]))
 
 
 def applet(name, step, minutes, mirror_name=""):

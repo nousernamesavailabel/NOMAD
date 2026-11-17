@@ -269,15 +269,15 @@ def test_configuration_and_undo_text():
     result = plan(chain(), 20, "Sales Floor", b="SW3", edge_ports=["Gi0/5"])
     by_device = {step.device: step for step in result.changes}
     text = vlan_path.config(by_device["SW2"], 20)
-    assert text.splitlines() == ["configure terminal", "vlan 20", " name Sales_Floor", " exit", "interface Gi0/1",
-                                 " switchport trunk allowed vlan add 20", " exit", "end"]
+    assert text.splitlines() == ["configure terminal", "vlan 20", " name Sales_Floor", " exit", "!",
+                                 "interface Gi0/1", " switchport trunk allowed vlan add 20", " exit", "!", "end"]
     assert vlan_path.config(by_device["SW3"], 20, save=True).splitlines()[-1] == "write memory"
     sw3 = vlan_path.config(by_device["SW3"], 20)
     assert "interface Gi0/5\n switchport access vlan 20" in sw3 and "switchport mode access" not in sw3
     assert vlan_path.undo(by_device["SW3"], 20).splitlines() == [
-        "configure terminal", "interface Gi0/5", " switchport access vlan 10", " exit", "no vlan 20", "end"]
+        "configure terminal", "interface Gi0/5", " switchport access vlan 10", " exit", "!", "no vlan 20", "end"]
     assert vlan_path.undo(by_device["SW1"], 20).splitlines() == [
-        "configure terminal", "interface Gi0/2", " switchport trunk allowed vlan remove 20", " exit", "end"]
+        "configure terminal", "interface Gi0/2", " switchport trunk allowed vlan remove 20", " exit", "!", "end"]
     export = vlan_path.export_text(chain(), result)
     assert "! Route: SW1 > SW2 > SW3" in export and "! Undo:" in export
 

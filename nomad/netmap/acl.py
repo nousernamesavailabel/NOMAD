@@ -22,6 +22,8 @@ import re
 import uuid
 from dataclasses import dataclass, field, replace
 
+from ..configtext import separated
+
 log = logging.getLogger(__name__)
 
 V4, V6 = "ipv4", "ipv6"
@@ -987,7 +989,7 @@ def config_text(changes, revert_minutes=0):
     lines = [first]
     for change in ordered:
         lines += change.lines
-    return "\n".join(lines + ["end"])
+    return "\n".join(separated(lines + ["end"]))
 
 
 def undo_text(changes):
@@ -995,7 +997,7 @@ def undo_text(changes):
     lines = ["configure terminal"]
     for change in ordered:
         lines += change.undo
-    return "\n".join(lines + ["end"])
+    return "\n".join(separated(lines + ["end"]))
 
 
 def longest_increasing(values):

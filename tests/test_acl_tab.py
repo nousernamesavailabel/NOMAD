@@ -322,7 +322,8 @@ def test_scratch_pad_library_and_putting_it_on_a_device(page, monkeypatch):
     page.library_table.selectRow(0)
     page.use_library_here()
     lines = page.preview.toPlainText().splitlines()
-    assert lines[1:-1] == ["ip access-list extended WEB-IN", " 15 permit tcp any host 10.1.1.10 eq 443", " exit"]
+    assert lines[1:-1] == ["ip access-list extended WEB-IN", " 15 permit tcp any host 10.1.1.10 eq 443", " exit",
+                           "!"]
 
 
 def test_pusher_read_acls_alone(monkeypatch):
@@ -386,7 +387,7 @@ def test_apply_to_an_interface_and_take_off(page, monkeypatch):
     monkeypatch.setattr(acl_dialogs.ApplyDialog, "exec_", choose)
     page.apply_acl()
     lines = page.preview.toPlainText().splitlines()
-    assert lines[1:-1] == ["interface GigabitEthernet1/0/1", " ip access-group WEB-IN out", " exit"]
+    assert lines[1:-1] == ["interface GigabitEthernet1/0/1", " ip access-group WEB-IN out", " exit", "!"]
     assert "GigabitEthernet1/0/1 out" in page.applied_label.text()
     use = next(use for use in page.device().uses_of(page.current_acl()) if use.target == "GigabitEthernet1/0/1")
     page.take_off(use)

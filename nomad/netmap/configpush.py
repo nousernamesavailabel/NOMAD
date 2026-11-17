@@ -93,11 +93,12 @@ class ConfigShell(macssh.SshShell):
 
     def configure(self, text, stop_on_error=True):
         """Type each line of text. Returns (transcript, [(line, [error lines])] of the lines refused). Stops at the
-        first refused when stop_on_error (and leaves configuration mode)."""
+        first refused when stop_on_error (and leaves configuration mode). "!" comment lines (the separators between
+        blocks) aren't typed."""
         transcript, refused = [], []
         in_config = False
         for line in text.splitlines():
-            if not line.strip():
+            if not line.strip() or line.strip().startswith("!"):
                 continue
             answer = self.line(line)
             transcript.append(line.rstrip())
@@ -406,7 +407,7 @@ class Pusher:
     @staticmethod
     def configure_past_notes(shell, text):
         """shell.configure(text), carrying on past lines whose only "errors" are the revert timer's own notes."""
-        lines = [line for line in text.splitlines() if line.strip()]
+        lines = [line for line in text.splitlines() if line.strip() and not line.strip().startswith("!")]
         transcript, refused = [], []
         while lines:
             part, said = shell.configure("\n".join(lines))

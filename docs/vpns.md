@@ -85,6 +85,8 @@ Static routes, EIGRP (classic or named), OSPF or BGP, set up the way each kind n
 - OSPF point-to-multipoint, or broadcast with spokes at priority 0 for phase 2
 - a BGP listen range and peer group on the hub
 
+With BGP on a DMVPN, the hub uses a listen range by default, so it takes any spoke in the tunnel subnet. Tick **Name each spoke as a BGP neighbor on the hub** to list each spoke on the hub instead. Each spoke gets a `neighbor` line with its tunnel address and its own BGP AS, taken from the spoke's details. Use it when you want only known spokes to peer, or when the spokes use more than 6 ASes (a peer group takes at most 6). When a spoke is added later, the hub gets its neighbor line too.
+
 With BGP, **Keep the VPN's LANs from the routers' other BGP neighbors** (on by default) adds the VPN's LANs as denies to their outbound prefix list, or puts NOMAD's guard list on them, so an ISP is never told them.
 
 Tunnels get IP MTU 1400 and TCP MSS 1360.
@@ -151,6 +153,13 @@ NOMAD looks for what would stop it working or make it unsafe:
 ## Send it
 
 **Changes** shows each router's lines (or **Every router**) and what undoes them. Keys stay hidden unless **Show keys** is ticked.
+
+To save every router's lines at once, each in its own file:
+
+1. Tick **Show keys** if the files should have the keys in them. NOMAD asks before it saves them in plain text.
+2. Click **Export** > **Every Router to a Folder...** and pick a folder.
+
+NOMAD saves a file for each router, named after the VPN and the router (`LAB - R6.txt`). Each router and by-hand far end also gets a file with the lines that undo its change (`LAB - R6 (undo).txt`). The new spoke or far end template gets a file too, as does each side of a template, but with no undo file because nothing is on a router yet. If any of the files are already in the folder, NOMAD asks before replacing them. **Export** > **This View...** saves just what the Changes list is showing.
 
 **Send over SSH** puts the change on every router with the revert timer (**Put it back after**, 10 minutes by default), spokes before hubs. NOMAD sets an archive path where there's none.
 

@@ -28,6 +28,8 @@ import string
 import uuid
 from dataclasses import asdict, dataclass, field
 
+from ..configtext import separated
+
 log = logging.getLogger(__name__)
 
 GRE, GRE_IPSEC, VTI, CRYPTO_MAP, DMVPN = "gre", "gre-ipsec", "vti", "crypto-map", "dmvpn"
@@ -354,6 +356,7 @@ class Routing:
     area: str = "0"  # OSPF
     eigrp_name: str = ""  # Named EIGRP (the name), or "" for classic
     guard: bool = True  # BGP: keep the VPN's LANs from the router's other eBGP neighbors (its ISP)
+    bgp_static: bool = False  # BGP on a DMVPN hub: a neighbor per spoke (its tunnel address + AS), no listen range
 
 
 @dataclass
@@ -972,10 +975,13 @@ def shares_source(vpn, member, device, extra=()):
 def routing_signature(vpn, member):
     """What a member's routing lines are made from (when it's unchanged, the lines found on the router are kept as
     they are, however they were written)."""
-    return json.dumps([vpn.kind, vpn.routing.kind, vpn.routing.process, vpn.routing.area, vpn.routing.eigrp_name,
-                       vpn.dmvpn.phase, member.role, member.tunnel_ip,
-                       sorted([item.key, item.role, item.tunnel_ip, item.reached_at, sorted(item.lans)]
-                              for item in vpn.members)])
+    made_from = [vpn.kind, vpn.routing.kind, vpn.routing.process, vpn.routing.area, vpn.routing.eigrp_name,
+                 vpn.dmvpn.phase, member.role, member.tunnel_ip,
+                 sorted([item.key, item.role, item.tunnel_ip, item.reached_at, sorted(item.lans)]
+                        for item in vpn.members)]
+    if vpn.routing.kind == BGP and vpn.routing.bgp_static:  # Only when set, so signatures kept before still match
+        made_from.append(["bgp-static", sorted([item.key, item.bgp_as] for item in vpn.members)])
+    return json.dumps(made_from)
 
 
 def routing_for(vpn, member, device):
@@ -1219,7 +1225,18 @@ def bgp_blocks(vpn, member, device):
     if vpn.routing.guard:
         blocks += bgp_guard(vpn, member, device, local_as, process, target)
     neighbor_lines, af_lines = [], []
-    if vpn.kind == DMVPN and member.role == HUB:
+    if vpn.kind == DMVPN and member.role == HUB and vpn.routing.bgp_static:
+        # Each spoke (and other hub) named as a neighbor with its own AS, from its tunnel address and BGP AS
+        for other in vpn.hubs() + vpn.spokes():
+            if other.key == member.key or not other.tunnel_ip or not other.bgp_as:
+                continue
+            neighbor_lines.append(f"neighbor {other.tunnel_ip} remote-as {other.bgp_as}")
+            if target is not process:
+                af_lines.append(f"neighbor {other.tunnel_ip} activate")
+            if other.role == SPOKE and other.bgp_as == local_as:
+                af_lines.append(f"neighbor {other.tunnel_ip} route-reflector-client")
+            af_lines.append(f"neighbor {other.tunnel_ip} prefix-list {plist} out")
+    elif vpn.kind == DMVPN and member.role == HUB:
         group = name["peer_group"]
         spokes = [spoke for spoke in vpn.spokes() if spoke.bgp_as]
         ases = sorted({spoke.bgp_as for spoke in spokes}, key=lambda value: (len(value), value))
@@ -1687,10 +1704,10 @@ class MemberChange:
 
     def text(self, revert_minutes=0):
         first = f"configure terminal revert timer {revert_minutes}" if revert_minutes else "configure terminal"
-        return "\n".join([first] + self.lines + ["end"])
+        return "\n".join(separated([first] + self.lines + ["end"]))
 
     def undo_text(self):
-        return "\n".join(["configure terminal"] + self.undo + ["end"])
+        return "\n".join(separated(["configure terminal"] + self.undo + ["end"]))
 
 
 def member_change(device, before_footprint, after_footprint, key="", title="", peers=()):
@@ -2053,7 +2070,11 @@ def new_side_text(vpn, undo=False):
         free = free_tunnel_ip(design)
         if free:
             hints["<SPOKE-TUNNEL-IP>"] = f"the next free one is {free}"
-    if vpn.routing.kind == BGP and member.role == SPOKE:
+    if vpn.routing.kind == BGP and member.role == SPOKE and vpn.routing.bgp_static:
+        plist = names(vpn, vpn.hubs()[0])["prefix_list"]
+        hints["<SPOKE-AS>"] = (f"the hub names each spoke: add neighbor <SPOKE-TUNNEL-IP> remote-as <SPOKE-AS> and "
+                               f"neighbor <SPOKE-TUNNEL-IP> prefix-list {plist} out on the hub too")
+    elif vpn.routing.kind == BGP and member.role == SPOKE:
         hints["<SPOKE-AS>"] = "the hub's BGP takes the ASes of the spokes it knows: add a new AS on the hub too"
     return side_text(side_change(design, member), undo, hints)
 

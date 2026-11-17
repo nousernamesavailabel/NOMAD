@@ -68,7 +68,10 @@ def shape(vpn, say):
         if not vpn.spokes():
             say(INFO, "No spokes yet: the hub takes any spoke that registers with the key (add spokes later, or set "
                       "them up by hand from a template).")
-            if vpn.routing.kind == V.BGP:
+            if vpn.routing.kind == V.BGP and vpn.routing.bgp_static:
+                say(ERROR, "The hub names each spoke as a BGP neighbor: add the spokes with their tunnel address and "
+                           "BGP AS (Add Far End... if NOMAD doesn't reach them).")
+            elif vpn.routing.kind == V.BGP:
                 say(ERROR, "BGP on the hub needs the spokes' AS (its peer group's remote-as): add a spoke with its "
                            "BGP AS (Add Far End... if NOMAD doesn't reach it).")
     keys = [member.key for member in vpn.members]
@@ -319,6 +322,24 @@ def routing(vpn, devices, say):
         if any(spoke.bgp_as != hub.bgp_as for spoke in vpn.spokes() for hub in hubs):
             say(INFO, "eBGP on a phase 2 cloud: the hub passes routes on with the spokes' tunnel addresses as next "
                       "hops only because they share the tunnel subnet. Phase 3 doesn't depend on that.")
+    if vpn.kind == V.DMVPN and kind == V.BGP and vpn.hubs():
+        hub_neighbors(vpn, say)
+
+
+def hub_neighbors(vpn, say):
+    """BGP on a DMVPN hub: a spoke left out of its neighbors (named ones), or ASes past what a peer group takes."""
+    if vpn.routing.bgp_static:
+        for spoke in vpn.spokes():
+            missing = [what for what, value in (("tunnel address", spoke.tunnel_ip), ("BGP AS", spoke.bgp_as))
+                       if not value]
+            if missing:
+                say(WARNING, f"The hub names each spoke as a BGP neighbor, but {spoke.title()} has no "
+                             f"{' or '.join(missing)}: the hub gets no neighbor line for it.", spoke.key)
+        return
+    ases = sorted({spoke.bgp_as for spoke in vpn.spokes() if spoke.bgp_as}, key=lambda value: (len(value), value))
+    if len(ases) > 6:
+        say(WARNING, f"The hub's peer group takes at most 6 spoke ASes (remote-as and 5 alternate-as): spokes in AS "
+                     f"{', '.join(ases[6:])} wouldn't come up. Tick Name each spoke as a BGP neighbor on the hub.")
 
 
 def must_reach(vpn, member, other):
