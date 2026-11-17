@@ -2070,6 +2070,11 @@ class VpnTab(QWidget):
             for member in design.members if design is not None else []:
                 if member.by_hand:
                     self.preview_combo.addItem(f"{member.title()} (by hand)", f"side:{member.key}")
+            extra = vpn.new_side(design)  # The next spoke's lines (or a missing far end's), to copy
+            if extra is not None:
+                if not self.preview_combo.count():  # Nothing to send: don't open on the template
+                    self.preview_combo.addItem("No changes", "")
+                self.preview_combo.addItem(f"{extra.title()} (template)", f"side:{extra.key}")
         at = self.preview_combo.findData(current)
         self.preview_combo.setCurrentIndex(max(0, at))
         self.preview_combo.blockSignals(False)
@@ -2080,6 +2085,12 @@ class VpnTab(QWidget):
     def side_text(self, key, undo=False):
         """The lines for a router NOMAD doesn't send to (a template's side, a far end set up by hand)."""
         design = self.design()
+        if design is not None and key.startswith(vpn.NEW_SIDE_PREFIX):
+            try:  # A side not in the VPN yet: a new spoke, or a missing far end
+                return vpn.new_side_text(vpn.keyed(design, self.devices()), undo)
+            except Exception:
+                log.exception("Making a new VPN side's lines failed")
+                return ""
         member = design.member(key) if design is not None else None
         if member is None:
             return ""

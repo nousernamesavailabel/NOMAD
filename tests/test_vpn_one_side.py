@@ -185,3 +185,94 @@ def test_page_template_shows_every_side_and_sends_nothing(page):  # noqa: F811
     page.kind_combo.setCurrentIndex(page.kind_combo.findData(VTI))
     assert [member.key for member in page.design().members] == ["slot:a", "slot:b"]
     assert page.design().id == design_.id and page.design().auth.psk == design_.auth.psk
+
+
+# ----------------------------------------------------------------- A new spoke's (or a missing far end's) template
+
+def test_a_hub_only_dmvpn_gives_a_spoke_template_with_the_hubs_real_settings():
+    item, _ = design(DMVPN, EIGRP)
+    hub = item.hubs()[0]
+    item.members = [hub]
+    side = vpn.new_side(item)
+    assert side.key == "new:spoke" and side.role == SPOKE and side.tunnel == hub.tunnel
+    text = vpn.new_side_text(item)
+    lines = [line.strip() for line in text.splitlines()]
+    assert f"ip nhrp nhs {hub.tunnel_ip} nbma {hub.reached_at} multicast" in lines
+    assert "ip nhrp authentication nh5ecret" in lines and "pre-shared-key Secr3tKeyABC" in lines
+    assert "ip address <SPOKE-TUNNEL-IP> 255.255.255.0" in lines and "tunnel source <SPOKE-WAN-INTERFACE>" in lines
+    assert "network <SPOKE-LAN-NETWORK> <SPOKE-LAN-WILDCARD>" in lines
+    legend = text.split("configure terminal")[0]
+    assert "<SPOKE-TUNNEL-IP>" in legend and "the next free one is 172.31.0.2" in legend
+    assert not item.member("new:spoke")  # Never added to the VPN itself
+
+
+def test_the_spoke_template_skips_the_spokes_already_there():
+    item, _ = design(DMVPN, STATIC)
+    taken = {member.tunnel_ip for member in item.members}
+    text = vpn.new_side_text(item)
+    free = re.search(r"the next free one is (\S+)\)", text).group(1)
+    assert free not in taken and free == vpn.free_tunnel_ip(item)
+    for spoke in item.spokes():  # Other spokes' LANs through the hub
+        for prefix in spoke.lans:
+            assert f"ip route {' '.join(vpn.network_words(prefix))} {item.hubs()[0].tunnel_ip}" in text
+
+
+def test_a_bgp_spoke_template_peers_with_the_hub_and_asks_for_its_as():
+    item, _ = design(DMVPN, BGP)
+    hub = item.hubs()[0]
+    text = vpn.new_side_text(item)
+    assert "router bgp <SPOKE-AS>" in text and f"neighbor {hub.tunnel_ip} remote-as {hub.bgp_as}" in text
+    assert "add a new AS on the hub too" in text
+
+
+def test_a_one_sided_vti_gives_the_far_ends_template():
+    item, _ = design(VTI, STATIC)
+    near = item.members[0]
+    item.members = [near]
+    side = vpn.new_side(item)
+    assert side.key == "new:far" and side.tunnel_ip == "172.31.0.2"  # The /30's other address
+    lines = [line.strip() for line in vpn.new_side_text(item).splitlines()]
+    assert f"tunnel destination {near.reached_at}" in lines and "tunnel source <FAR-WAN-INTERFACE>" in lines
+    assert "ip address 172.31.0.2 255.255.255.252" in lines
+
+
+@pytest.mark.parametrize("kind", [VTI, CRYPTO_MAP])
+def test_no_extra_side_when_both_ends_are_there(kind):
+    item, _ = design(kind, STATIC)
+    assert vpn.new_side(item) is None and vpn.new_side_text(item) == ""
+
+
+def test_no_spoke_template_without_a_hub_or_on_a_template():
+    item, _ = design(DMVPN, STATIC)
+    item.members = item.spokes()
+    assert vpn.new_side(item) is None
+    assert vpn.new_side(vpn.make_template("TPL", DMVPN)) is None  # It has its own Spoke
+
+
+def test_page_offers_a_new_spokes_template_for_a_hub_only_dmvpn(page):  # noqa: F811
+    read_both(page)
+    page.make_new("HUBONLY", DMVPN, [("map:R6", HUB)])
+    design_ = page.editable()
+    hub = design_.member("map:R6")
+    page.show_design()
+    keys = [page.preview_combo.itemData(row) for row in range(page.preview_combo.count())]
+    assert keys == ["map:R6", "side:new:spoke"]
+    page.preview_combo.setCurrentIndex(1)
+    text = page.preview.toPlainText()
+    assert f"ip nhrp nhs {hub.tunnel_ip} nbma {hub.reached_at} multicast" in text
+    assert "pre-shared-key ********" in text  # Keys hidden unless Show keys is ticked
+    assert page.copy_button.isEnabled() and page.export_button.isEnabled()
+    assert [member.key for member in page.design().members] == ["map:R6"]
+    page.fill_session_menu()
+    menu_titles = [action.text() for action in page.session_menu.actions()]
+    assert not any("spoke" in title.lower() for title in menu_titles)  # Placeholders: never typed into a session
+    page.verify_check.setChecked(False)
+    page.send()
+    wait(page)
+    found = next(item for item in page.found if item.name == "HUBONLY")  # Read back: nothing left to send
+    assert not page.changes_for(found.id) and page.current_id == found.id
+    page.show_design()
+    assert page.preview_combo.currentData() == "side:new:spoke"  # Still on the template it was showing
+    assert page.preview_combo.itemText(0) == "No changes"
+    page.preview_combo.setCurrentIndex(0)
+    assert page.preview.toPlainText() == ""

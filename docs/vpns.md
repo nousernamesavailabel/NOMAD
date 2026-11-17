@@ -98,6 +98,16 @@ For a far end you can't reach or don't manage, tick just one router in **New VPN
 - Its lines are under Changes as "(by hand)" to copy, export or type into a terminal session, with placeholders such as `<WAN-INTERFACE>` for what isn't known.
 - **Check it works first** only passes once its side is in. Untick it to send your side alone.
 
+### Lines for a new spoke or the far end
+
+A DMVPN with a hub has a **New spoke (template)** entry in the Changes list, even when it has no spokes yet. It shows the lines a new spoke needs. A two-router VPN with only one side has a **Far end (template)** entry instead.
+
+1. Select the VPN.
+2. Under **Changes**, pick **New spoke (template)** or **Far end (template)**.
+3. Copy or export the lines, then replace the placeholders for that router.
+
+The lines use the VPN's real settings: the hub's addresses, the keys, NHRP, crypto and routing. Only the new router's own details are placeholders (`<SPOKE-WAN-IP>`, `<SPOKE-TUNNEL-IP>`, `<SPOKE-LAN>`...). The legend says which tunnel address is free next. With BGP, add the new spoke's AS on the hub too if the hub doesn't know it yet. These lines can't be sent or typed into a session because they still have placeholders.
+
 ## Templates
 
 **New VPN...** > **Template: no routers** (with **Hubs** for a DMVPN) makes a VPN with no routers: sides A and B, or the hub(s) and a spoke that stands for every spoke.

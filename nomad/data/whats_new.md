@@ -4,6 +4,8 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+- **New:** on **VPNs**, a DMVPN with a hub has **New spoke (template)** under Changes, even with no spokes yet. A one-sided VPN has **Far end (template)**. These are the lines to copy for that router, built from the VPN's real settings, with placeholders only for the new router's own details.
+
 ## [2.0.3] - 2026-11-17
 
 - **Fixed:** in **New VPN**, changing a DMVPN router between Spoke and Hub now takes effect at once, instead of only after another router is ticked. Picking a role also ticks the router.

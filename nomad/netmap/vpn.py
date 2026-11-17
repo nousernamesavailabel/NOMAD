@@ -1880,7 +1880,8 @@ def verify_commands(vpn, member, devices):
 # ----------------------------------------------------------------- Templates, and far ends set up by hand
 
 PLACEHOLDER = re.compile(r"^<[A-Z0-9][A-Z0-9-]*>$")
-SLOT_WORDS = {"A": "side A", "B": "side B", "HUB": "the hub", "HUB2": "the second hub", "SPOKE": "each spoke"}
+SLOT_WORDS = {"A": "side A", "B": "side B", "HUB": "the hub", "HUB2": "the second hub", "SPOKE": "each spoke",
+              "FAR": "the far end"}
 PLACEHOLDER_MEANINGS = [  # (ending, what it stands for: {who} is whose)
     ("-WAN-INTERFACE", "{who}'s WAN interface (the tunnel source, GigabitEthernet1)"),
     ("-WAN-IP", "{who}'s WAN address (where the others reach it)"),
@@ -1922,14 +1923,16 @@ def placeholder_meaning(token):
     return "fill in"
 
 
-def legend(text):
-    """"!" comment lines saying what each placeholder in text stands for (IOS ignores them when pasted)."""
+def legend(text, hints=None):
+    """"!" comment lines saying what each placeholder in text stands for (IOS ignores them when pasted). hints:
+    {placeholder: a suggestion added after its meaning}."""
     found = placeholders(text)
     if not found:
         return []
+    hints = hints or {}
     width = max(len(token) for token in found)
-    return ["! Replace before pasting:"] + [f"!   {token.ljust(width)}  {placeholder_meaning(token)}"
-                                            for token in found]
+    return ["! Replace before pasting:"] + [f"!   {token.ljust(width)}  {placeholder_meaning(token)}" +
+                                            (f" ({hints[token]})" if hints.get(token) else "") for token in found]
 
 
 def filled(vpn, member):
@@ -1979,10 +1982,10 @@ def side_change(vpn, member, xe=False):
     return change
 
 
-def side_text(change, undo=False):
-    """A side's lines to paste, with a legend of its placeholders first."""
+def side_text(change, undo=False, hints=None):
+    """A side's lines to paste, with a legend of its placeholders first (hints: suggestions for some of them)."""
     text = change.undo_text() if undo else change.text()
-    return "\n".join(legend(text) + [text])
+    return "\n".join(legend(text, hints) + [text])
 
 
 TEMPLATE_SUBNETS = {True: "172.31.0.0/30", False: "172.31.0.0/24"}
@@ -1990,12 +1993,69 @@ TEMPLATE_SUBNETS = {True: "172.31.0.0/30", False: "172.31.0.0/24"}
 
 def slot(kind, word, role, tunnel, hub_order=0):
     """A template's member: its details are placeholders named for it (<A-WAN-IP>, <SPOKE-LAN>...)."""
-    label = {"A": "Side A", "B": "Side B", "HUB": "Hub", "HUB2": "Hub 2", "SPOKE": "Spoke"}.get(word, word.title())
+    label = {"A": "Side A", "B": "Side B", "HUB": "Hub", "HUB2": "Hub 2", "SPOKE": "Spoke",
+             "FAR": "Far end"}.get(word, word.title())
     member = Member(f"slot:{word.lower()}", label, "", role, f"<{word}-WAN-INTERFACE>", f"<{word}-WAN-IP>",
                     tunnel=tunnel, lans=[f"<{word}-LAN>"], bgp_as=f"<{word}-AS>", hub_order=hub_order)
     if role == SPOKE:
         member.tunnel_ip = f"<{word}-TUNNEL-IP>"  # Every spoke has its own
     return member
+
+
+def free_tunnel_ip(vpn):
+    """The first address in the VPN's tunnel subnet that no member has, or ""."""
+    try:
+        network = ipaddress.IPv4Network(vpn.subnet, strict=False)
+    except ValueError:
+        return ""
+    taken = {member.tunnel_ip for member in vpn.members}
+    return next((str(host) for host in network.hosts() if str(host) not in taken), "")
+
+
+NEW_SIDE_PREFIX = "new:"  # The key of a side not in the VPN yet (a new spoke's lines, or a missing far end's)
+
+
+def new_side(vpn):
+    """A member standing for a side not in the VPN yet, its own details <PLACEHOLDERS> and the rest the VPN's real
+    settings: the next spoke of a DMVPN with a hub, or the far end of a two-router kind with only one side. None when
+    there's no such side (a template has its own slots)."""
+    if vpn is None or vpn.template:
+        return None
+    if vpn.kind == DMVPN:
+        hubs = vpn.hubs()
+        if not hubs:
+            return None
+        spokes = vpn.spokes()
+        tunnel = most_common([spoke.tunnel for spoke in spokes]) if spokes else hubs[0].tunnel
+        member = slot(DMVPN, "SPOKE", SPOKE, tunnel)
+        member.key, member.label = f"{NEW_SIDE_PREFIX}spoke", "New spoke"
+    elif len(vpn.members) == 1:
+        member = slot(vpn.kind, "FAR", PEER, vpn.members[0].tunnel)
+        member.key, member.label = f"{NEW_SIDE_PREFIX}far", "Far end"
+        if vpn.kind != CRYPTO_MAP:
+            member.tunnel_ip = free_tunnel_ip(vpn) or "<FAR-TUNNEL-IP>"  # A /30 has only the one left
+    else:
+        return None
+    if vpn.routing.kind != BGP:
+        member.bgp_as = ""
+    return member
+
+
+def new_side_text(vpn, undo=False):
+    """The lines a new spoke (or the missing far end) needs, with a legend; "" when there's no such side."""
+    member = new_side(vpn)
+    if member is None:
+        return ""
+    design = vpn.copy()
+    design.members.append(member)
+    hints = {}
+    if member.role == SPOKE:
+        free = free_tunnel_ip(design)
+        if free:
+            hints["<SPOKE-TUNNEL-IP>"] = f"the next free one is {free}"
+    if vpn.routing.kind == BGP and member.role == SPOKE:
+        hints["<SPOKE-AS>"] = "the hub's BGP takes the ASes of the spokes it knows: add a new AS on the hub too"
+    return side_text(side_change(design, member), undo, hints)
 
 
 def make_template(name, kind, hubs=1, base=None):

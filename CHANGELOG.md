@@ -6,6 +6,10 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+### Added
+
+- **VPNs: a template for the next spoke, or the missing far end.** A DMVPN with a hub now has **New spoke (template)** in the Changes list, even before any spoke is added. A two-router VPN with only one side has **Far end (template)**. The lines use the VPN's real settings (the hub's tunnel and NBMA addresses, keys, NHRP, crypto, routing, and the tunnel key when one is needed). Only the new router's own details are placeholders, and the legend suggests the next free tunnel address. It works for VPNs read from the routers as well as new ones. The lines can be copied or exported, but not sent, because they still have placeholders.
+
 ## [2.0.3] - 2026-11-17
 
 ### Fixed
