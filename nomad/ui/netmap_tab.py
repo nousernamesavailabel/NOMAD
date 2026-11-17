@@ -41,7 +41,7 @@ from ..snmpv3 import is_v3
 from ..terminal.credentials import CredentialError, protect, unprotect
 from .common import OneLineLabel, SortableTableItem, StoppableThread, add_submenu, drop_empty_submenus, \
     format_size, read_only_table, set_hint
-from .host_menu import HostActions
+from .host_menu import FIND_PORT, HostActions
 from .map_ipam_dialog import RecordDialog
 from .integration import IPAM, PLACEMENT, VLAN, MapNetworkDialog, TribeNetworkDialog, hub, split_key
 from .integration import link as page_link
@@ -2745,6 +2745,8 @@ class NetworkMapTab(QWidget):
         # Show In has Show on Map's views, and IPAM its addresses (when the map is of an IPAM network); Copy Address
         # is at the bottom
         leave_out = ["Show on Map", "Copy IP Address"]
+        if device.kind in (SWITCH, ROUTER):  # Its own address: no port to find
+            leave_out.append(FIND_PORT)
         if hub(self.window) is not None and self.ipam_key():
             leave_out.append("Show in IPAM")
         actions = self.host_actions.add_to(menu, device.mgmt_ip, **self.session_hints(shown, device),
@@ -2952,8 +2954,9 @@ class NetworkMapTab(QWidget):
             menu.addSeparator()
             self.add_subnet_links(menu, actions, node.label)
         elif node.kind == l3.HOP and key != l3.SELF:
+            # Copy Address is below; a hop is a router, with no switch port to find
             actions = self.host_actions.add_to(menu, node.label, snmp=self.snmp_access(node.label),
-                                               leave_out=("Copy IP Address",))  # Copy Address, below
+                                               leave_out=("Copy IP Address", FIND_PORT))
             menu.addSeparator()
             actions[menu.addAction("Crawl from Here")] = lambda: self.crawl_from(node.label)
             actions[menu.addAction("Copy Address")] = lambda: QApplication.clipboard().setText(node.label)
@@ -2988,7 +2991,7 @@ class NetworkMapTab(QWidget):
             host = hosts[0]
             if host.ip:
                 actions = self.host_actions.add_to(menu, host.ip, **self.host_session_hints(host),
-                                                   leave_out=("Show on Map",))  # The page's own is below
+                                                   leave_out=("Show on Map",), mac=host.mac)  # Its own is below
                 menu.addSeparator()
             actions[menu.addAction("Show on Map")] = lambda: self.show_on_map("host", item.row())
             if host.device in self.network_map.devices and hasattr(self.window, "show_mirror"):
@@ -3023,7 +3026,8 @@ class NetworkMapTab(QWidget):
         stop = self.add_stop_highlight(menu)
         actions = {}
         if len(hosts) == 1 and hosts[0].ip:
-            actions = self.host_actions.add_to(menu, hosts[0].ip, **self.host_session_hints(hosts[0]))
+            actions = self.host_actions.add_to(menu, hosts[0].ip, **self.host_session_hints(hosts[0]),
+                                               mac=hosts[0].mac)
         if stop is not None:
             actions[stop] = self.clear_vlan
             menu.addSeparator()

@@ -9,6 +9,7 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 ### Added
 
 - **VPNs: a template for the next spoke, or the missing far end.** A DMVPN with a hub now has **New spoke (template)** in the Changes list, even before any spoke is added. A two-router VPN with only one side has **Far end (template)**. The lines use the VPN's real settings (the hub's tunnel and NBMA addresses, keys, NHRP, crypto, routing, and the tunnel key when one is needed). Only the new router's own details are placeholders, and the legend suggests the next free tunnel address. It works for VPNs read from the routers as well as new ones. The lines can be copied or exported, but not sent, because they still have placeholders.
+- **Find switch port from the right-click menu.** Right-click a host in Sweep results, IPAM's IP Addresses, or the Network Map's hosts, and choose **Tools** > **Find switch port** to find the switch and port it's plugged into on the MAC Finder page. It searches by the host's MAC address when the page knows it. In IP Addresses, that's the recorded MAC, or the MAC a sweep found if none is recorded. When there's no MAC, it searches by the IP address, and MAC Finder gets the MAC from ARP. Other right-click menus with an IP address (such as the "IP:" submenus) have the entry too, and search by the address. MAC Finder runs **Locate Now** when it has switches to ask. Otherwise it runs **Find**, which searches the open map and the history. The entry isn't shown for switches and routers on the map.
 
 ## [2.0.3] - 2026-11-17
 

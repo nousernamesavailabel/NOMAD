@@ -2184,9 +2184,11 @@ class IpamTab(QWidget):
             # and suggests the network and subnet as its folder
             record = self.model.recorded.get(selected[0])
             name = record.name.strip() if record is not None else ""
+            # Find switch port goes by the recorded MAC, else the one a sweep found (as the page shows it)
+            mac = (record.mac if record is not None else "") or (found[1] if found is not None else "")
             host_actions = HostActions(self.window, self).add_to(
                 menu, host, aliases=[name] if name else (), name=name, folder=self.session_folder(),
-                leave_out=("Show in IPAM",))
+                leave_out=("Show in IPAM",), mac=mac)
             menu.addSeparator()
             menu.addAction("History...", lambda: self.show_history("address", host)).setEnabled(self.as_of is None)
         links = self.other_page_actions(menu, address=host) if len(selected) == 1 else {}

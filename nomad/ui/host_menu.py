@@ -1,5 +1,5 @@
 """Things to do with a host from a right-click menu (Sweep results, Network Map devices): open a session, browse to
-it, ping, trace, scan, read it over SNMP or capture its traffic, each on its own page."""
+it, ping, trace, scan, read it over SNMP, capture its traffic or find its switch port, each on its own page."""
 import ipaddress
 import subprocess
 import webbrowser
@@ -7,12 +7,14 @@ import webbrowser
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import QApplication, QMenu, QMessageBox
 
+from ..oui import format_mac, normalize_mac
 from ..sweep import find_putty
 from ..terminal.sessions import RDP, SSH, TELNET
 from .common import add_submenu, drop_empty_submenus, menu_labels
 
 ADD_TO_MAP = "Add Device to Map..."
 CONNECT, TOOLS = "Connect", "Tools"
+FIND_PORT = "Find switch port"
 
 
 class HostActions:
@@ -20,13 +22,14 @@ class HostActions:
         self.window, self.parent = window, parent
 
     def add_to(self, menu, host, aliases=(), name="", folder="", snmp=None, sessions=("SSH", "SCP", "Telnet", "RDP"),
-               grouped=True, leave_out=()):
+               grouped=True, leave_out=(), mac=""):
         """Add the actions for host to menu. Returns {QAction: callable} for running the chosen one. aliases: the
         host's other addresses and names, for finding its saved sessions; name and folder: what to call a new
         session to it, and the folder to suggest when it's saved; snmp: (community, version) for SNMP Details, when
         the page knows what the host answers to. grouped: sessions and browsing in a Connect submenu and the tools in
         a Tools one, keeping the menu short (not when menu is already a submenu of just these); leave_out: labels of
-        entries the page has no use for (Show on Map, on the map)."""
+        entries the page has no use for (Show on Map, on the map); mac: the host's MAC address, when the page knows
+        it, for Find switch port (else that searches by the address)."""
         actions = {}
         connect = add_submenu(menu, CONNECT) if grouped else menu
         tools = add_submenu(menu, TOOLS) if grouped else menu
@@ -70,14 +73,17 @@ class HostActions:
             f"Open https://{host}": lambda: self.open_web(host),
             f"Open http://{host}": lambda: self.open_web(host, "http"),
         }, menu, leave_out))
-        actions.update(self.add_missing(tools, {
+        tool_entries = {
             "Ping": lambda: self.ping(host),
             "Traceroute": lambda: self.trace(host),
             "Monitor Latency": lambda: self.monitor_latency(host),
             "Scan Ports": lambda: self.scan_ports(host),
             "SNMP Details": lambda: self.snmp(host, *(snmp or ())),
             "Capture Traffic...": lambda: self.capture(host),
-        }, menu, leave_out))
+        }
+        if getattr(self.window, "mac_finder_tab", None) is not None:
+            tool_entries[FIND_PORT] = lambda: self.find_switch_port(host, mac)
+        actions.update(self.add_missing(tools, tool_entries, menu, leave_out))
         if grouped:
             drop_empty_submenus(menu, connect, tools)
         actions.update(self.navigation_actions(menu, host, name, leave_out))
@@ -226,6 +232,15 @@ class HostActions:
         if host:
             self.window.navigator.setCurrentWidget(self.window.snmp_tab)
             self.window.snmp_tab.query_host(host, community, version)
+
+    def find_switch_port(self, host, mac=""):
+        """The switch port the host is plugged into, on the MAC Finder page: by its MAC address when the page knows
+        it, else by its address (MAC Finder gets the MAC from ARP) or name (from DNS)."""
+        text = format_mac(mac) if normalize_mac(mac) else host.partition("%")[0]
+        if text:
+            page = self.window.mac_finder_tab
+            self.window.navigator.setCurrentWidget(page)
+            page.find_switch_port(text)
 
     def capture(self, host):
         """Fill in the host on the Packet Capture page; capturing needs a deliberate Start (and admin rights)."""

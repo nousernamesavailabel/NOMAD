@@ -131,6 +131,8 @@ Which switch and port a device is plugged into. Type its MAC address in any form
 - See where each MAC has been in its history.
 - The **Switches Asked** tab lists every switch a search asked, how it answered, and why any couldn't be asked. Right-click one to try its SSH login again or connect to it.
 
+You can also start a search from another page. Right-click a host in the Sweep results, in IPAM's IP Addresses, or on the Network Map, and choose **Tools** > **Find switch port**. NOMAD opens MAC Finder and searches for the host's MAC address if the page knows it. In IP Addresses, that is the recorded MAC, or the MAC a sweep found if none is recorded. Otherwise it searches for the IP address, and MAC Finder looks up the MAC in ARP. This works only if this computer, a router on the map, or the map itself has the address in an ARP table. MAC Finder runs **Locate Now** if it has switches to ask. If not, it runs **Find**. Switches and routers on the map don't have this entry.
+
 ### DHCP Servers
 
 Every DHCP server that answers, with each option it offers decoded, and warnings about rogue servers. Nothing is leased.

@@ -472,8 +472,8 @@ class SweepTab(QWidget):
         host = self.selected_host()
 
         menu = QMenu(self)
-        actions = self.host_actions.add_to(menu, host)
-        mac = self.table.item(item.row(), COL_MAC).text()  # Copy IP Address is among the host's actions
+        mac = self.table.item(item.row(), COL_MAC).text()
+        actions = self.host_actions.add_to(menu, host, mac=mac)  # Copy IP Address is among the host's actions
         if mac:
             menu.addSeparator()
             actions[menu.addAction("Copy MAC Address")] = lambda: QApplication.clipboard().setText(mac)

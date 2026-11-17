@@ -224,3 +224,25 @@ def test_the_main_window_has_its_sessions_before_mac_finder():
     from pathlib import Path
     source = (Path(mac_finder_tab.__file__).parent / "main_window.py").read_text(encoding="utf-8")
     assert source.index("self.session_store = SessionStore()") < source.index("MacFinderTab(self)")
+
+
+def test_find_switch_port_asks_the_switches_when_it_can(setup):
+    window, page, _ = setup
+    page.list_button.setChecked(True)
+    page.find_switch_port("10.10.0.21")  # An address: MAC Finder finds its MAC in ARP
+    assert not page.list_button.isChecked() and page.search_input.text() == "10.10.0.21"
+    assert page.worker is not None  # Locate Now
+    page.find_switch_port(PC1_MAC)  # Busy: not a second search, and the running one goes on
+    assert page.search_input.text() == PC1_MAC
+    assert "busy" in window.statuses[-1]
+    wait_for(lambda: page.worker is None)
+    assert cells(page, COL_SOURCE) == ["Live"]
+
+
+def test_find_switch_port_without_switches_to_ask_finds(app, tmp_path):
+    window = Window()
+    page = MacFinderTab(window, history=SightingLog(tmp_path / "history.db"))
+    page.find_switch_port(PC1_MAC)
+    assert page.worker is None and "no map is open" in cells(page, COL_NOTE)[0]  # Find
+    assert "Locate Now needs a network map" in window.statuses[-1]
+    page.deleteLater()

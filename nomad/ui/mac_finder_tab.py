@@ -33,7 +33,7 @@ from ..terminal.hostkeys import KnownHosts
 from ..terminal.sessions import AUTH_PASSWORD, SSH, Session, same_host
 from .common import SortableTableItem, StoppableThread, read_only_table, run_in_background, set_hint
 from .credential_dialogs import CredentialPicker
-from .host_menu import HostActions
+from .host_menu import FIND_PORT, HostActions
 from .prompts import SecretDialog
 from .theme import COLORS, accent_button
 from .vault_dialog import ensure_unlocked
@@ -828,7 +828,7 @@ class MacFinderTab(QWidget):
             actions[retry] = lambda: self.try_login(report)
             connect = menu.addMenu(f"Switch: {report.name}")
             actions.update(HostActions(self.window, menu).add_to(connect, report.address, name=report.name,
-                                                                 grouped=False))
+                                                                 grouped=False, leave_out=(FIND_PORT,)))
         menu.addSeparator()
         actions[menu.addAction("Copy Row")] = lambda: QApplication.clipboard().setText("\t".join(
             [report.name, report.address, report.snmp, report.ssh, report.login, report.note]))
@@ -1038,14 +1038,15 @@ class MacFinderTab(QWidget):
         actions = {}
         if normalize_mac(mac):
             locate = menu.addAction("Locate Now")
-            locate.setEnabled(self.worker is None and self.locate_button.toolTip().startswith("Ask"))
+            locate.setEnabled(self.worker is None and self.can_locate())
             actions[locate] = lambda: self.locate_one(mac)
         if location is not None and location.switch:
             actions[menu.addAction("Show on Network Map")] = lambda: self.show_on_map(location)
         if location is not None and location.switch_ip:
             switch_menu = menu.addMenu(f"Switch: {location.switch}")
             actions.update(HostActions(self.window, menu).add_to(switch_menu, location.switch_ip,
-                                                                 name=location.switch, grouped=False))
+                                                                 name=location.switch, grouped=False,
+                                                                 leave_out=(FIND_PORT,)))
         menu.addSeparator()
         if normalize_mac(mac):
             actions[menu.addAction("Copy MAC Address")] = lambda: QApplication.clipboard().setText(mac)
@@ -1060,9 +1061,23 @@ class MacFinderTab(QWidget):
             actions[chosen]()
 
     def locate_one(self, mac):
+        self.find_switch_port(format_mac(mac))
+
+    def find_switch_port(self, text):
+        """Search for one MAC address, IP address or name (right-click > Tools > Find switch port, and Locate Now on
+        a result): Locate Now when there are switches to ask, else Find (the map and the history)."""
         self.list_button.setChecked(False)
-        self.search_input.setText(format_mac(mac))
-        self.locate()
+        self.search_input.setText(text)
+        if self.worker is not None:
+            self.window.show_status("MAC Finder is busy with another search; try again when it finishes.", "info")
+            return
+        if self.can_locate():
+            self.locate()
+            return
+        self.find()
+        self.window.show_status(f"Searched the map and the history for {text}. To ask the switches, Locate Now "
+                                "needs a network map with switches read over SNMP, or Also over SSH with a switch to "
+                                "start at.", "info")
 
     def show_on_map(self, location):
         page, network_map = self.map_page(), self.open_map()
@@ -1132,15 +1147,22 @@ class MacFinderTab(QWidget):
             return
         self.window.show_status(f"Exported {len(rows)} results to {path}.")
 
+    def can_locate(self):
+        """Whether Locate Now has switches to ask: the open map's over SNMP, or with Also over SSH, its others or
+        the switch to start at."""
+        network_map = self.open_map()
+        ssh = self.using_ssh()
+        start = bool(self.start_input.text().strip())
+        if network_map is None:
+            return ssh and start
+        return bool(self.readable_switches(network_map) or (ssh and (self.ssh_switches(network_map) or start)))
+
     def update_buttons(self, *_):
         running = self.worker is not None
         list_mode = self.list_button.isChecked()
         has_text = bool((self.list_input.toPlainText() if list_mode else self.search_input.text()).strip())
-        network_map = self.open_map()
         ssh = self.using_ssh()
-        can_locate = network_map is not None and bool(self.readable_switches(network_map) or (
-            ssh and (self.ssh_switches(network_map) or self.start_input.text().strip())))
-        can_locate = can_locate or (ssh and network_map is None and bool(self.start_input.text().strip()))
+        can_locate = self.can_locate()
         self.find_button.setEnabled(not running and has_text)
         self.locate_button.setEnabled(not running and has_text and can_locate)
         how = "over SNMP and SSH" if ssh else "over SNMP"
