@@ -7,6 +7,8 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 ## [2.2.0] - 2026-11-18
 
 - **New:** on **IP Addresses**, untick **Look up names** beside **Sweep Subnet** for a faster sweep without host names. If names are slow partway through, **Skip Names** keeps what the sweep found.
+- **Changed:** IKEv2 VPNs put their NAT keepalive in the VPN's own IKEv2 profile, so other tunnels on the router aren't affected.
+- **Changed:** a VPN's BGP prefix list with nothing to advertise now denies at sequence 1000 instead of 5, leaving room for permits before it.
 
 ## [2.1.0] - 2026-11-17
 

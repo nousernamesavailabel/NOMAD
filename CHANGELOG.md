@@ -12,6 +12,11 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 - **IP Addresses: sweep without looking up names.** A **Look up names** box beside **Sweep Subnet** turns off the DNS and NetBIOS lookups for the hosts that answer, which can take a long time on subnets with no DNS server. It's remembered, and no longer follows the Sweep page's setting (the sweep still uses that page's parallel pings, timeout and ARP settings). Without names, NetBIOS doesn't report MACs either, so hosts on routed subnets come back without one. When the pings are done but names are still being looked up, the button reads **Skip Names**: it stops waiting and keeps the sweep, marking what didn't answer as a finished sweep does (Stop Sweep used to leave them unmarked).
 
+### Changed
+
+- **VPNs: IKEv2 NAT keepalives go in the VPN's IKEv2 profile.** NOMAD now writes `nat keepalive <seconds>` inside the VPN's `crypto ikev2 profile`, so it only affects that VPN's tunnels. It used to write `crypto ikev2 nat keepalive`, which changes every IKEv2 tunnel on the router. A VPN found with only the router-wide line keeps it and plans no change. If you change its seconds, the new value goes in the profile and overrides the router-wide line for that VPN. IKEv1 VPNs still use the router-wide `crypto isakmp nat keepalive`, because an ISAKMP profile has no NAT keepalive command.
+- **VPNs: a BGP prefix list with nothing to advertise denies at sequence 1000.** When a router has no LANs to send over the VPN, its outbound prefix list gets `seq 1000 deny 0.0.0.0/0 le 32` instead of `seq 5`. Permits you add later at the usual numbers (5, 10...) then come before the deny. A VPN found with the deny at 5 keeps it and plans no change.
+
 ## [2.1.0] - 2026-11-17
 
 ### Added

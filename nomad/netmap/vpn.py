@@ -185,7 +185,8 @@ SLOTS = {
                   "ip nhrp authentication", "ip ospf network", "ip ospf priority", "keepalive", "bandwidth",
                   "crypto map", "ip ospf cost", "delay"],
     "ikev2-proposal": ["encryption", "integrity", "prf", "group"],
-    "ikev2-profile": ["identity local", "authentication local", "keyring local", "dpd", "lifetime", "description"],
+    "ikev2-profile": ["identity local", "authentication local", "keyring local", "dpd", "lifetime", "description",
+                      "nat keepalive"],
     "isakmp-policy": ["encryption", "hash", "authentication", "group", "lifetime"],
     "isakmp-profile": ["keyring", "keepalive", "self-identity", "description"],
     "keyring-peer": ["address", "pre-shared-key local", "pre-shared-key remote", "pre-shared-key", "identity",
@@ -1215,7 +1216,8 @@ def bgp_blocks(vpn, member, device):
     blocks = [Block(f"ip prefix-list {plist} seq {5 * (number + 1)} permit {prefix}")
               for number, prefix in enumerate(advertise)]
     if not blocks:
-        blocks.append(Block(f"ip prefix-list {plist} seq 5 deny 0.0.0.0/0 le 32"))
+        # Nothing to advertise: deny all, numbered high so permits added later (5, 10...) come before it
+        blocks.append(Block(f"ip prefix-list {plist} seq 1000 deny 0.0.0.0/0 le 32"))
     process = Block(f"router bgp {local_as}", partial=True)
     target = process
     existing = device.block(f"router bgp {local_as}") if device is not None else None
@@ -1335,9 +1337,11 @@ def footprint(vpn, member, device, siblings=(), xe=None):
             if crypto.dpd:
                 profile.children.append(Block(f"dpd {crypto.dpd} {crypto.dpd_retry} "
                                               f"{'periodic' if crypto.dpd_periodic else 'on-demand'}"))
+            # NAT keepalives in the profile, so they only touch this VPN; one found router-wide (no line in the
+            # profile, as older NOMADs made it) is left there while the seconds stay the same
+            if crypto.nat_keepalive and name.get("nat_keepalive") != str(crypto.nat_keepalive):
+                profile.children.append(Block(f"nat keepalive {crypto.nat_keepalive}"))
             blocks.append(profile)
-            if crypto.nat_keepalive:
-                blocks.append(Block(f"crypto ikev2 nat keepalive {crypto.nat_keepalive}", sticky=True))
         else:
             if name["isakmp_policy"] != "default":  # "default": found using IOS's default policies
                 number, there = isakmp_policy_number(vpn, device)

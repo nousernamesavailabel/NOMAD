@@ -131,7 +131,7 @@ Edit a VPN found on the routers the same way. Only what changed is sent, in an o
 - Objects other VPNs use too are shared.
 - A crypto map VPN on a WAN interface that already has a crypto map gets an entry in that map.
 
-**Take Away** removes a VPN from its routers. What other VPNs may share, such as NAT keepalives and an IKEv1 policy, stays.
+**Take Away** removes a VPN from its routers. What other VPNs may share, such as an IKEv1 policy and the IKEv1 NAT keepalive, stays.
 
 ## Checks
 

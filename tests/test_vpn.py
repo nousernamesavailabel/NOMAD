@@ -126,6 +126,50 @@ def test_vti_lines_in_the_order_ios_takes_them():
         undo.index("no crypto ipsec profile") < undo.index("no crypto ikev2 proposal")
 
 
+def test_ikev2_nat_keepalive_goes_in_the_profile():
+    item, found = design(VTI, EIGRP)
+    item.crypto.nat_keepalive = 25
+    text = vpn.vpn_changes(None, item, found)["R6"].text()
+    assert "crypto ikev2 nat keepalive" not in text
+    profile = text[text.index("crypto ikev2 profile"):text.index("crypto ipsec transform-set")]
+    assert " nat keepalive 25" in profile
+    # Read back from the profile, and an unchanged VPN plans no lines
+    after = vpn.devices_after(None, item, found)
+    again = vpnfind.find(reads(after))[0]
+    assert again.crypto.nat_keepalive == 25
+    assert not any(change.lines for change in vpn.vpn_changes(again, again, after).values())
+
+
+def test_router_wide_ikev2_nat_keepalive_found_is_left_alone():
+    item, found = design(VTI, EIGRP)
+    item.crypto.nat_keepalive = 0
+    after = vpn.devices_after(None, item, found)
+    for key in ("R6", "R7"):  # As an older NOMAD made it: a global line, none in the profile
+        after[key] = vpn.parse_device("\n".join(vpn.render(after[key].tree)) + "\ncrypto ikev2 nat keepalive 20\n",
+                                      ROUTES.format(hop="8.0.0.21"), "Cisco IOS XE Software, Version 17.04.02")
+    again = vpnfind.find(reads(after))[0]
+    assert again.crypto.nat_keepalive == 20
+    assert not any(change.lines for change in vpn.vpn_changes(again, again, after).values())
+    again.crypto.nat_keepalive = 30  # A new value goes in the profile (it overrides the global one)
+    assert " nat keepalive 30" in vpn.vpn_changes(again, again, after)["R6"].text()
+
+
+def test_bgp_prefix_list_with_nothing_to_advertise_denies_at_1000():
+    item, found = design(VTI, BGP)
+    for m in item.members:
+        m.lans = []
+    text = vpn.vpn_changes(None, item, found)["R6"].text()
+    assert "ip prefix-list T-vti-OUT seq 1000 deny 0.0.0.0/0 le 32" in text
+    assert " seq 5 " not in text
+    # One an older NOMAD made at seq 5 is read back as it is: no change planned
+    after = vpn.devices_after(None, item, found)
+    old = {key: vpn.parse_device("\n".join(vpn.render(device.tree)).replace(" seq 1000 deny", " seq 5 deny"),
+                                 ROUTES.format(hop="8.0.0.21"), "Cisco IOS XE Software, Version 17.04.02")
+           for key, device in after.items()}
+    again = vpnfind.find(reads(old))[0]
+    assert not any(change.lines for change in vpn.vpn_changes(again, again, old).values())
+
+
 def test_keys_are_masked_in_what_is_shown():
     item, found = design(DMVPN, EIGRP)
     text = vpn.vpn_changes(None, item, found)["R5"].text()

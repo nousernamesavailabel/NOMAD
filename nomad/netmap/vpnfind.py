@@ -182,9 +182,10 @@ def read_crypto(device, ipsec_profile="", transform="", ike_profile="", ike="", 
 
 
 def read_ikev2(device, crypto, auth, names, profile_name, local_ip):
+    profile_lines = []
     if profile_name:
         names["ike_profile"] = profile_name
-        lines = children(block_of(device, f"crypto ikev2 profile {profile_name}"))
+        lines = profile_lines = children(block_of(device, f"crypto ikev2 profile {profile_name}"))
         names["keyring"] = value(lines, "keyring local")
         auth.method = V.CERT if value(lines, "authentication local") == "rsa-sig" else V.PSK
         auth.trustpoint = value(lines, "pki trustpoint").split(" ")[0]
@@ -221,7 +222,11 @@ def read_ikev2(device, crypto, auth, names, profile_name, local_ip):
         crypto.groups = groups or crypto.groups
     else:
         names["proposal"] = "default"  # IOS's default proposal: left as it is
-    keepalive = next((block.line.split()[-1] for block in device.blocks("crypto ikev2 nat keepalive")), "")
+    keepalive = value(profile_lines, "nat keepalive")  # The VPN's own, in its IKEv2 profile
+    if not keepalive.isdigit():
+        keepalive = next((block.line.split()[-1] for block in device.blocks("crypto ikev2 nat keepalive")), "")
+        if keepalive.isdigit():
+            names["nat_keepalive"] = keepalive  # Router-wide only: left where it is (nothing added to the profile)
     crypto.nat_keepalive = int(keepalive) if keepalive.isdigit() else 0
     crypto.preset = matching_preset(crypto)
 
