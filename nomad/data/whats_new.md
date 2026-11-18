@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-18
+
+- **New:** on **IP Addresses**, untick **Look up names** beside **Sweep Subnet** for a faster sweep without host names. If names are slow partway through, **Skip Names** keeps what the sweep found.
+
 ## [2.1.0] - 2026-11-17
 
 - **New:** on **VPNs**, a DMVPN with a hub has **New spoke (template)** under Changes, even with no spokes yet. A one-sided VPN has **Far end (template)**. These are the lines to copy for that router, built from the VPN's real settings, with placeholders only for the new router's own details.

@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-11-18
+
+### Added
+
+- **IP Addresses: sweep without looking up names.** A **Look up names** box beside **Sweep Subnet** turns off the DNS and NetBIOS lookups for the hosts that answer, which can take a long time on subnets with no DNS server. It's remembered, and no longer follows the Sweep page's setting (the sweep still uses that page's parallel pings, timeout and ARP settings). Without names, NetBIOS doesn't report MACs either, so hosts on routed subnets come back without one. When the pings are done but names are still being looked up, the button reads **Skip Names**: it stops waiting and keeps the sweep, marking what didn't answer as a finished sweep does (Stop Sweep used to leave them unmarked).
+
 ## [2.1.0] - 2026-11-17
 
 ### Added

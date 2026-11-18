@@ -528,6 +528,7 @@ class IpamTab(QWidget):
         self.sweeps = {}  # {"source:network id": SweepResults}: what sweeps found, loaded from the database
         self.as_of = None  # (moment in UTC, snapshot store) while viewing the network as it was
         self.sweep_worker = None
+        self.sweep_naming = False  # The sweep's pings are done and it's waiting for host names
         self.sweeping = None  # (source, network id, Block) while a sweep runs
         self.sweep_refresh = QTimer(self)  # Show hosts as they're found, without redrawing for every one
         self.sweep_refresh.setSingleShot(True)
@@ -714,13 +715,20 @@ class IpamTab(QWidget):
                                                         "network, broadcast or gateway address).")
         self.next_free_button.setToolTip(self.next_free_button.property("normal_tip"))
         self.sweep_button = QPushButton("Sweep Subnet")
-        self.sweep_button.setToolTip("Ping every address in this subnet (with ARP on local subnets, and host names) "
-                                     "and show what answers in the Last Sweep column. Uses the Sweep page's "
-                                     "settings.")
+        self.sweep_button.setToolTip("Ping every address in this subnet (with ARP on local subnets) and show what "
+                                     "answers in the Last Sweep column. Uses the Sweep page's parallel pings, "
+                                     "timeout and ARP settings.")
+        self.sweep_button.setProperty("normal_tip", self.sweep_button.toolTip())
+        self.sweep_names_check = QCheckBox("Look up names")
+        self.sweep_names_check.setChecked(True)
+        self.sweep_names_check.setToolTip("Look up each host that answers in DNS, falling back to its NetBIOS "
+                                          "name, which also reports its MAC on routed subnets.\nUntick to sweep "
+                                          "faster where name lookups are slow, such as subnets with no DNS server.")
         self.edit_address_button = QPushButton("Edit...")
         self.free_button = QPushButton("Mark Free")
         self.hide_free_check = QCheckBox("Hide free addresses")
-        for widget in (self.next_free_button, self.edit_address_button, self.free_button, self.sweep_button):
+        for widget in (self.next_free_button, self.edit_address_button, self.free_button, self.sweep_button,
+                       self.sweep_names_check):
             address_buttons.addWidget(widget)
         address_buttons.addStretch()
         address_buttons.addWidget(self.hide_free_check)
@@ -861,10 +869,12 @@ class IpamTab(QWidget):
         if self.network_id:
             settings.setValue("ipam/network", f"{self.source}:{self.network_id}")
         settings.setValue("ipam/hide_free", self.hide_free_check.isChecked())
+        settings.setValue("ipam/sweep_names", self.sweep_names_check.isChecked())
 
     def restore_settings(self, settings):
         self.saved_network_id = settings.value("ipam/network", "", str)
         self.hide_free_check.setChecked(settings.value("ipam/hide_free", False, bool))
+        self.sweep_names_check.setChecked(settings.value("ipam/sweep_names", True, bool))
 
     def shutdown(self):
         self.sync_timer.stop()
@@ -1777,9 +1787,13 @@ class IpamTab(QWidget):
         from ..sweep import LARGE_SWEEP_HOSTS, local_networks, sweep_hosts
         from .sweep_tab import SweepThread
         if self.sweep_worker is not None:
-            self.sweep_worker.stop()
+            if self.sweep_naming:  # The pings are done: keep the sweep, just stop waiting for names
+                self.sweep_worker.skip_names()
+                self.sweep_status.setText("Skipping the remaining name lookups...")
+            else:
+                self.sweep_worker.stop()
+                self.sweep_status.setText("Stopping...")
             self.sweep_button.setEnabled(False)
-            self.sweep_status.setText("Stopping...")
             return
         subnet = self.selected_subnet()
         if subnet is None:
@@ -1804,7 +1818,8 @@ class IpamTab(QWidget):
         self.sweeping = (self.source, self.network_id, block)
         self.sweep_worker = SweepThread(hosts, sweep_page.workers_input.value(), sweep_page.timeout_input.value(),
                                         arp_networks, sweep_page.arp_check.isChecked(),
-                                        sweep_page.names_check.isChecked(), self)
+                                        self.sweep_names_check.isChecked(), self)
+        self.sweep_naming = False
         self.sweep_worker.sweep_results, self.sweep_worker.sweep_block = results, block  # For its handlers
         self.sweep_worker.found.connect(self.on_sweep_found)
         self.sweep_worker.host_details.connect(self.on_sweep_name)
@@ -1836,6 +1851,8 @@ class IpamTab(QWidget):
 
     def on_sweep_looking_up_names(self, remaining):
         self.sweep_status.setText(f"Looking up names for {remaining} hosts...")
+        self.sweep_naming = True
+        self.update_buttons()
 
     def on_sweep_progress(self, done, total, pass_number, remaining):
         self.sweep_progress.setValue(done)
@@ -1860,6 +1877,7 @@ class IpamTab(QWidget):
     def on_sweep_thread_done(self):
         self.sweep_worker.deleteLater()
         self.sweep_worker = None
+        self.sweep_naming = False
         if self.sweeping:  # Stopped before it finished: keep what it found anyway
             results = self.sweeps.get(f"{self.sweeping[0]}:{self.sweeping[1]}")
             if results is not None:
@@ -2056,7 +2074,9 @@ class IpamTab(QWidget):
         subnet = self.selected_subnet()
         # Sweep is IPv4 only, and checks the present (not a view of the past); while one runs, the button stops it
         running = self.sweep_worker is not None
-        self.sweep_button.setText("Stop Sweep" if running else "Sweep Subnet")
+        self.sweep_button.setText(("Skip Names" if self.sweep_naming else "Stop Sweep") if running else "Sweep Subnet")
+        self.sweep_button.setToolTip("Stop waiting for host names; the sweep's results are kept."
+                                     if running and self.sweep_naming else self.sweep_button.property("normal_tip"))
         self.sweep_button.setEnabled(running or (subnet is not None and subnet.network.version == 4 and
                                                  self.as_of is None))
         self.show_sweep_actions()

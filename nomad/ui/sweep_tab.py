@@ -4,8 +4,9 @@ import csv
 import ipaddress
 import logging
 import os
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, \
@@ -45,6 +46,15 @@ class SweepThread(StoppableThread):
         self.last_progress = 0.0
         self.resolver = None
         self.pending_names = []
+        self.skip_event = threading.Event()
+
+    def skip_names(self):
+        """Stop waiting for host names; the sweep itself still counts as finished."""
+        self.skip_event.set()
+
+    @property
+    def skipping_names(self):
+        return self.stopping or self.skip_event.is_set()
 
     def report_progress(self, done, total, pass_number, remaining):
         now = time.monotonic()
@@ -55,7 +65,7 @@ class SweepThread(StoppableThread):
     def on_found(self, address, hit):
         self.found.emit(str(address), hit)
         if self.resolver is not None:
-            future = self.resolver.submit(lambda: None if self.stopping else lookup_host(address))
+            future = self.resolver.submit(lambda: None if self.skipping_names else lookup_host(address))
             future.add_done_callback(lambda done, address=str(address): self.report_details(address, done))
             self.pending_names.append(future)
 
@@ -63,7 +73,7 @@ class SweepThread(StoppableThread):
         if future.cancelled() or future.exception() is not None or future.result() is None:
             return
         name, mac = future.result()
-        if (name or mac) and not self.stopping:
+        if (name or mac) and not self.skipping_names:  # Skipped: the page has moved on, and may free this thread
             self.host_details.emit(address, name, mac)
 
     def run(self):
@@ -78,10 +88,13 @@ class SweepThread(StoppableThread):
                 remaining = sum(1 for future in self.pending_names if not future.done())
                 if remaining:
                     self.looking_up_names.emit(remaining)
+                # Wait for the names, but give up as soon as they're skipped
+                while not self.skipping_names and not all(future.done() for future in self.pending_names):
+                    wait(self.pending_names, timeout=0.2)
         finally:
             if self.resolver is not None:
-                # When stopped, drop queued lookups; DNS can be slow to give up when there's no DNS server
-                self.resolver.shutdown(wait=not self.stopping, cancel_futures=self.stopping)
+                # When stopped or skipped, drop queued lookups; DNS can be slow to give up when there's no DNS server
+                self.resolver.shutdown(wait=not self.skipping_names, cancel_futures=self.skipping_names)
         elapsed = time.monotonic() - started
         found = f"{len(alive)} host{'' if len(alive) == 1 else 's'} found in {elapsed:.1f} seconds"
         self.finished_sweep.emit(f"Sweep stopped: {found}." if self.stopping else f"Sweep complete: {found}.")

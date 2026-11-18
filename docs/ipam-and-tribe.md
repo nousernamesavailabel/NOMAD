@@ -60,6 +60,7 @@ Right-click a subnet > **Add Windows Route...** opens the Routing Table with the
 | Red | IPAM says used, but nothing answered |
 | Amber | Something answered that IPAM doesn't have |
 
+- Untick **Look up names** to sweep faster without host names. Name lookups can be slow on a subnet with no DNS server. Once the pings are done, **Skip Names** stops waiting for the names that are left.
 - **Record Answering Devices** and **Update MACs** save what a sweep found.
 - Sweep results are kept, and shared through the IPAM server with who swept, including sweeps made offline.
 
