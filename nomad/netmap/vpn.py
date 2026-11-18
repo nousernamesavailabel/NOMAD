@@ -540,6 +540,7 @@ class DeviceVpns:
     acls: object = None  # acl.DeviceAcls
     xe: bool = True
     version: str = ""
+    running: str = ""  # The running-config as read (for the Editor's Show as Diff)
     routes: list = field(default_factory=list)  # [Route]
     status: object = None  # vpnstatus.Status
     toward_pc: str = ""  # The interface this PC is reached through

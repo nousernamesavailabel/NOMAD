@@ -925,6 +925,11 @@ class VpnTab(QWidget):
         export_menu.addAction(self.export_all_action)
         self.export_button.setMenu(export_menu)
         top.addWidget(self.export_button)
+        self.diff_button = QPushButton("Show as Diff")
+        self.diff_button.setToolTip("The router's running-config now beside how it would look with these lines "
+                                    "(roughly), in the Editor (choose one router above)")
+        self.diff_button.clicked.connect(self.show_as_diff)
+        top.addWidget(self.diff_button)
         self.discard_button = QPushButton("Discard Changes")
         self.discard_button.clicked.connect(self.discard_changes)
         top.addWidget(self.discard_button)
@@ -2167,6 +2172,22 @@ class VpnTab(QWidget):
     def show_preview(self, *_):
         self.preview.setPlainText(self.preview_text())
         self.update_buttons()
+
+    def show_as_diff(self):
+        """The router as read beside how it would look with its lines, in the Editor."""
+        key = self.preview_combo.currentData()
+        editor = getattr(self.window, "editor_tab", None)
+        read = self.read.get(key) if key else None
+        if editor is None or not key or key.startswith("side:") or read is None or not getattr(read, "running", ""):
+            set_hint(self.status_label, "Choose one router that's been read (beside Lines to send) first.", "warning")
+            return
+        text = self.preview_text(undo=self.undo_radio.isChecked(), reveal=True, key=key)
+        if not text.strip():
+            set_hint(self.status_label, "There are no lines for that router.", "warning")
+            return
+        target = self.targets.get(key) if hasattr(self, "targets") else None
+        context = {"address": target.address, "names": list(target.names), "platform": "ios"} if target else {}
+        editor.show_preview_diff(self.title(key), read.running, text, context)
 
     def copy_preview(self):
         QApplication.clipboard().setText(self.preview.toPlainText())

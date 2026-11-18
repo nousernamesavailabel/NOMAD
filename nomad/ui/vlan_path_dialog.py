@@ -348,6 +348,11 @@ class VlanPathDialog(QDialog):
         preview_buttons.addWidget(QLabel("Show:"))
         preview_buttons.addWidget(self.preview_combo)
         preview_buttons.addWidget(self.copy_button)
+        self.diff_button = QPushButton("Show as Diff")
+        self.diff_button.setToolTip("The switch's running-config (from the config archive) beside how it would look "
+                                    "with these lines, in the Editor")
+        self.diff_button.clicked.connect(self.show_as_diff)
+        preview_buttons.addWidget(self.diff_button)
         preview_buttons.addStretch(1)
         preview_layout.addLayout(preview_buttons)
         self.preview = QPlainTextEdit()
@@ -1068,6 +1073,16 @@ class VlanPathDialog(QDialog):
         text = self.step_text(row, self.preview_combo.currentData()) if row >= 0 else ""
         self.preview.setPlainText(text)
         self.copy_button.setEnabled(bool(text))
+
+    def show_as_diff(self):
+        row = self.selected_step_row()
+        step = self.step(row) if row >= 0 else None
+        text = self.preview.toPlainText()
+        editor = getattr(self.page.window, "editor_tab", None)
+        device = self.network_map.devices.get(step.device) if step is not None and self.network_map else None
+        if editor is None or device is None or not device.mgmt_ip or not text.strip():
+            return
+        editor.preview_diff_from_archive(editor.target_for_device(device), text)
 
     def copy_preview(self):
         text = self.preview.toPlainText()

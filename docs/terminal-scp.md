@@ -81,6 +81,7 @@ Good to know:
 - **Cancel Save** (or Ctrl+Shift+S again) interrupts it.
 - A disconnect, command error or five-minute timeout leaves the destination unchanged.
 - It stays in that session even with Send to All on.
+- A copy also goes in the [config archive](editor.md#the-config-archive) on the Editor page. Right-click the session tab, then **Open Saved Config in Editor** to open it there.
 
 ## Security
 

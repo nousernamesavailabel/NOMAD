@@ -33,9 +33,9 @@ from ..netmap.layout import BOTTOM, CENTER, GROUP_PAD, GROUP_TITLE, HORIZONTAL, 
     spacing_of
 from ..netmap.placement import places as subnet_places
 from ..netmap.tribe import SECRETS
-from ..netmap.model import AP_DOWN, AP_UP, BUILDING, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIND_NAMES, NO_SNMP, \
-    PARENT_KIND, ROUTER, SNMP, SWITCH, UNCHECKED, UNREACHABLE, WLC, Group, Link, NetworkMap, display_name, port_key, \
-    short_port
+from ..netmap.model import AP_DOWN, AP_UP, BUILDING, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIND_NAMES, \
+    NETWORK_KINDS, NO_SNMP, PARENT_KIND, ROUTER, SNMP, SWITCH, UNCHECKED, UNREACHABLE, WLC, Group, Link, NetworkMap, \
+    display_name, port_key, short_port
 from ..snmp import V2C
 from ..snmpv3 import is_v3
 from ..terminal.credentials import CredentialError, protect, unprotect
@@ -171,6 +171,7 @@ class NetworkMapTab(QWidget):
         self.worker = None
         self.network_map = None
         self.map_path = None
+        self.config_notes = {}  # The Editor page's: devices whose configuration changed, or that fail a standard
         self.communities, self.overrides = ["public"], []
         self.v3_users, self.v3_first = [], True  # SNMPv3 users (V3Users) to try too, and whether before communities
         self.answered = {}  # Address -> the community or V3User it answered to (this session's, never in the map file)
@@ -1273,6 +1274,7 @@ class NetworkMapTab(QWidget):
         if self.hosts_check.isChecked():
             self.view.set_all_hosts_shown(True)
         self.view.set_news(network_map.news)
+        self.view.set_config_notes(self.config_notes)
         identity = (self.tribe_map_id, str(path), network_map.started)
         if identity != getattr(self, "watched_identity", None):
             self.watched_identity = identity
@@ -2841,7 +2843,11 @@ class NetworkMapTab(QWidget):
         self.device_ipam_menu(ipam, actions, device)
         if editing and hub(self.window) is not None:
             actions[ipam.addAction("Record Its Addresses in IPAM...")] = lambda: self.record_in_ipam(device=key)
-        drop_empty_submenus(menu, show_in, layout, edit, overlay, vlans, ipam)
+        config = add_submenu(menu, "Config")
+        editor = getattr(self.window, "editor_tab", None)
+        if device.kind in NETWORK_KINDS and hasattr(editor, "device_config_menu"):
+            editor.device_config_menu(config, actions, device)
+        drop_empty_submenus(menu, show_in, layout, edit, overlay, vlans, ipam, config)
         menu.addSeparator()
         actions[menu.addAction("Copy Name")] = lambda: QApplication.clipboard().setText(device.label)
         if device.mgmt_ip:
@@ -4062,6 +4068,11 @@ class NetworkMapTab(QWidget):
         refs += [f"host:{host.mac}" for host in self.network_map.hosts
                  if host.device in keys and f"host:{host.mac}" in self.network_map.news]
         return refs
+
+    def show_config_flags(self, notes):
+        """The Editor page's CFG tags ({device archive id: note})."""
+        self.config_notes = dict(notes)
+        self.view.set_config_notes(self.config_notes)
 
     def mark_seen(self, refs):
         """Clear NEW tags (all of them when refs is None)."""

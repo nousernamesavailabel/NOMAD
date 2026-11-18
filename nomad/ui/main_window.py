@@ -21,6 +21,7 @@ from .connections_tab import ConnectionsTab
 from .dhcp_tab import DhcpTab
 from .dialogs import AboutDialog, LogDialog, WhatsNewDialog
 from .dns_servers_tab import DnsServersTab
+from .editor_tab import EditorTab
 from .iperf_tab import IperfTab
 from .integration import Integration
 from .assets_tab import AssetsTab
@@ -110,6 +111,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"{APP_NAME} {__version__} - {APP_FULL_NAME}" + (" (Administrator)" if self.admin else ""))
         self.resize(1180, 800)
+        self.setAcceptDrops(True)  # Files dropped open in the Editor
         self.init_ui()
         self.startup_step("Restoring your settings...", 0.94)
         self.ip_context_menus = IpContextMenus(self)
@@ -216,6 +218,8 @@ class MainWindow(QMainWindow):
         self.terminal_tab = TerminalTab(self, terminal_store)
         self.scp_tab = ScpTab(self, terminal_store)
         self.rdp_tab = RdpTab(self, self.session_store)
+        self.startup_step("Loading the Editor...", 0.76)
+        self.editor_tab = EditorTab(self)  # The config archive: the Network Map's devices, saved sessions' SSH logins
         self.startup_step("Loading IP Addresses and VLANs...", 0.79)
         self.integration = Integration(self)  # The Manage pages and the map, as one
         self.ipam_tab = IpamTab(self)
@@ -243,7 +247,7 @@ class MainWindow(QMainWindow):
                 (self.assets_tab, "Assets"), (self.inventory_tab, "Ansible Inventory")]),
             ("Capture & Logs", [(self.capture_tab, "Packet Capture"), (self.mirror_tab, "Port Mirroring"),
                                 (self.syslog_tab, "Syslog")]),
-            ("Utilities", [(self.subnet_tab, "Subnet Calculator")]),
+            ("Utilities", [(self.subnet_tab, "Subnet Calculator"), (self.editor_tab, "Editor")]),
         ]
         self.all_tabs = []
         self.navigator.fixed_pages = {self.terminal_tab, self.scp_tab, self.rdp_tab}  # Their sessions pop out
@@ -426,6 +430,30 @@ class MainWindow(QMainWindow):
         self.navigator.setCurrentWidget(self.vpn_tab)
         self.vpn_tab.prefill(list(devices), new)
 
+    def show_editor(self, path=""):
+        """The Editor page, with a file opened in it (when given)."""
+        self.navigator.setCurrentWidget(self.editor_tab)
+        if path:
+            self.editor_tab.open_file(path)
+
+    def dragEnterEvent(self, event):
+        """Files dropped on the window (anywhere a page doesn't take them itself) open in the Editor."""
+        if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        paths = [path for path in paths if os.path.isfile(path)]
+        if not paths:
+            super().dropEvent(event)
+            return
+        event.acceptProposedAction()
+        self.navigator.setCurrentWidget(self.editor_tab)
+        for path in paths:
+            self.editor_tab.open_file(path)
+
     def show_mirror(self, source=None, ports=(), vlan=0, dest=None, dest_port="", host=""):
         """The Port Mirroring page, filled in from the Network Map: mirror ports (or a VLAN, or a host's port) of
         source, or to dest's dest_port."""
@@ -470,7 +498,8 @@ class MainWindow(QMainWindow):
         self.settings.sync()
 
     def closeEvent(self, event):
-        if not self.terminal_tab.confirm_close() or not self.scp_tab.confirm_close():
+        if not self.terminal_tab.confirm_close() or not self.scp_tab.confirm_close() or \
+                not self.editor_tab.confirm_close():
             event.ignore()
             return
         self.save_settings()
@@ -713,6 +742,8 @@ class MainWindow(QMainWindow):
             self.netmap_tab.tribe_key_changed()
         if origin is not self.ipam_tab and self.ipam_tab.local_store is not None:  # Opened: else it's read later
             self.ipam_tab.connect_team()
+        if origin is not self.editor_tab:
+            self.editor_tab.tribe_key_changed()
         self.tribe_banner.check()
 
     def confirm_leave_tribe(self, parent):

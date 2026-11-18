@@ -304,6 +304,7 @@ class Pusher:
             self.forget(address)
             return acl.DeviceAcls(problem=str(error))
         device = acl.parse_running(running)
+        device.running = running
         acl.merge_show(device, acl.parse_show(f"{shown}\n{shown6}"))
         if prefixes and not macssh.INVALID.search(prefixes):
             routepolicy.merge_show_prefix(device, prefixes)
@@ -531,6 +532,7 @@ class Pusher:
             return vpn.DeviceVpns(problem=str(error))
         device = vpn.parse_device(running, routes if not macssh.INVALID.search(routes) else "", version)
         device.status = vpnstatus.parse(raw)
+        device.running = running
         device.toward_pc = acl.parse_toward(toward) if toward else ""
         device.pc_ip = pc_ip
         device.when = acl.now_text()

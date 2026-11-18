@@ -25,6 +25,7 @@ python -m pytest
 This runs the tests, then builds `dist\NOMAD-<version>.exe`, a single file with no console window.
 
 - `build.ps1` uses `.venv` when it exists.
+- The Editor page needs QScintilla (the `QScintilla` package in `requirements.txt`). After pulling a version that added it, run `pip install -r requirements.txt` again.
 - If PowerShell says running scripts is disabled, run `powershell -ExecutionPolicy Bypass -File .\build.ps1`.
 - The exe's startup splash is drawn by PyInstaller with Python's Tcl/Tk, so the Python that builds needs tkinter. That's the python.org installer's "tcl/tk and IDLE" option, on by default.
 

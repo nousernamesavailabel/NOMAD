@@ -271,6 +271,7 @@ class DeviceItem(NodeItem):
         self.device, self.host_ports = device, host_ports
         self.monitor_state = None  # A monitor.DeviceStatus while the device is monitored
         self.news_text = ""  # "NEW", or "2 new hosts": found by watching and not looked at yet
+        self.config_note = ""  # Its configuration changed (not reviewed) or fails a standard: the Editor page says
         self.rect = QRectF(-NODE_WIDTH / 2, -NODE_HEIGHT / 2, NODE_WIDTH, NODE_HEIGHT)
         self.host_count = sum(len(hosts) for hosts in host_ports.values())
         self.badge = QRectF(-45, NODE_HEIGHT / 2 + 4, 90, BADGE_HEIGHT) if self.host_count else QRectF()
@@ -291,6 +292,7 @@ class DeviceItem(NodeItem):
         if self.host_count:
             tip.append(f"{self.host_count} hosts: double-click to show them by port")
         tip.append(self.lock_note())
+        tip.append(self.config_note)
         self.setToolTip("\n".join(part for part in tip if part))
 
     def boundingRect(self):
@@ -315,6 +317,26 @@ class DeviceItem(NodeItem):
         painter.setFont(font)
         painter.setPen(QColor(COLORS["panel"]))
         painter.drawText(tag, Qt.AlignCenter, self.news_text)
+
+    def set_config_note(self, note):
+        if note != self.config_note:
+            self.config_note = note
+            self.update_tip()
+            self.update()
+
+    def draw_config_tag(self, painter):
+        """An amber CFG tag on the top edge: its configuration changed and nobody has reviewed it, or it fails a
+        standard (the Editor page)."""
+        font = small_font(0.7, bold=True)
+        width = QFontMetrics(font).horizontalAdvance("CFG") + 12
+        left = self.rect.left() + (30 if self.route_text else 10)
+        tag = QRectF(left, self.rect.top() - NEWS_HEIGHT + 3, width, NEWS_HEIGHT)
+        path = QPainterPath()
+        path.addRoundedRect(tag, NEWS_HEIGHT / 2, NEWS_HEIGHT / 2)
+        painter.fillPath(path, QColor(COLORS["warning"]))
+        painter.setFont(font)
+        painter.setPen(QColor(COLORS["panel"]))
+        painter.drawText(tag, Qt.AlignCenter, "CFG")
 
     def draw_route_text(self, painter):
         """Its place on Carry VLAN's route, in a tag over the top left corner."""
@@ -437,6 +459,8 @@ class DeviceItem(NodeItem):
             self.draw_status_dot(painter, state)
         if self.news_text:
             self.draw_news(painter)
+        if self.config_note:
+            self.draw_config_tag(painter)
         if self.route_text:
             self.draw_route_text(painter)
 
@@ -1510,6 +1534,14 @@ class MapView(QGraphicsView):
                     item.update()
         for item in self.group_items.values():
             item.update()  # How many in it are down
+
+    def set_config_notes(self, notes):
+        """The CFG tags: {device's archive id (its management address, else name), lowercase: note}."""
+        for item in self.items_by_key.values():
+            if isinstance(item, DeviceItem):
+                device = item.device
+                device_id = (device.mgmt_ip or device.name or device.key).strip().lower()
+                item.set_config_note(notes.get(device_id, ""))
 
     def set_news(self, news):
         """Mark what watching found and nobody's looked at yet (a map's news: {"device:key" or "host:MAC": ...})."""

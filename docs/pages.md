@@ -230,6 +230,10 @@ Network, mask, host range and counts for IPv4 and IPv6, and splitting a network 
 
 ![The Subnet Calculator](screenshots/subnet-calculator.png)
 
+### Editor
+
+A text editor for configurations, like Notepad++: tabs, find and replace with regular expressions, Cisco coloring and folding, and column selection. **Compare** shows two configurations side by side (plain, without noise, or by section) and writes the commands that make one like the other. The config archive keeps every change to each device's configuration, backed up on a schedule, with standards every copy is checked against. See the [Editor guide](editor.md).
+
 ## Other tools
 
 - **Diagnostics report:** **Tools** > **Run Diagnostics Report...** (Ctrl+R).

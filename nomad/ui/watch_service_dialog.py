@@ -5,12 +5,14 @@ import logging
 import os
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QListWidget, \
-    QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout
+from PyQt5.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, \
+    QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout
 
 from ..ipam.client import current_key
 from ..netmap import watch_service
+from ..terminal.sessions import AUTH_PASSWORD, SSH
 from .common import run_in_background, set_hint
+from .credential_dialogs import CredentialPicker
 from .netmap_watch import WatchTimers
 from .theme import accent_button
 
@@ -41,6 +43,21 @@ class MapWatcherDialog(QDialog):
         self.listen_check = QCheckBox("Listen for syslog and SNMP traps (opens UDP 514 and 162 in Windows Firewall)")
         form.addRow(self.timers)
         form.addRow("", self.listen_check)
+        self.backups_check = QCheckBox("Run the tribe's scheduled config backups (it gets the devices due first)")
+        self.backups_check.setToolTip("The Editor page's config archive: each router, switch, firewall and WLC on the "
+                                      "tribe maps is backed up once an interval. The service logs in with the login "
+                                      "below (its password is copied into the service's settings, encrypted for this "
+                                      "computer).")
+        form.addRow("", self.backups_check)
+        backup_row = QHBoxLayout()
+        self.backup_login = CredentialPicker(self, getattr(window, "session_store", None), SSH, "",
+                                             "Choose a saved credential")
+        self.backup_enable = QLineEdit()
+        self.backup_enable.setEchoMode(QLineEdit.Password)
+        self.backup_enable.setPlaceholderText("Enable password (if they log in at >)")
+        backup_row.addWidget(self.backup_login, 2)
+        backup_row.addWidget(self.backup_enable, 1)
+        form.addRow("Backups log in with:", backup_row)
         layout.addLayout(form)
         row = QHBoxLayout()
         self.install_button = accent_button("Install Service")
@@ -92,6 +109,7 @@ class MapWatcherDialog(QDialog):
             self.maps_list.addItem(entry)
         self.timers.set_values(watch_service.config_timers(config))
         self.listen_check.setChecked(config.get("listen", True))
+        self.backups_check.setChecked(bool(config.get("backups")))
         if maps is None:
             set_hint(self.message_label, "This computer has no tribe key: connect to the tribe first (Tribe > Connect "
                                          "to the Tribe with a Key File on the Network Map page), then share a map "
@@ -153,8 +171,14 @@ class MapWatcherDialog(QDialog):
             set_hint(self.message_label, "This computer has no tribe key: connect to the tribe first (Tribe > Connect "
                                          "to the Tribe with a Key File on the Network Map page).", "error")
             return
+        backups = None
+        if self.backups_check.isChecked():
+            backups = self.backup_login_settings()
+            if backups is None:
+                return
         try:
-            config = watch_service.make_config(key, chosen, self.listen_check.isChecked(), self.timers.values())
+            config = watch_service.make_config(key, chosen, self.listen_check.isChecked(), self.timers.values(),
+                                               backups=backups)
         except Exception as error:
             set_hint(self.message_label, f"Couldn't prepare the service's settings: {error}", "error")
             return
@@ -162,6 +186,26 @@ class MapWatcherDialog(QDialog):
         self.run("Installing the service (this takes a few seconds)...", lambda: watch_service.install(config),
                  "The Map Watcher is running. NOMAD open on other computers stands by while it watches; what it "
                  "finds appears on the tribe maps tagged NEW.")
+
+    def backup_login_settings(self):
+        """The backup login for the service's config ({"username", "password", ...} as typed), or None (and why,
+        said)."""
+        store = getattr(self.window, "session_store", None)
+        credential = self.backup_login.credential() if store is not None else None
+        if credential is None or credential.auth != AUTH_PASSWORD or not credential.saved_password:
+            set_hint(self.message_label, "Choose a saved credential with a saved password for the backups: the "
+                                         "service has nobody to ask.", "warning")
+            return None
+        from .vault_dialog import ensure_unlocked
+        if not ensure_unlocked(self, store, "The Map Watcher's backups need the credential's password."):
+            return None
+        try:
+            password = store.vault.reveal(credential.saved_password)
+        except Exception as error:
+            set_hint(self.message_label, f"Couldn't read the credential's password: {error}", "error")
+            return None
+        return {"username": credential.username, "password": password, "enable": self.backup_enable.text(),
+                "label": f"credential {credential.name}", "trust_new": True}
 
     def uninstall(self):
         if QMessageBox.question(self, "Uninstall the Map Watcher",

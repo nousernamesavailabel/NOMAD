@@ -90,6 +90,8 @@ TOOL_ART = {
     "Syslog": '<path d="M5 2h10l4 4v16H5z M15 2v5h4 M8 11h8m-8 4h8m-8 4h5"/>',
     "Subnet Calculator": '<rect x="5" y="2" width="14" height="20" rx="2"/>'
                          '<path d="M8 6h8 M8 11h1m6 0h1m-8 4h1m6 0h1m-8 4h1m6 0h1"/>',
+    "Editor": '<path d="M4 3h9l4 4v6 M13 3v4h4 M4 3v18h7 M7 9h4 M7 13h3"/>'
+              '<path d="M15 21l-1-3 6-6 2 2-6 6z M13 16h-6"/>',
 }
 
 CONTROL_ART = {

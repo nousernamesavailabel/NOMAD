@@ -41,6 +41,24 @@ Tribe maps (network maps shared by everyone; see nomad/netmap/shared.py), kept i
     POST /api/maps/lease              {"map_id", "holder", "kind", "release", "take"}: who's watching it for new
                                       devices (so two computers don't both poll the network)
     /api/wait also takes maps_since, and answers when a map changes.
+
+The config archive (API 16; see nomad/configs/archive.py), kept in configs.db: every change to each device's
+configuration, scheduled backups handed out device by device, and standards checked as copies arrive:
+    GET  /api/configs/changes?since=N devices, versions (without their texts), standards and results after revision N
+    GET  /api/configs/version?id=N    one version, with its text
+    POST /api/configs/claim           {"holder", "kind", "limit", "status"}: due devices for this computer to back up
+                                      (status: how its last round went)
+    GET  /api/configs/runners         the computers backing up now, and what each is working on
+    GET  /api/configs/results?limit=N scheduled backups' outcomes from every computer, newest first
+    POST /api/configs/due             {"device_ids"} or {"all": true}: back them up as soon as a computer can
+    POST /api/configs/report          {"device_id", "reason"}: this computer couldn't (another gets it)
+    POST /api/configs/upload          {"device_id", "which", "text", "source", "changed_by", "name", "address",
+                                      "platform"}: a configuration pulled (kept when it changed)
+    POST /api/configs/review          {"version_id"}: a change seen
+    POST /api/configs/exclude         {"device_id", "excluded"}: left out of scheduled backups
+    POST /api/configs/standard        {"name", "text"} saves a standard ({"name", "delete": true} removes it)
+    POST /api/configs/settings        {"values": {"interval_hours"}}
+    /api/wait also takes configs_since.
 """
 import datetime
 import hashlib
@@ -64,6 +82,8 @@ from urllib.parse import parse_qs, urlparse
 
 from .. import __version__
 from ..system import replace_file
+from ..configs import checks as config_checks, scope as config_scope
+from ..configs.archive import ArchiveError, ConfigStore
 from ..netmap.shared import MapError, MapStore
 from .store import IpamError, IpamStore
 from .assets import AssetStore, label as asset_label
@@ -88,9 +108,10 @@ MAX_WAIT_SECONDS = 55
 STOP_WAIT_SECONDS = 10  # How long stop() waits for the listener to close
 HANDSHAKE_SECONDS = 15  # A connection that hasn't finished its TLS handshake by then is dropped
 IDLE_SECONDS = MAX_WAIT_SECONDS + 30  # A connection that sends nothing for this long is closed (past /api/wait's)
-API_LEVEL = 15  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
+API_LEVEL = 16  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
 # 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks, 11 assets,
-# 12 software targets, 13 wireless controller assets, 14 map icons locked in place, 15 taking a laptop's whole network.
+# 12 software targets, 13 wireless controller assets, 14 map icons locked in place, 15 taking a laptop's whole network,
+# 16 the config archive.
 # Clients cope with servers below this, and recommend updating them (add each new level to client.SERVER_FEATURES)
 
 
@@ -163,7 +184,7 @@ def set_up(directory=None, port=DEFAULT_PORT):
     return config
 
 
-DATA_FILES = ("ipam.db", "maps.db")  # The tribe's data: a folder with them is a server already
+DATA_FILES = ("ipam.db", "maps.db", "configs.db")  # The tribe's data: a folder with them is a server already
 IDENTITY_FILES = ("config.json", "cert.pem", "key.pem")  # What makes it that server (its id, secrets, fingerprint)
 
 
@@ -254,6 +275,9 @@ class IpamServer:
         self.latest_sightings = self.store.sighting_seq()  # Sweeps' news, which laptops also wait for
         self.maps = MapStore(self.directory / "maps.db", *_map_secret_protection())
         self.latest_maps = self.maps.revision()
+        self.configs = ConfigStore(self.directory / "configs.db")
+        self.latest_configs = self.configs.revision()
+        self.scope_revision = None  # The map revision the backups' devices were last taken from
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(self.directory / "cert.pem", self.directory / "key.pem")
@@ -263,6 +287,7 @@ class IpamServer:
         except OSError as error:
             self.store.close()
             self.maps.close()
+            self.configs.close()
             raise OSError(f"Couldn't listen on port {self.port}: {error.strerror or error}. Another program may be "
                           f"using it (see which with: netstat -ano | findstr :{self.port}).") from error
         self.port = self.httpd.server_address[1]  # The actual port, when asked for any free one (0)
@@ -285,6 +310,8 @@ class IpamServer:
                 self.store.close()
             with self.maps.lock:
                 self.maps.close()
+            with self.configs.lock:
+                self.configs.close()
             log.info("IPAM server stopped")
 
     def stop(self):
@@ -296,9 +323,11 @@ class IpamServer:
         stopper.start()
         stopper.join(STOP_WAIT_SECONDS)
 
-    def announce(self, revision=None, sightings=None, maps=None):
-        """Tell every waiting laptop there's a new revision (or new sightings, or a map changed)."""
+    def announce(self, revision=None, sightings=None, maps=None, configs=None):
+        """Tell every waiting laptop there's a new revision (or new sightings, or a map or config changed)."""
         with self.changed:
+            if configs is not None:
+                self.latest_configs = max(self.latest_configs, configs)
             if revision is not None:
                 self.latest = max(self.latest, revision)
             if sightings is not None:
@@ -307,15 +336,17 @@ class IpamServer:
                 self.latest_maps = max(self.latest_maps, maps)
             self.changed.notify_all()
 
-    def wait(self, since, timeout, sightings_since=None, maps_since=None):
+    def wait(self, since, timeout, sightings_since=None, maps_since=None, configs_since=None):
         """Block until there's a revision after `since` (or sightings after `sightings_since`, or a map revision
         after `maps_since`, when given), the timeout passes, or the server stops."""
         timeout = max(0.0, min(float(timeout), MAX_WAIT_SECONDS))
         with self.changed:
             self.changed.wait_for(lambda: self.latest > since or self.stop_event.is_set() or
                                   (sightings_since is not None and self.latest_sightings > sightings_since) or
-                                  (maps_since is not None and self.latest_maps > maps_since), timeout)
-            return {"revision": self.latest, "sightings": self.latest_sightings, "maps": self.latest_maps}
+                                  (maps_since is not None and self.latest_maps > maps_since) or
+                                  (configs_since is not None and self.latest_configs > configs_since), timeout)
+            return {"revision": self.latest, "sightings": self.latest_sightings, "maps": self.latest_maps,
+                    "configs": self.latest_configs}
 
     # ----------------------------------------------------------------- Requests
 
@@ -343,7 +374,7 @@ class IpamServer:
             revision = self.store.revision()
         return {"server_id": self.config["server_id"], "name": socket.gethostname(), "version": __version__,
                 "api": API_LEVEL, "revision": revision, "sightings": self.latest_sightings, "maps": self.latest_maps,
-                "role": role}
+                "configs": self.latest_configs, "role": role}
 
     def sightings(self, since):
         with self.store.lock:
@@ -447,6 +478,98 @@ class IpamServer:
     def map_secrets(self, map_id):
         with self.maps.lock:
             return {"secrets": self.maps.secrets(map_id)}
+
+    # ----------------------------------------------------------------- The config archive
+
+    def _refresh_scope(self):
+        """Take the backups' devices from the tribe maps when they've changed since last time (under configs.lock).
+        Returns the configs revision when that changed anything, else None."""
+        with self.maps.lock:
+            revision = self.maps.revision()
+            if revision == self.scope_revision:
+                return None
+            rows = config_scope.rows_for_map_store(self.maps)
+        self.scope_revision = revision
+        changed = self.configs.sync_devices(rows)
+        if changed and self.configs.standards():
+            for device_id in changed:
+                config_checks.recheck(self.configs, device_id)
+        return self.configs.revision() if changed else None
+
+    def config_changes(self, since):
+        with self.configs.lock:
+            scoped = self._refresh_scope()
+            payload, revision = self.configs.changes_since(since)
+        if scoped is not None:
+            self.announce(configs=scoped)
+        return dict(payload, revision=revision)
+
+    def config_results(self, limit):
+        with self.configs.lock:
+            return {"results": self.configs.results(max(1, min(int(limit), 500)))}
+
+    def config_runners(self):
+        with self.configs.lock:
+            return {"runners": self.configs.runners()}
+
+    def config_version(self, version_id):
+        with self.configs.lock:
+            version = self.configs.version(version_id)
+        if version is None:
+            raise RequestError(404, "That version isn't in the config archive.")
+        return {"version": version}
+
+    def config_request(self, action, user, request):
+        """A change to the config archive (or a claim on backups). Returns the reply; announces the new revision."""
+        computer = user.rpartition("(")[2].rstrip(")") if "(" in user else user
+        reply = {}
+        with self.configs.lock:
+            if action == "claim":
+                scoped = self._refresh_scope()
+                devices = self.configs.claim(_clean(request.get("holder"), 128) or computer, computer,
+                                             "service" if request.get("kind") == "service" else "gui",
+                                             max(1, min(int(request.get("limit", 3)), 20)),
+                                             status=_clean(request.get("status"), 300), user=user)
+                if scoped is not None:
+                    self.announce(configs=scoped)
+                return {"devices": devices}  # Claims aren't changes anyone waits for
+            if action == "report":
+                revision = self.configs.report_failure(request["device_id"], computer,
+                                                       _clean(request.get("reason"), 500), by=user)
+            elif action == "upload":
+                which = request.get("which", "running")
+                outcome = self.configs.upload(request["device_id"], which, request["text"], user,
+                                              _clean(request.get("source")) or "manual",
+                                              _clean(request.get("changed_by"), 128), _clean(request.get("name"), 200),
+                                              _clean(request.get("address"), 100), _clean(request.get("platform")))
+                if outcome["stored"] and which == "running":
+                    config_checks.recheck(self.configs, request["device_id"])
+                revision = self.configs.revision()
+                reply = outcome
+            elif action == "review":
+                revision = self.configs.review(request["version_id"], user)
+            elif action == "exclude":
+                revision = self.configs.set_excluded(request["device_id"], bool(request.get("excluded")))
+            elif action == "standard":
+                name = _clean(request.get("name"), 200)
+                if request.get("delete"):
+                    revision = self.configs.delete_standard(name)
+                else:
+                    self.configs.save_standard(name, request.get("text") or "", user)
+                    config_checks.recheck_all(self.configs, names={name})
+                    revision = self.configs.revision()
+            elif action == "settings":
+                revision = self.configs.set_settings(request.get("values") or {})
+            elif action == "due":
+                ids = None if request.get("all") else [str(item) for item in request.get("device_ids") or []]
+                reply = {"count": self.configs.make_due(ids)}
+                revision = self.configs.revision()
+            else:
+                raise RequestError(404, "No such request.")
+        if action != "report":
+            log.info("Config archive %s by %s", action, user)
+        self.announce(configs=revision)
+        return dict(reply, revision=revision)
 
     # ----------------------------------------------------------------- Edits, each checked for conflicts
 
@@ -719,8 +842,17 @@ class IpamServer:
         with self.maps.lock:
             self.maps.backup(maps_temporary)
         replace_file(maps_temporary, maps_target)
+        configs_target = folder / f"configs-{datetime.date.today().isoformat()}.db"
+        configs_temporary = configs_target.with_name(f"{configs_target.stem}.{uuid.uuid4().hex[:8]}.tmp")
+        with self.configs.lock:
+            destination = sqlite3.connect(configs_temporary)
+            try:
+                self.configs.db.backup(destination)
+            finally:
+                destination.close()
+        replace_file(configs_temporary, configs_target)
         keep = datetime.timedelta(days=int(self.config.get("backup_keep_days", BACKUP_KEEP_DAYS)))
-        for old in list(folder.glob("ipam-*.db")) + list(folder.glob("maps-*.db")):
+        for old in [*folder.glob("ipam-*.db"), *folder.glob("maps-*.db"), *folder.glob("configs-*.db")]:
             try:
                 day = datetime.date.fromisoformat(old.stem.partition("-")[2])
             except ValueError:
@@ -816,16 +948,29 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if method == "GET" and url.path == "/api/wait":
                 query = parse_qs(url.query)
                 sightings_since, maps_since = query.get("sightings_since"), query.get("maps_since")
+                configs_since = query.get("configs_since")
                 return self._reply(200, app.wait(int(query.get("since", ["0"])[0]),
                                                  float(query.get("timeout", ["25"])[0]),
                                                  int(sightings_since[0]) if sightings_since else None,
-                                                 int(maps_since[0]) if maps_since else None))
+                                                 int(maps_since[0]) if maps_since else None,
+                                                 int(configs_since[0]) if configs_since else None))
             if method == "GET" and url.path == "/api/maps/changes":
                 return self._reply(200, app.map_changes(int(parse_qs(url.query).get("since", ["0"])[0])))
             if method == "GET" and url.path == "/api/maps/secrets":
                 return self._reply(200, app.map_secrets(int(parse_qs(url.query)["map_id"][0])))
             if method == "POST" and url.path.startswith("/api/maps/"):
                 return self._reply(200, app.map_request(url.path[len("/api/maps/"):], self._user(), self._body()))
+            if method == "GET" and url.path == "/api/configs/changes":
+                return self._reply(200, app.config_changes(int(parse_qs(url.query).get("since", ["0"])[0])))
+            if method == "GET" and url.path == "/api/configs/results":
+                return self._reply(200, app.config_results(int(parse_qs(url.query).get("limit", ["200"])[0])))
+            if method == "GET" and url.path == "/api/configs/runners":
+                return self._reply(200, app.config_runners())
+            if method == "GET" and url.path == "/api/configs/version":
+                return self._reply(200, app.config_version(int(parse_qs(url.query)["id"][0])))
+            if method == "POST" and url.path.startswith("/api/configs/"):
+                return self._reply(200, app.config_request(url.path[len("/api/configs/"):], self._user(),
+                                                           self._body()))
             if method == "GET" and url.path == "/api/sightings":
                 return self._reply(200, app.sightings(int(parse_qs(url.query).get("since", ["0"])[0])))
             if method == "POST" and url.path == "/api/sightings":
@@ -844,7 +989,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._reply(error.status, {"error": str(error)})
         except ConflictError as error:
             self._reply(409, {"error": str(error), "conflict": True})
-        except MapError as error:
+        except (MapError, ArchiveError) as error:
             self._reply(422, {"error": str(error)})
         except IpamError as error:
             self._reply(422, {"error": str(error)})

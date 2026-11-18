@@ -42,6 +42,16 @@ SHORTCUT_SECTIONS = [
         ("Ctrl+S", "Log Session: start logging to a file, or stop logging", "Terminal session; replaces the shell's Ctrl+S (XOFF)"),
         ("Ctrl+Shift+S", "Save Config: save the running configuration (cancels one being saved)", "Connected terminal session"),
     ]),
+    ("Editor", [
+        ("Ctrl+N / Ctrl+O / Ctrl+S", "New tab / open files / save", "Editor; Ctrl+S saves a standard to the archive"),
+        ("Ctrl+Shift+S", "Save as a file", "Editor"),
+        ("Ctrl+F4", "Close the tab", "Editor"),
+        ("Ctrl+F / Ctrl+H", "Find / find and replace (regular expressions, \\1 groups)", "Editor"),
+        ("F3 / Shift+F3", "Find next / previous", "Editor"),
+        ("Ctrl+G", "Go to a line", "Editor"),
+        ("F7 / Shift+F7", "Next / previous change", "Editor Compare"),
+        ("Alt+drag", "Select a column (typing goes into every line of it)", "Editor"),
+    ]),
     ("SCP files", [
         ("Ctrl+L", "Focus and select this pane's folder path", "SCP file pane; Enter opens the typed folder"),
         ("F5", "Copy selected files to the other side", "SCP file list"),

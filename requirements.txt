@@ -1,4 +1,5 @@
 PyQt5>=5.15
+QScintilla>=2.14  # The Editor page (PyQt5 QScintilla, the engine Notepad++ uses)
 paramiko>=4.0
 pyte>=0.8
 pyserial>=3.5

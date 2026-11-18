@@ -10,7 +10,7 @@ $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path $python)) { $python = 'python' }
 Write-Host "Using $python"
 
-& $python -c "import pytest, PyInstaller, PyQt5, paramiko, openpyxl, win32service"
+& $python -c "import pytest, PyInstaller, PyQt5, PyQt5.Qsci, paramiko, openpyxl, win32service"
 if ($LASTEXITCODE -ne 0) {
     throw "$python is missing packages NOMAD needs to build. Install them with: $python -m pip install -r requirements-dev.txt"
 }

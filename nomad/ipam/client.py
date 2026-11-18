@@ -71,11 +71,13 @@ TARGET_API = 12  # And software targets
 WLC_API = 13  # And wireless controllers as a kind of asset
 LOCK_API = 14  # And map icons locked in place
 NETWORK_API = 15  # And taking a laptop's whole network
+CONFIG_API = 16  # And the config archive
 SERVER_FEATURES = ((2, "instant sync"), (3, "change history"), (4, "loopback subnets"), (5, "Last Seen sweep results"),
                    (6, "tribe maps"), (VLAN_API, "VLANs"), (PLACEMENT_API, "Subnet Placement"),
                    (ROLES_API, "subnet roles"), (MOVE_API, "moving subnets between networks"), (ASSET_API, "assets"),
                    (TARGET_API, "software targets"), (WLC_API, "wireless controllers as assets"),
-                   (LOCK_API, "locked map icons"), (NETWORK_API, "sharing a whole network with a map"))
+                   (LOCK_API, "locked map icons"), (NETWORK_API, "sharing a whole network with a map"),
+                   (CONFIG_API, "the config archive and scheduled backups"))
 
 
 @dataclass
@@ -459,6 +461,37 @@ class TeamClient:
 
     def map_secrets(self, map_id):
         return self.request("GET", f"/api/maps/secrets?map_id={int(map_id)}")["secrets"]
+
+    # ----------------------------------------------------------------- The config archive (server API 16)
+
+    def wait_for_configs(self, configs_since, timeout=25):
+        """Wait (up to `timeout` seconds) for a config archive change after `configs_since`. Returns the latest
+        archive revision (None from a server without one)."""
+        reply = self.request("GET", f"/api/wait?since={2 ** 62}&timeout={timeout}&configs_since={int(configs_since)}")
+        return reply.get("configs")
+
+    def config_changes(self, since):
+        """The archive's changes after `since`: ({"devices", "versions", "standards", "compliance", "settings",
+        "compliance_present"}, revision)."""
+        reply = self.request("GET", f"/api/configs/changes?since={int(since)}")
+        revision = reply.pop("revision")
+        return reply, revision
+
+    def config_version(self, version_id):
+        return self.request("GET", f"/api/configs/version?id={int(version_id)}")["version"]
+
+    def config_results(self, limit=200):
+        """Scheduled backups' outcomes from every computer, newest first."""
+        return self.request("GET", f"/api/configs/results?limit={int(limit)}")["results"]
+
+    def config_runners(self):
+        """The computers backing up now: [{"holder", "computer", "kind", "user", "last_seen", "status",
+        "working_on"}]."""
+        return self.request("GET", "/api/configs/runners")["runners"]
+
+    def config_request(self, action, **body):
+        """claim, report, upload, review, exclude, standard, settings or due."""
+        return self.request("POST", f"/api/configs/{action}", body)
 
     def import_networks(self, plans):
         return self.request("POST", "/api/import", {"plans": plans})

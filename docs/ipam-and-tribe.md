@@ -150,6 +150,7 @@ The laptop keeps a copy of the tribe's networks and history, so lookups work off
 | Software targets | Set on the **Tribe** list on the **Assets** page | Read only |
 | Maps | Shared from the **Network Map** page | Changes wait, but sharing a new map needs the server |
 | A map's SNMP credentials | Shared with the map | Changes wait until the server is back |
+| Config archive and standards | Pulled configs, scheduled backups and standards on the **Editor** page | Pulled configs wait until the server is back; the rest is read only |
 
 Local networks, terminal sessions, saved credentials and interface profiles are not shared.
 

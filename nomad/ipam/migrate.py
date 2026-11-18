@@ -38,6 +38,7 @@ SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 15, 8, 1
 MIN_PASSWORD = 8
 CONFIG_CARRIED = ("server_id", "port", "team_secret", "admin_secret", "backup_keep_days")
 FILES = ("ipam.db", "maps.db", "cert.pem", "key.pem")
+OPTIONAL_FILES = ("configs.db",)  # The config archive (servers before 2.3.0 have none)
 RENAME_TRIES = 40  # 50 ms apart: a file in the folder can stay locked a moment after the service stops
 
 
@@ -148,6 +149,9 @@ def export_server(path, password, new_hosts=(), new_port=None, directory=None):
         _snapshot(directory / "ipam.db", work / "ipam.db")
         _snapshot(directory / "maps.db", work / "maps.db")
         lost = _recrypt_secrets(work / "maps.db", unprotect) if unprotect else 0
+        carried = [name for name in OPTIONAL_FILES if (directory / name).exists()]
+        for name in carried:
+            _snapshot(directory / name, work / name)
         summary = MoveSummary(config["server_id"], socket.gethostname(),
                               datetime.datetime.now().isoformat(timespec="seconds"), __version__, int(config["port"]),
                               _count(work / "ipam.db", "SELECT COUNT(*) FROM networks WHERE deleted = 0"),
@@ -157,7 +161,7 @@ def export_server(path, password, new_hosts=(), new_port=None, directory=None):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("manifest.json", json.dumps(manifest, indent=2))
-            for name in ("ipam.db", "maps.db"):
+            for name in ("ipam.db", "maps.db", *carried):
                 archive.write(work / name, name)
             for name in ("cert.pem", "key.pem"):
                 archive.write(directory / name, name)
@@ -258,6 +262,9 @@ def import_server(move_file, directory=None, port=None):
         secure_service_folder(directory)
     for name in FILES:
         (directory / name).write_bytes(move_file.archive.read(name))
+    for name in OPTIONAL_FILES:
+        if name in move_file.archive.namelist():
+            (directory / name).write_bytes(move_file.archive.read(name))
     protect, _ = _map_secret_protection()
     if protect:
         _recrypt_secrets(directory / "maps.db", protect)

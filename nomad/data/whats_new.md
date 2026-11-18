@@ -4,6 +4,15 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-18
+
+- **New:** the **Editor** page (under Utilities) is a Notepad++-style editor for configurations, with tabs, regular expression find and replace, and Cisco coloring and folding.
+- **New:** **Compare** shows two configurations side by side, in plain text, without noise (timestamps, byte counts) or by section, and copies changes across with the margin arrows. **Fix Commands** writes the Cisco commands that make one like the other, and **Send to Device...** sends them.
+- **New:** the config archive keeps every change to each device's configuration, shared with the tribe. New changes show on the **Changes** tab and as an amber **CFG** tag on the map until someone reviews them.
+- **New:** scheduled config backups of the map's routers, switches, firewalls and WLCs, shared between the computers that run them (and the Map Watcher service). See when each device is next due and who's backing up, and back up now when you need to.
+- **New:** standards: the lines every device of a kind must have, checked as each copy arrives, with the commands that fix what's missing.
+- **New:** right-click a device on the map, then **Config**. **Show as Diff** on ACLs, VPNs, Carry VLAN and SNMP Config shows the device before and after.
+
 ## [2.2.0] - 2026-11-18
 
 - **New:** on **IP Addresses**, untick **Look up names** beside **Sweep Subnet** for a faster sweep without host names. If names are slow partway through, **Skip Names** keeps what the sweep found.

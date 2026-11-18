@@ -618,6 +618,11 @@ class AclTab(QWidget):
         self.export_button = QPushButton("Export...")
         self.export_button.clicked.connect(self.export_preview)
         top.addWidget(self.export_button)
+        self.diff_button = QPushButton("Show as Diff")
+        self.diff_button.setToolTip("The device's running-config now beside how it would look with these lines "
+                                    "(roughly), in the Editor")
+        self.diff_button.clicked.connect(self.show_as_diff)
+        top.addWidget(self.diff_button)
         self.discard_button = QPushButton("Discard Changes")
         self.discard_button.clicked.connect(self.discard_changes)
         top.addWidget(self.discard_button)
@@ -2002,6 +2007,17 @@ class AclTab(QWidget):
     def copy_preview(self):
         QApplication.clipboard().setText(self.preview.toPlainText())
         set_hint(self.status_label, "Copied.", "success")
+
+    def show_as_diff(self):
+        """The device as read beside how it would look with the lines shown, in the Editor."""
+        read, target = self.read.get(self.current_key), self.target(self.current_key)
+        text = self.preview.toPlainText()
+        editor = getattr(self.window, "editor_tab", None)
+        if editor is None or read is None or target is None or not getattr(read, "running", "") or not text.strip():
+            set_hint(self.status_label, "Read the device and make a change first.", "warning")
+            return
+        editor.show_preview_diff(target.label, read.running, text,
+                                 {"address": target.address, "names": list(target.names), "platform": "ios"})
 
     def export_preview(self):
         text = self.preview.toPlainText()

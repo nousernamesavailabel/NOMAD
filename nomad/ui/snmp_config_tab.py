@@ -150,6 +150,11 @@ class SnmpConfigTab(QWidget):
         buttons.addWidget(self.send_button)
         buttons.addWidget(self.copy_button)
         buttons.addWidget(self.save_button)
+        self.diff_button = QPushButton("Show as Diff")
+        self.diff_button.setToolTip("A switch's running-config (from the config archive) beside how it would look with "
+                                    "these lines, in the Editor")
+        self.diff_button.clicked.connect(self.show_as_diff)
+        buttons.addWidget(self.diff_button)
         buttons.addStretch(1)
         buttons.addWidget(self.add_button)
         preview_layout.addLayout(buttons)
@@ -164,6 +169,7 @@ class SnmpConfigTab(QWidget):
 
         self.show_combo.currentIndexChanged.connect(lambda _: self.update_preview())
         self.copy_button.clicked.connect(self.copy)
+        self.diff_address = ""
         self.save_button.clicked.connect(self.save_as)
         self.add_button.clicked.connect(self.add_to_map)
         for widget in self.findChildren(QLineEdit):
@@ -637,6 +643,22 @@ class SnmpConfigTab(QWidget):
     def copy(self):
         QApplication.clipboard().setText(self.text())
         set_hint(self.status_label, "Copied. Paste it at the switch's enable (#) prompt.", "success")
+
+    def show_as_diff(self):
+        """A switch's running-config (from the config archive, or pulled now) beside how it would look with these
+        lines, in the Editor."""
+        editor = getattr(self.window, "editor_tab", None)
+        text = self.text()
+        if editor is None or not text.strip():
+            set_hint(self.status_label, "Fill in the configuration first.", "warning")
+            return
+        from PyQt5.QtWidgets import QInputDialog
+        address, accepted = QInputDialog.getText(self, "Show as Diff", "Which switch? (its address or name)",
+                                                 text=self.diff_address)
+        if not accepted or not address.strip():
+            return
+        self.diff_address = address.strip()
+        editor.preview_diff_from_archive(editor.target_for_address(self.diff_address), text)
 
     def save_as(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Configuration", "nomad-snmp-config.txt",

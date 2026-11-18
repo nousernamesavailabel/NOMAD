@@ -443,6 +443,7 @@ class DeviceAcls:
     lines: dict = field(default_factory=dict)  # "vty 0 4": {"access-class in": name, ...}
     archive_path: str = ""
     toward_pc: str = ""  # The interface this PC is reached through (show ip cef), if read
+    running: str = ""  # The running-config as read (for the Editor's Show as Diff)
     hits_read: bool = False
     when: str = ""
     # Route policy (routepolicy.py)

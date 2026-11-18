@@ -524,6 +524,7 @@ class Navigator(SidebarNavigator):
                    "ARP": "neighbors mac",
                    "MAC Finder": "mac address table locate trace switch port find where plugged", "Ports": "scan tcp", "DNS Servers": "dns benchmark",
                    "Ansible Inventory": "ansible playbook hosts yaml ini export automation",
+                   "Editor": "notepad text config compare diff backup archive running startup standard compliance",
                    "Assets": "inventory hardware serial numbers models ios versions software rma asset tags"}
         self.drawer_list.clear()
         if not query:

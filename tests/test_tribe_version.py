@@ -12,7 +12,7 @@ from test_ipam_server import key_for  # noqa: E402
 
 from nomad import __version__  # noqa: E402
 from nomad.ipam import server as server_module  # noqa: E402
-from nomad.ipam.client import LOCK_API, NETWORK_API, SERVER_FEATURES, TeamKey, server_update  # noqa: E402
+from nomad.ipam.client import CONFIG_API, LOCK_API, NETWORK_API, SERVER_FEATURES, TeamKey, server_update  # noqa: E402,E501
 from nomad.ipam.server import ADMIN, API_LEVEL, IpamServer  # noqa: E402
 from nomad.ui import tribe_version  # noqa: E402
 from nomad.ui.tribe_version import TribeUpdateBanner  # noqa: E402
@@ -61,7 +61,9 @@ def test_the_recommendation_names_the_server_and_the_version_to_update_to():
 
 
 def test_what_the_update_brings_is_only_what_the_server_lacks():
-    assert server_update(status(LOCK_API)).missing == ["sharing a whole network with a map"]
+    assert server_update(status(NETWORK_API)).missing == ["the config archive and scheduled backups"]
+    assert server_update(status(CONFIG_API - 2)).missing == ["sharing a whole network with a map",
+                                                             "the config archive and scheduled backups"]
     assert "locked map icons" in server_update(status(LOCK_API - 1)).missing
 
 

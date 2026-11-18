@@ -181,6 +181,7 @@ For more on each page, see [All pages](docs/pages.md).
 | Page | What it does |
 | --- | --- |
 | **Subnet Calculator** | IPv4 and IPv6 ranges, and splitting networks |
+| **Editor** | Edit and compare configs, the config archive, scheduled backups and standards |
 
 ## Guides
 
@@ -195,6 +196,7 @@ For more on each page, see [All pages](docs/pages.md).
 | [ACLs and route maps](docs/acls-route-maps.md) | Editing and safely sending changes |
 | [VPNs](docs/vpns.md) | Building, checking and troubleshooting VPNs |
 | [Packet capture and mirroring](docs/capture-mirroring.md) | Capturing, the viewer, SPAN/RSPAN/ERSPAN |
+| [Editor](docs/editor.md) | Editing and comparing configs, the config archive, backups, standards |
 | [Keyboard guide](docs/keyboard-shortcuts.md) | Every shortcut |
 | [Development](docs/development.md) | Running from source, building, releasing |
 

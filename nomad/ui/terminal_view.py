@@ -802,6 +802,8 @@ class SessionView(PromptAnswers, QWidget):
                                        + f"\t{CONFIG_KEYS}")
         config_action.setEnabled(self.state == CONNECTED)
         actions[config_action] = self.cancel_config_capture if self.config_capture else self.save_running_config
+        if getattr(self, "last_config_path", "") and os.path.isfile(self.last_config_path):
+            actions[menu.addAction("Open Saved Config in Editor")] = self.open_saved_config
         if self.session.protocol == SERIAL:
             break_action = menu.addAction("Send Break")
             break_action.setToolTip("What Cisco devices watch for at boot to enter ROMMON (password recovery).")
@@ -1082,6 +1084,10 @@ class SessionView(PromptAnswers, QWidget):
         self.config_timeout.start(300000)
         self.start_config_command()
 
+    def open_saved_config(self):
+        from .config_events import config_events
+        config_events().open_requested.emit(self.last_config_path)
+
     def config_shortcut(self):
         """Ctrl+Shift+S: what the Save Config button (Cancel Save, while saving) does, if it can be pressed."""
         if self.config_button.isEnabled():
@@ -1115,8 +1121,13 @@ class SessionView(PromptAnswers, QWidget):
             self.stop_config_capture(f"Config save failed: {error}. No configuration file was saved.")
             return
         path = self.config_path
+        prompt = self.config_prompt
         self.stop_config_capture()
         self.note(f"Saved running configuration to {path}", NOTE_COLOR)
+        self.last_config_path = path
+        from .config_events import config_events  # The Editor keeps a copy in the config archive
+        config_events().saved.emit({"host": self.session.host, "name": self.session.name, "prompt": prompt,
+                                  "path": path, "text": text})
         self.config_button.setToolTip(f"Last saved configuration: {path} ({CONFIG_KEYS} saves it again)")
 
     def stop_config_capture(self, message=""):

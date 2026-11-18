@@ -6,9 +6,13 @@ of the tribe's maps, and claims the watching of the maps chosen for it from the 
 left open somewhere. What it finds is added to the tribe map, so everyone sees it, tagged NEW. Switches can send it
 syslog and SNMP traps so a switch is read the moment something's plugged in.
 
+It can also run the tribe's scheduled config backups (nomad/configs/runner.py): devices due are handed to it first,
+and it logs in with the one login chosen for it (copied into its config, its password encrypted for this computer:
+the service has no saved sessions of its own).
+
 Its folder (%ProgramData%\\NOMAD\\watcher, readable by Administrators, SYSTEM and the service) holds config.json
-(the tribe key, with the secret encrypted for this computer, and the maps to watch), its copy of the maps and its
-log. Tools > Map Watcher Service in NOMAD sets it up.
+(the tribe key, with the secret encrypted for this computer, the maps to watch, and the backup login), its copy of the
+maps and its log. Tools > Map Watcher Service in NOMAD sets it up.
 """
 import json
 import logging
@@ -35,6 +39,7 @@ SYNC_SECONDS = 30
 LEASE_SECONDS = 60
 STEP_SECONDS = 2
 SERVICE_USER = "Map Watcher service"
+BACKUP_SECONDS = 30
 
 
 def watcher_dir():
@@ -54,17 +59,24 @@ def save_config(config, directory=None):
     temporary.replace(directory / "config.json")
 
 
-def make_config(key, map_ids, listen=True, timers=None, protect=None):
+def make_config(key, map_ids, listen=True, timers=None, protect=None, backups=None):
     """The service's config from a tribe key (its secret encrypted for this computer). timers: {name: seconds}, as
-    watch.TIMERS has them."""
+    watch.TIMERS has them. backups: None (no scheduled config backups), or {"username", "password", "enable",
+    "label", "trust_new"} with the passwords as typed (they're encrypted here)."""
     if protect is None:  # For this computer: the service runs as another account
         from ..terminal.credentials import protect as dpapi
 
         def protect(text):
             return dpapi(text, machine=True)
-    return {"server_id": key.server_id, "hosts": list(key.hosts), "port": key.port, "fingerprint": key.fingerprint,
-            "secret": protect(key.secret), "maps": [int(map_id) for map_id in map_ids], "listen": bool(listen),
-            **watch.timer_values(timers)}
+    config = {"server_id": key.server_id, "hosts": list(key.hosts), "port": key.port, "fingerprint": key.fingerprint,
+              "secret": protect(key.secret), "maps": [int(map_id) for map_id in map_ids], "listen": bool(listen),
+              **watch.timer_values(timers)}
+    if backups:
+        config["backups"] = {"username": backups["username"], "label": backups.get("label", ""),
+                             "password": protect(backups["password"]) if backups.get("password") else "",
+                             "enable": protect(backups["enable"]) if backups.get("enable") else "",
+                             "trust_new": bool(backups.get("trust_new", True))}
+    return config
 
 
 def config_timers(config):
@@ -101,7 +113,7 @@ class WatchEngine:
     a clock, so it can be tested with fakes."""
 
     def __init__(self, maps, map_ids, holder, timers=None, crawl=watch.crawl_from, client_factory=None,
-                 clock=time.time, listen=True, ports=(SYSLOG_PORT, TRAP_PORT)):
+                 clock=time.time, listen=True, ports=(SYSLOG_PORT, TRAP_PORT), backups=None):
         """timers: {name: seconds}, as watch.TIMERS has them (the defaults for any left out)."""
         from ..snmp import SnmpClient
         self.maps, self.holder = maps, holder
@@ -114,9 +126,10 @@ class WatchEngine:
         self.listen, self.ports = listen, ports
         self.receivers = []
         self.v3_users = {}  # Map ID -> its V3Users, for checking v3 traps
-        self.next_sync = self.next_lease = 0.0
+        self.next_sync = self.next_lease = self.next_backup = 0.0
         self.stop_event = threading.Event()
         self.by = f"{socket.gethostname()} ({DISPLAY_NAME})"
+        self.backups = backups  # A configs.runner.BackupRunner, when it runs the tribe's config backups
 
     # ----------------------------------------------------------------- Listening
 
@@ -164,12 +177,26 @@ class WatchEngine:
         if now >= self.next_lease:
             self.next_lease = now + LEASE_SECONDS
             self.claim_all()
+        if self.backups is not None and now >= self.next_backup:
+            self.next_backup = now + BACKUP_SECONDS
+            self.back_up()
         due = self.queue.due()
         for watched in self.watched.values():
             if self.stop_event.is_set():
                 return
             if watched.active:
                 self.watch_map(watched, now, due)
+
+    def back_up(self):
+        """The tribe's config backups that are due (a few each time)."""
+        try:
+            for done in self.backups.step():
+                if done.ok:
+                    log.info("Backed up %s: %s", done.name, done.note)
+                else:
+                    log.info("Couldn't back up %s: %s", done.name, done.note)
+        except Exception as error:  # Offline, or an old server: try again next time
+            log.info("Config backups: %s", error)
 
     def sync(self):
         try:
@@ -346,7 +373,33 @@ def make_engine(directory=None):
     maps = TribeMaps(key.server_id, client, directory / "maps.db",
                      protect=lambda text: protect(text, machine=True), unprotect=unprotect)
     return WatchEngine(maps, config.get("maps", []), f"{socket.gethostname()}-service",
-                       timers=config_timers(config), listen=config.get("listen", True))
+                       timers=config_timers(config), listen=config.get("listen", True),
+                       backups=backup_runner(config, client, directory))
+
+
+def backup_runner(config, client, directory, unprotect=None):
+    """The runner for the tribe's scheduled config backups, from the config's backup login (None without one)."""
+    settings = config.get("backups")
+    if not settings or not settings.get("username"):
+        return None
+    from ..configs import archive, runner
+    from ..configs.tribe import TribeConfigs
+    from ..terminal.hostkeys import KnownHosts
+    from ..terminal.sessions import Session
+    from . import configpush, macssh
+    if unprotect is None:
+        from ..terminal.credentials import unprotect
+    enable = unprotect(settings["enable"]) if settings.get("enable") else ""
+    fallback = Session("", username=settings["username"], saved_password=settings.get("password", ""))
+    label = settings.get("label") or f"user {settings['username']}"
+    configs = TribeConfigs(config["server_id"], client, Path(directory) / "configs.db")
+    known_hosts = KnownHosts(str(Path(directory) / "known_hosts"))
+    computer = socket.gethostname()
+
+    def make_pusher():
+        logins = macssh.SshLogins([], fallback, None, label)
+        return configpush.Pusher(logins, None, known_hosts, bool(settings.get("trust_new", True)), enable)
+    return runner.BackupRunner(configs, make_pusher, f"{computer}-service", computer, SERVICE_USER, archive.SERVICE)
 
 
 def log_to_file(directory=None):
