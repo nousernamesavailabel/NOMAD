@@ -42,8 +42,9 @@ def _mask(block):
 
 
 def _title(network, taken):
-    """A page title: the page it was imported from, else the network's name (Excel allows 31 characters)."""
-    title = BAD_TITLE_CHARACTERS.sub("-", network.fields.get("Imported from") or network.name).strip()[:31] or "Network"
+    """A page title: the network's name (Excel allows 31 characters). Not the page it was imported from: units are
+    often imported from pages all called the same thing (\"Network Template\"), so every page came out alike."""
+    title = BAD_TITLE_CHARACTERS.sub("-", network.name).strip()[:31] or "Network"
     base, number = title, 2
     while title.casefold() in taken:
         suffix = f" ({number})"

@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.4.4] - 2026-11-19
+
+### Fixed
+
+- **IPAM: Export All Networks to Workbook dropped the unit from page names.** Each page was named after the spreadsheet page its network was imported from. Units imported from pages with the same name all came out as that name: "XXXX Network Template" and "YYYY Network Template" became "Network Template" and "Network Template (2)". Pages are now named after the network. When you compare an exported workbook with a network on import, NOMAD picks the page named after that network.
+
 ## [2.4.3] - 2026-11-19
 
 ### Fixed

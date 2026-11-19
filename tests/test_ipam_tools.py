@@ -101,10 +101,18 @@ def round_trip(store, network, tmp_path):
     return parse_page(page, rows)
 
 
+def test_pages_are_named_after_their_networks(store, tmp_path):
+    """Units imported from pages that share a name ("Network Template") each get a page named after the unit."""
+    first = store.add_network("XXXX Network Template", fields={"Imported from": "Network Template"})
+    second = store.add_network("YYYY Network Template", fields={"Imported from": "Network Template"})
+    titles = export_workbook(str(tmp_path / "all.xlsx"), [(store, first), (store, second)])
+    assert titles == ["XXXX Network Template", "YYYY Network Template"]
+
+
 def test_export_imports_back_the_same(store, tmp_path):
     network = sample_network(store)
     sheet = round_trip(store, network, tmp_path)
-    assert sheet.title == "SIPR Template"  # The page it was imported from
+    assert sheet.title == "11AB SIPR"  # The network's name, not the page it was imported from
     assert not sheet.differences and not sheet.problems and not sheet.gateway_fixes
     assert compare_network(store, network.id, import_plan(sheet, network.name)) == []
 

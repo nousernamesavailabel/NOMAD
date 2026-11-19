@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDialog, QD
 
 from ..ipam.spreadsheet import DETAIL, SKIP, SUMMARY, SpreadsheetError, import_plan
 from ..ipam.store import STATUSES, IpamError
+from ..ipam.workbook import BAD_TITLE_CHARACTERS
 from .common import set_hint
 from .theme import COLORS
 
@@ -331,7 +332,10 @@ class ImportDialog(QDialog):
         self.page_table.horizontalHeader().setStretchLastSection(True)
         matching = compare_with.fields.get("Imported from", "") if compare_with is not None else ""
         if compare_with is not None and not any(sheet.title == matching for sheet in sheets):
-            matching = sheets[0].title if len(sheets) == 1 else ""
+            # A page NOMAD exported is named after the network (Excel cuts titles at 31 characters)
+            exported = BAD_TITLE_CHARACTERS.sub("-", compare_with.name).strip()[:31]
+            matching = exported if any(sheet.title == exported for sheet in sheets) else \
+                sheets[0].title if len(sheets) == 1 else ""
         for row, sheet in enumerate(sheets):
             check = QTableWidgetItem(sheet.title)
             check.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)

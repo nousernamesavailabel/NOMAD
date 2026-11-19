@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.4.4] - 2026-11-19
+
+- **Fixed:** in IPAM, **Export All Networks to Workbook** names each page after its network again, so "XXXX Network Template" no longer comes out as "Network Template".
+
 ## [2.4.3] - 2026-11-19
 
 - **Fixed:** the Sweep page now shows **Proxy ARP from** a router or firewall for addresses where only it answered ARP. They aren't offered for recording in IPAM. If IPAM records one as used, it's listed under **Recorded but Silent**.
