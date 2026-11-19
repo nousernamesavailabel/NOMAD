@@ -174,6 +174,10 @@ class AddressModel(QAbstractTableModel):
     def load(self, network, recorded, special, nested, every_address, pending=(), sweep=None, places=None):
         self.beginResetModel()
         self.network, self.recorded, self.special, self.nested = network, recorded, special, nested
+        self.recorded_macs = {}  # {normalized MAC: {address}} IPAM records, to tell a device's ARP from proxy ARP
+        for address, record in recorded.items():
+            if normalize_mac(record.mac):
+                self.recorded_macs.setdefault(normalize_mac(record.mac), set()).add(address)
         self.pending = set(pending)
         self.sweep = sweep
         self.places_from, self.places = places, self.places_here(places)
@@ -181,10 +185,21 @@ class AddressModel(QAbstractTableModel):
         if network is not None and every_address:
             self.rows = None
         else:
-            # Free addresses where the sweep found something stay listed: they're what needs recording
-            answered = {address for address in sweep.hosts if network is not None and address in network}                 if sweep is not None else set()
+            # Free addresses where the sweep found something stay listed: they're what needs recording (not those
+            # only a router's proxy ARP answered for)
+            answered = {address for address in sweep.hosts if network is not None and address in network and
+                        self.proxy_owner(address) is None} if sweep is not None else set()
             self.rows = sorted(set(recorded) | set(special) | answered | set(self.places))  # And what the map has
         self.endResetModel()
+
+    def proxy_owner(self, address):
+        """SweepResults.proxy_owner, with what IPAM records: None unless only proxy ARP answered here."""
+        return self.sweep.proxy_owner(address, self.recorded_macs) if self.sweep is not None else None
+
+    def swept_host(self, address):
+        """(rtt, MAC, when) a sweep found at an address, unless that was only a router's proxy ARP; or None."""
+        found = self.sweep.hosts.get(address) if self.sweep is not None else None
+        return found if found is not None and self.proxy_owner(address) is None else None
 
     def places_here(self, places):
         """{address: MapPlace} of the map's addresses in this subnet (or, outside every subnet, those recorded)."""
@@ -257,6 +272,18 @@ class AddressModel(QAbstractTableModel):
         record = self.recorded.get(address)
         who = self.sweep.seen_by.get(address)
         by = f" (swept by {who})" if who else ""
+        owner = self.proxy_owner(address) if result[0] in ("answered", "seen") else None
+        if owner is not None:
+            _, _, mac, when = result
+            if self.special.get(address) in ("Network", "Broadcast", "Subnet router anycast"):
+                return None
+            whose = f"the MAC of {owner}" if owner else "a MAC other addresses answered ARP with too"
+            text = f"No answer · proxy ARP{f' from {owner}' if owner else ''} · {when_text(when)}"
+            explanation = (f"Only an ARP reply came back {when_text(when)}{by}, with {whose} ({mac}): a router or "
+                           "firewall answering for an address it can reach (proxy ARP), not a device here.")
+            if record is not None and record.status != RESERVED:
+                return text, "error", explanation + " IPAM records it as used, so the device may be off or gone."
+            return text, "muted", explanation
         if result[0] in ("answered", "seen"):
             _, rtt, mac, when = result
             speed = "no ping reply (ARP)" if rtt is None else "<1 ms" if rtt < 1 else f"{rtt} ms"
@@ -286,7 +313,7 @@ class AddressModel(QAbstractTableModel):
         record = self.recorded.get(address)
         if record is None or record.mac or self.sweep is None:
             return ""
-        current = self.sweep.current(address)
+        current = self.sweep.current(address, self.recorded_macs)
         return current[1] if current else ""
 
     def map_result(self, address):
@@ -330,7 +357,7 @@ class AddressModel(QAbstractTableModel):
             if column == 1:
                 return self.status_text(address)
             if record is None:
-                found = self.sweep.hosts.get(address) if self.sweep is not None else None
+                found = self.swept_host(address)
                 if found is not None and column in (3, 4):  # What a sweep found, not yet in IPAM
                     return self.sweep.names.get(address, "") if column == 3 else found[1]
                 if column == 3 and address not in self.special:
@@ -351,8 +378,7 @@ class AddressModel(QAbstractTableModel):
                 return QColor(COLORS["muted"])
             if record.status == RESERVED and column == 1:
                 return QColor(COLORS["warning"])
-        if role == Qt.ToolTipRole and record is None and column in (3, 4) and self.sweep is not None and \
-                address in self.sweep.hosts:
+        if role == Qt.ToolTipRole and record is None and column in (3, 4) and self.swept_host(address) is not None:
             return "Found by a sweep; not in IPAM yet (Record Answering Devices, or right-click, records it)."
         if role == Qt.ToolTipRole and column == 4 and self.swept_mac(address):
             return "Found by a sweep; IPAM has no MAC recorded here (Update MACs, or right-click, records it)."
@@ -382,6 +408,7 @@ class SweepResults:
         self.running = None  # (Block, started) while a sweep of it runs here
         self.message = None  # (Block, how the last sweep here ended)
         self.unsaved_hosts = {}  # {address: host dict} found by a sweep here, not yet saved to the database
+        self._by_mac = None  # {normalized MAC: [address]} of hosts, built when needed (None after a change)
 
     @classmethod
     def load(cls, store, network_id):
@@ -394,6 +421,32 @@ class SweepResults:
             results.seen_by[address] = row["seen_by"]
         results.ranges = [(block, started, finished) for block, started, finished, _ in ranges]
         return results
+
+    def proxy_owner(self, address, recorded_macs=None):
+        """Whether an address's reply was only proxy ARP: a router or firewall answering ARP for an address it can
+        reach, with its own MAC, though nothing is there. That's an ARP-only reply whose MAC another address
+        answered ping with, or IPAM records (recorded_macs: {normalized MAC: {address}}), around the same time.
+
+        Returns the address that MAC belongs to, "" when several addresses answered ARP alone with that MAC and
+        none owns it, or None when the reply is the device's own (or there's nothing to go on)."""
+        host = self.hosts.get(address)
+        mac = normalize_mac(host[1]) if host is not None and host[0] is None else ""
+        if not mac:
+            return None  # Answered ping, or no MAC to compare
+        recorded = (recorded_macs or {}).get(mac, set())
+        if address in recorded:
+            return None  # IPAM says this MAC is the device at this address
+        if self._by_mac is None:
+            self._by_mac = {}
+            for other, (_, other_mac, _) in self.hosts.items():
+                if normalize_mac(other_mac):
+                    self._by_mac.setdefault(normalize_mac(other_mac), []).append(other)
+        others = [other for other in self._by_mac.get(mac, ()) if other != address and
+                  abs(self.hosts[other][2] - host[2]) <= self.CURRENT_SECONDS]
+        owners = sorted({other for other in others if self.hosts[other][0] is not None} | (recorded - {address}))
+        if owners:
+            return str(owners[0])
+        return "" if others else None
 
     def start(self, block):
         """A sweep of `block` begins here: its addresses show what this sweep finds, as it finds it."""
@@ -416,6 +469,7 @@ class SweepResults:
         address = ipaddress.ip_address(ip)
         old = self.hosts.get(address)
         self.hosts[address] = (rtt, mac or (old[1] if old else ""), time.time())
+        self._by_mac = None
         self._unsaved(address)
 
     def add_name(self, ip, name, mac=""):
@@ -425,6 +479,7 @@ class SweepResults:
         if mac and address in self.hosts and not self.hosts[address][1]:
             rtt, _, when = self.hosts[address]
             self.hosts[address] = (rtt, mac, when)
+            self._by_mac = None
         if address in self.unsaved_hosts:
             self._unsaved(address)
 
@@ -436,6 +491,7 @@ class SweepResults:
     def add(self, ranges, hosts, complete, names=None):
         """A sweep elsewhere (the Sweep page) compared with this network. Returns (hosts, ranges) to save."""
         now = time.time()
+        self._by_mac = None
         for ip, (rtt, mac) in hosts.items():
             address = ipaddress.ip_address(ip)
             self.hosts[address] = (rtt, mac, now)
@@ -482,10 +538,11 @@ class SweepResults:
             return "silent", latest[1], host[2] if host else None
         return ("seen",) + host if host is not None else None
 
-    def current(self, address):
-        """The host's (rtt, mac) if it answers now: in the latest sweep, or seen within the last day."""
+    def current(self, address, recorded_macs=None):
+        """The host's (rtt, mac) if it answers now: in the latest sweep, or seen within the last day (not just a
+        router's proxy ARP for it)."""
         result = self.result(address)
-        if result is None or result[0] == "silent":
+        if result is None or result[0] == "silent" or self.proxy_owner(address, recorded_macs) is not None:
             return None
         if result[0] == "seen" and time.time() - result[3] > self.CURRENT_SECONDS:
             return None
@@ -1900,7 +1957,7 @@ class IpamTab(QWidget):
         block = subnet.network
         missing, different = [], []
         for address in sorted(results.hosts):
-            current = results.current(address)
+            current = results.current(address, self.model.recorded_macs)
             if current is None or address not in block or self.model.special.get(address) in ("Network", "Broadcast"):
                 continue
             mac = current[1]
@@ -2042,9 +2099,11 @@ class IpamTab(QWidget):
             swept = sweep.swept_at(network.network_address) if sweep is not None else None
             if swept:
                 answered = sum(1 for address in sweep.hosts if address in network and
-                               (sweep.result(address) or ("",))[0] == "answered")
+                               (sweep.result(address) or ("",))[0] == "answered" and
+                               self.model.proxy_owner(address) is None)
                 silent = sum(1 for address, record in recorded.items() if record.status != RESERVED and
-                             (sweep.result(address) or ("",))[0] == "silent")
+                             ((sweep.result(address) or ("",))[0] == "silent" or
+                              self.model.proxy_owner(address) is not None))
                 parts.append(f"swept {when_text(swept)}: {answered} answered, {silent} recorded but silent")
             parts += [f"{name}: {value}" for name, value in subnet.fields.items()]
             if subnet.description:
@@ -2183,8 +2242,7 @@ class IpamTab(QWidget):
                 self.can_edit_addresses())
         if any(address in self.model.recorded for address in selected):
             menu.addAction("Mark Free", self.free_addresses).setEnabled(self.can_edit_addresses())
-        found = self.model.sweep.hosts.get(selected[0]) if self.model.sweep is not None and len(selected) == 1 \
-            else None
+        found = self.model.swept_host(selected[0]) if len(selected) == 1 else None
         if found is not None:
             record = self.model.recorded.get(selected[0])
             if record is None:

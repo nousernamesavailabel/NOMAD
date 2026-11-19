@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.4.2] - 2026-11-19
+
+### Fixed
+
+- **IP Addresses: empty addresses showed as answered when a router or firewall answered ARP for them.** A router or firewall using proxy ARP answers ARP for addresses it can reach, using its own MAC, even when nothing is at the address. The sweep counted each of those replies as a device. Last Seen said "Answered · no ping reply (ARP)", the MAC column offered the router's MAC, and **Record Answering Devices** offered to record the address. An ARP-only reply now counts as proxy ARP when its MAC belongs to a different address, one that answered ping with that MAC or where IPAM records it. Last Seen then shows **No answer · proxy ARP from** that address, in red where IPAM records the address as used. The address isn't offered for recording, doesn't lend its MAC, and isn't counted as answering. This also applies to sweeps already saved. The Sweep page still lists these replies.
+
 ## [2.4.1] - 2026-11-19
 
 ### Fixed

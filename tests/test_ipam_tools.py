@@ -8,6 +8,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
+from PyQt5.QtCore import Qt  # noqa: E402
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
 from nomad.ipam.checks import ERROR, INFO, WARNING, check_network  # noqa: E402
@@ -17,6 +18,7 @@ from nomad.ipam.store import RESERVED, USED, IpamStore, parse_subnet  # noqa: E4
 from nomad.ipam.workbook import export_workbook, outside_subnets  # noqa: E402
 from nomad.ui.ipam_tab import AddressModel, SweepResults  # noqa: E402
 from nomad.ui.ipam_tools import AddressPickerDialog, apply_to_addresses, apply_to_subnets  # noqa: E402
+from nomad.ui.theme import COLORS  # noqa: E402
 
 
 @pytest.fixture
@@ -298,6 +300,49 @@ def test_swept_mac_shows_where_ipam_has_none(app, store):
     model.load(ipaddress.ip_network("10.0.0.0/24"), recorded, {}, [], False, sweep=results)
     macs = {model.data(model.index(row, 0)): model.data(model.index(row, 4)) for row in range(model.rowCount())}
     assert macs == {"10.0.0.5": "BB-BB-BB-BB-BB-BB", "10.0.0.6": "AA-AA-AA-AA-AA-AA"}  # IPAM's own MAC wins
+
+
+def test_proxy_arp_replies_dont_count_as_answering(app, store):
+    """A router or firewall answering ARP for empty addresses (proxy ARP) with its own MAC: those addresses show
+    no answer, aren't offered for recording, and lend no MAC. The router answered ping; the firewall only ARP,
+    but IPAM records its MAC."""
+    router, firewall = "00-1E-BD-BC-92-BF", "CC-70-ED-B9-61-44"
+    network = store.add_network("Lab")
+    store.add_subnet(network.id, "10.10.10.0/24", "LAN")
+    store.set_address(network.id, "10.10.10.43", USED, "fw", firewall)
+    store.set_address(network.id, "10.10.10.50", USED, "rtr", router)
+    store.set_address(network.id, "10.10.10.44", RESERVED, "")
+    store.set_address(network.id, "10.10.10.46", RESERVED, "")
+    store.set_address(network.id, "10.10.10.60", USED, "gone")
+    results = SweepResults()
+    results.start(parse_subnet("10.10.10.0/24"))
+    for ip, rtt, mac in (("10.10.10.43", None, firewall), ("10.10.10.44", None, firewall),
+                         ("10.10.10.45", None, firewall), ("10.10.10.46", None, router), ("10.10.10.47", None, router),
+                         ("10.10.10.50", 1, router), ("10.10.10.60", None, router), ("10.10.10.70", None, "AA-AA-AA-AA-AA-AA"),
+                         ("10.10.10.80", None, "BB-BB-BB-BB-BB-BB"), ("10.10.10.81", None, "BB-BB-BB-BB-BB-BB")):
+        results.found(ip, rtt, mac)
+    results.finish(parse_subnet("10.10.10.0/24"))
+    model = AddressModel()
+    recorded = {ipaddress.ip_address(item.ip): item for item in store.addresses(network.id)}
+    model.load(ipaddress.ip_network("10.10.10.0/24"), recorded, {}, [], False, sweep=results)
+    shown = {model.data(model.index(row, 0)): (model.data(model.index(row, 2)), model.data(model.index(row, 4)))
+             for row in range(model.rowCount())}
+    # The firewall and router themselves answered; a lone ARP-only MAC is a device of its own
+    for ip in ("10.10.10.43", "10.10.10.50", "10.10.10.70"):
+        assert shown[ip][0].startswith("Answered")
+    assert shown["10.10.10.44"][0].startswith("No answer · proxy ARP from 10.10.10.43 · today ")
+    assert shown["10.10.10.44"][1] == ""  # The firewall's MAC isn't offered as this address's
+    assert "proxy ARP from 10.10.10.50" in shown["10.10.10.46"][0] and shown["10.10.10.46"][1] == ""
+    assert "proxy ARP from 10.10.10.50" in shown["10.10.10.60"][0]
+    color = model.data(model.index(model.rows.index(ipaddress.ip_address("10.10.10.60")), 2), Qt.ForegroundRole)
+    assert color.name().lower() == COLORS["error"].lower()  # Recorded as used, but nothing's there
+    # Free addresses only proxy ARP answered for aren't listed as needing recording; two sharing a MAC no one owns
+    # can't be told apart, so neither counts
+    for ip in ("10.10.10.45", "10.10.10.47"):
+        assert ip not in shown
+    assert "10.10.10.80" not in shown and "10.10.10.81" not in shown
+    assert results.current(ipaddress.ip_address("10.10.10.44"), model.recorded_macs) is None
+    assert results.current(ipaddress.ip_address("10.10.10.43"), model.recorded_macs) == (None, firewall)
 
 
 # --------------------------------------------------------------------- An address for an adapter
