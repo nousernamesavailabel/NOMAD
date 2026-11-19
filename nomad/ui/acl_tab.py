@@ -46,10 +46,12 @@ from ..netmap.acl import INTERFACE, LINE, NETWORK, OTHER, SERVICE, STANDARD, V4,
     TimeRange
 from ..netmap.model import ROUTER, SWITCH, port_key
 from ..netmap.vlans import ERROR, WARNING
+from ..resolve import is_host_name
 from ..terminal.sessions import SSH
 from .acl_dialogs import AddressPicker, ApplyDialog, DevicePicker, ImportDialog, NewAclDialog, RuleDialog, \
     TextDialog, severity_color
 from .common import StoppableThread, local_address_toward, read_only_table, release_thread, set_hint
+from .name_lookup import resolve_now
 from .policy_dialogs import NewPolicyDialog
 from .policy_editors import PrefixListEditor, RouteMapEditor, SeqTable
 from .session_send import SessionSender
@@ -436,9 +438,9 @@ class AclTab(QWidget):
         box = QGroupBox("Packet Tester")
         grid = QGridLayout(box)
         self.test_src = QLineEdit()
-        self.test_src.setPlaceholderText("10.1.1.5")
+        self.test_src.setPlaceholderText("10.1.1.5 or a name")
         self.test_dst = QLineEdit()
-        self.test_dst.setPlaceholderText("10.2.2.10")
+        self.test_dst.setPlaceholderText("10.2.2.10 or a name")
         self.test_protocol = QComboBox()
         self.test_protocol.setEditable(True)
         self.test_protocol.addItems(["tcp", "udp", "icmp", "ip", "gre", "esp", "ospf"])
@@ -1587,8 +1589,21 @@ class AclTab(QWidget):
         protocol = self.test_protocol.currentText().strip().lower()
         icmp = self.test_dst_port.text() if protocol == "icmp" else ""
         when = None if self.test_now.isChecked() else self.test_when.dateTime().toPyDateTime()
+        family = 6 if item.family == V6 else 4
+        ends, notes = [], []
+        for field, label in ((self.test_src, "Source"), (self.test_dst, "Destination")):
+            text = field.text().strip()
+            if is_host_name(text):  # A host name: the test uses its address
+                try:
+                    found = resolve_now(text, family, self.window)
+                except ValueError as error:
+                    set_hint(self.test_result, f"{label}: {error}", "error")
+                    return
+                text = found.address
+                notes.append(f"{found.note()}.")
+            ends.append(text)
         try:
-            packet = aclcheck.packet_from_text(self.test_src.text(), self.test_dst.text(), protocol,
+            packet = aclcheck.packet_from_text(ends[0], ends[1], protocol,
                                                self.test_src_port.text(), "" if icmp else self.test_dst_port.text(),
                                                icmp, self.test_flags.text(), when)
         except ValueError as error:
@@ -1607,6 +1622,8 @@ class AclTab(QWidget):
                 text += f"  (On the device now: {'permitted' if was.permitted else 'denied'}.)"
         if verdict.notes:
             text += "  " + " ".join(dict.fromkeys(verdict.notes))
+        if notes:
+            text += "  " + " ".join(notes)
         set_hint(self.test_result, text, "success" if verdict.permitted else "error")
         if verdict.rule is not None:
             self.select_rows([item.rules.index(verdict.rule)])

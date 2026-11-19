@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QComboBox, QFileDia
 from ..snmp import SYSTEM, VERSIONS, WALK_PRESETS, SnmpClient, SnmpError, community_is_valid, format_value, \
     interface_summary, oid_name, oid_text, parse_oid
 from ..snmpv3 import AUTH_NAMES, PRIV_NAMES, V3User, is_v3
-from .common import SortableTableItem, StoppableThread, set_hint, set_invalid
+from .common import SortableTableItem, StoppableThread, release_thread, set_hint, set_invalid
 from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
@@ -232,7 +232,7 @@ class SnmpTab(QWidget):
     def shutdown(self):
         if self.worker is not None:
             self.worker.stop()
-            self.worker.wait(self.timeout_input.value() * 3 + 2000)
+            release_thread(self.worker, self.timeout_input.value() * 3 + 2000)
 
     def query_host(self, host, community=None, version=None):
         """Read a device's system details now (from the Sweep or Network Map page), with community and version

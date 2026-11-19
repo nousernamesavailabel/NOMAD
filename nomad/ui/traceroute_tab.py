@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QFormLay
 
 from ..icmp import IcmpClient, resolve_host
 from ..mtr import MtrTrace, format_ms, format_percent, hop_losses, hop_note, report_text
-from .common import ColumnFitter, StoppableThread, set_hint
+from .common import ColumnFitter, StoppableThread, release_thread, set_hint
 from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
@@ -282,7 +282,7 @@ class TracerouteTab(QWidget):
     def shutdown(self):
         if self.worker is not None:
             self.worker.stop()
-            self.worker.wait(int(self.timeout_input.text() or DEFAULTS["timeout"]) + 5000)
+            release_thread(self.worker, int(self.timeout_input.text() or DEFAULTS["timeout"]) + 5000)
 
     def trace_host(self, host):
         """Trace to host now, stopping any trace that's still running."""

@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBo
 from ..netmap import monitor, probes
 from ..terminal.transports import Cancelled, ConnectionFailed
 from .common import StoppableThread, set_hint
+from .name_lookup import resolve_now
 from .ssh_push import LoginRow
 from .theme import COLORS, accent_button
 
@@ -459,8 +460,11 @@ class ProbeDialog(QDialog):
             vrf = self.add_table.cellWidget(row, VRF_COLUMN).text().strip()
             source = self.source(row)
             if not probes.address_ok(target):
-                set_hint(self.status_label, f"{device.label}: '{target}' isn't an IP address.", "error")
-                return None
+                try:  # A host name: the router pings its address
+                    target = resolve_now(target, 4).address
+                except ValueError as error:
+                    set_hint(self.status_label, f"{device.label}: {error}", "error")
+                    return None
             if " " in vrf:
                 set_hint(self.status_label, f"{device.label}: a VRF name has no spaces.", "error")
                 return None

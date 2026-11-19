@@ -11,9 +11,11 @@ from PyQt5.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBo
 from .. import erspan
 from ..capture import DEFAULT_FILE_SIZE_MB, PROTOCOLS, Capture, default_output_path, validate_filter
 from ..pktmon import PktmonBusy, find_pktmon
+from ..resolve import is_host_name
 from ..system import CommandError
 from .capture_viewer import CaptureViewer
 from .common import format_size, run_in_background, set_hint, set_invalid
+from .name_lookup import resolve_now
 from .theme import accent_button
 
 log = logging.getLogger(__name__)
@@ -55,7 +57,8 @@ class CaptureTab(QWidget):
         panel.addWidget(intro)
 
         self.address_input = QLineEdit()
-        self.address_input.setPlaceholderText("Optional: an IP address or subnet, such as 10.0.0.5 or 10.0.0.0/24")
+        self.address_input.setPlaceholderText("Optional: an IP address, subnet or host name, such as 10.0.0.5, "
+                                              "10.0.0.0/24 or server1")
         self.port_input = QLineEdit()
         self.port_input.setPlaceholderText("Optional, such as 443")
         self.protocol_combo = QComboBox()
@@ -196,8 +199,12 @@ class CaptureTab(QWidget):
     def describe_settings(self, *_):
         """The Settings button says what a capture would take, so it can be seen with the settings folded away."""
         try:
-            what = validate_filter(self.address_input.text(), self.port_input.text(),
-                                   self.protocol_combo.currentText()).describe()
+            name = self.typed_name()
+            capture_filter = validate_filter("" if name else self.address_input.text(), self.port_input.text(),
+                                             self.protocol_combo.currentText())
+            if name:
+                capture_filter.address = name  # Looked up when the capture starts
+            what = capture_filter.describe()
         except ValueError:
             what = "check the filter"
         if self.span_check.isChecked():
@@ -205,6 +212,11 @@ class CaptureTab(QWidget):
         if self.unwrap_check.isChecked():
             what += ", ERSPAN"
         self.settings_button.setText(f"Settings: {what}")
+
+    def typed_name(self):
+        """The host name in the address box, or "" for an address, a subnet or nothing."""
+        text = self.address_input.text().strip()
+        return text if is_host_name(text) else ""
 
     # ----------------------------------------------------------------- Page interface
 
@@ -345,9 +357,16 @@ class CaptureTab(QWidget):
     def start(self):
         if self.capture is not None or self.busy:
             return
+        address = self.address_input.text()
+        if self.typed_name():
+            try:
+                address = resolve_now(address, window=self.window).address
+            except ValueError as error:
+                set_invalid(self.address_input, True)
+                set_hint(self.status_label, str(error), "error")
+                return
         try:
-            capture_filter = validate_filter(self.address_input.text(), self.port_input.text(),
-                                             self.protocol_combo.currentText())
+            capture_filter = validate_filter(address, self.port_input.text(), self.protocol_combo.currentText())
         except ValueError as error:
             target = self.port_input if "port" in str(error).lower() else self.address_input
             set_invalid(target, True)

@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import QApplication, QFormLayout, QHBoxLayout, QLabel, QLin
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 
 from ..httpcheck import EXPIRY_WARNING_DAYS, check_with_redirects, normalize_url
-from .common import ColumnFitter, StoppableThread, format_ms, set_hint, set_invalid
+from .common import ColumnFitter, StoppableThread, format_ms, release_thread, set_hint, set_invalid
 from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ class WebCheckTab(QWidget):
     def shutdown(self):
         if self.web_worker is not None:
             self.web_worker.stop()
-            self.web_worker.wait(self.web_timeout_input.value() * 1000 + 3000)
+            release_thread(self.web_worker, self.web_timeout_input.value() * 1000 + 3000)
 
     # ----------------------------------------------------------------- Web check
 

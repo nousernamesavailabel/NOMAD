@@ -19,7 +19,7 @@ from ..configs.local import LocalConfigs
 from ..ipam.client import IpamError, OldServerError
 from ..system import account_name, app_data_dir, replace_file
 from .code_editor import CISCO, LANGUAGE_NAMES, PLAIN, XML, CodeEditor, FindBar, language_for
-from .common import add_action, run_in_background, set_hint
+from .common import add_action, release_thread, run_in_background, set_hint
 from .compare_view import CompareView
 from .config_events import config_events
 from .editor_panels import ArchivePanel, BackupThread, BackupsPanel, ChangesPanel, CheckDialog, ConfigSyncThread, \
@@ -275,7 +275,7 @@ class EditorTab(QWidget):
         self.set_backups_running(False, keep_setting=True)
         if self.sync_thread is not None:
             self.sync_thread.stop()
-            self.sync_thread.wait(3000)
+            release_thread(self.sync_thread, 3000)
             self.sync_thread = None
         self.scope_timer.stop()
         if self.configs is not None:

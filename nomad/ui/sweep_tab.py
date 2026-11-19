@@ -18,7 +18,7 @@ from ..sweep import LARGE_SWEEP_HOSTS, SWEEP_PASSES, add_to_user_path, find_putt
 from ..ipam.store import parse_subnet
 from ..terminal.sessions import SSH
 from .host_menu import HostActions
-from .common import ColumnFitter, SortableTableItem, StoppableThread, set_hint, set_invalid
+from .common import ColumnFitter, SortableTableItem, StoppableThread, release_thread, set_hint, set_invalid
 from .ipam_compare import IpamComparison, finding_color
 from .theme import accent_button
 
@@ -249,7 +249,7 @@ class SweepTab(QWidget):
     def shutdown(self):
         if self.worker is not None:
             self.worker.stop()
-            self.worker.wait(self.timeout_input.value() + 3000)
+            release_thread(self.worker, self.timeout_input.value() + 3000)
 
     # ----------------------------------------------------------------- Subnet
 

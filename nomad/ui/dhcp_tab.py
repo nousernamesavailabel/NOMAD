@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QFormLayout, QHBoxL
 
 from ..dhcp import CLIENT_PORT, assess, current_dhcp_server, discover_servers
 from ..system import allow_inbound_port
-from .common import ColumnFitter, SortableTableItem, StoppableThread, set_hint
+from .common import ColumnFitter, SortableTableItem, StoppableThread, release_thread, set_hint
 from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
@@ -168,7 +168,7 @@ class DhcpTab(QWidget):
     def shutdown(self):
         if self.worker is not None:
             self.worker.stop()
-            self.worker.wait(3000)
+            release_thread(self.worker, 3000)
 
     # ----------------------------------------------------------------- Test
 

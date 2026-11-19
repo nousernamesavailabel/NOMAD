@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QMes
 from ..netmap import monitor, probes
 from ..netmap.monitor import DOWN, UNKNOWN, UP
 from ..snmp import SnmpClient
+from .common import release_thread
 from .theme import monospace_font
 
 LOG_LINES = 20000
@@ -323,9 +324,9 @@ class NetworkMonitor(QObject):
     def shutdown(self):
         self.timer.stop()
         if self.thread is not None:
-            self.thread.wait(monitor.PING_TIMEOUT_MS * monitor.PING_TRIES * 4)
+            release_thread(self.thread, monitor.PING_TIMEOUT_MS * monitor.PING_TRIES * 4)
         if self.discover_thread is not None:
-            self.discover_thread.wait(10000)
+            release_thread(self.discover_thread, 10000)
 
     # ----------------------------------------------------------------- Showing it
 

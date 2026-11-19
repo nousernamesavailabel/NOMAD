@@ -6,6 +6,24 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-18
+
+### Added
+
+- **Host names where an IP address was needed.** These fields now take a host name or FQDN as well as an address: **DNS Servers** > Add a server, the **Routing Table** gateway, the **Packet Capture** address filter, **SNMP Config**'s Send to and Allowed to read lists, the **Port Mirroring** ERSPAN destination, the **VPNs** far end, WAN and Reached at addresses, **Monitor from a Router** probe targets, the **ACLs** Packet Tester, and the IP address in the map's **Add/Edit Device** and **Add/Edit Host**. NOMAD asks DNS first. If DNS doesn't know the name, it looks for it on the open map, in IPAM and in the saved sessions, where a short name finds its FQDN and the other way round. The answer shows next to the field, such as `nms1 → 10.0.0.60 (DNS)`, and is kept for a minute. Configurations NOMAD builds always get the address, never the name, so devices don't need DNS. A device or host added to the map keeps the address, and the name goes in its Name field if that's empty. Fields checked as you type look the name up once you stop typing, without holding up the page, and DNS gets 5 seconds to answer.
+- **Right-click menus on a host name.** **Show in IPAM**, **Show on Map**, **Add Device to Map...** and **Copy IP Address** now appear for a host shown by name, such as a saved session, and look its address up when you choose them.
+
+### Changed
+
+- **Network Map: the crawl seeds box says it takes names.** Names already worked there.
+- **Freeze reports in the log.** If the window stops answering for 2 seconds or more, NOMAD writes a report to `nomad.log`. The report gives NOMAD's version, Windows version and whether NOMAD runs as administrator. It also gives whether this computer is the tribe server, the server addresses in the tribe key and which address answered last, and the page showing. For the open map it gives the devices (and how many were added by hand), links, hosts, groups and tunnels, the view, and whether a crawl, check, watch, monitor or save is running. It gives the tribe map sync's state and changes waiting to send, the IP Addresses page's tribe connection, sync and sweep, the open terminal sessions, memory in use, and the last click, menu choice or command key before the freeze. Typed text is never recorded. Then comes what every thread was doing. While the freeze lasts, NOMAD notes where the UI thread is ten times a second. It logs where it is again at 10, 30, 60 and 120 seconds. When the window answers again, it logs how long the freeze lasted and where the time went. If NOMAD can't run its own report during a freeze, Python writes the bare stacks to `nomad-freezes.txt` beside the log after 5 seconds. Time the computer spends asleep or hibernating doesn't count as a freeze.
+- **The log notes closing.** "Closing NOMAD", then "Closed in N s" with each step that took a tenth of a second or more.
+
+### Fixed
+
+- **Closing NOMAD could freeze the window for many seconds.** When NOMAD closed, each page waited in turn for its background work to stop, with the window frozen meanwhile. A map check or crawl could take up to 7 seconds, the map monitor up to 10, the tribe map sync and the config archive sync 3 seconds each, and each connected terminal session up to 3. Work waiting on the network, such as a slow tribe server, used the full time. Each now gets 0.3 seconds while NOMAD closes. NOMAD then ends without waiting for work still finishing, so Qt no longer frees threads that are still running, which risked a crash on the way out. Switch Discovery and iperf still wait, so pktmon's filters and iperf3 are always cleaned up.
+- **Editor: changing tribe keys while the config archive was syncing could crash NOMAD.** The archive's sync thread could be freed while still running. It's now let go safely, like the other pages' threads.
+
 ## [2.3.0] - 2026-11-18
 
 ### Added

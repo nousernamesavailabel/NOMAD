@@ -10,11 +10,13 @@ from PyQt5.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDialog
     QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, \
     QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QToolButton, QVBoxLayout, QWidget
 
+from ..resolve import NameNotFound, is_host_name
 from ..snmpv3 import AUTH_NAMES, PRIV_NAMES, V3User, credential_from_json, credential_label, credential_to_json, \
     is_v3
 from ..switchconfig import SYSLOG_LEVELS, TRAP_CATEGORIES, ConfigOptions, build, cautions, problems, undo
 from ..terminal.credentials import CredentialError, protect, unprotect
 from .common import set_hint
+from .name_lookup import NameResolver, looking_up
 from .session_send import SessionSender
 from .theme import accent_button, monospace_font
 
@@ -82,6 +84,9 @@ class SnmpConfigTab(QWidget):
         self.window = window
         self.lines = []
         self.more_credentials = []  # More of the map's community strings and SNMPv3 users allowed to read
+        self.names = NameResolver(window, self)  # Host names typed where traps go, or who may read
+        self.names.changed.connect(self.update_preview)
+        self.name_notes, self.name_problems, self.names_typed = [], [], []  # From the last options()
         self.init_ui()
         self.session_sender = SessionSender(self, window, self.status_label)
         self.update_preview()
@@ -259,7 +264,7 @@ class SnmpConfigTab(QWidget):
         self.more_widget.setVisible(False)
 
         self.permit_input = QLineEdit()
-        self.permit_input.setPlaceholderText("Addresses and subnets, such as 10.0.0.50 10.20.0.0/24")
+        self.permit_input.setPlaceholderText("Addresses, subnets or names, such as 10.0.0.50 10.20.0.0/24 nms1")
         self.permit_same = QCheckBox("Same as where traps and syslog go")
         self.permit_same.setChecked(True)
         self.permit_same.toggled.connect(lambda on: self.permit_input.setEnabled(not on))
@@ -437,8 +442,34 @@ class SnmpConfigTab(QWidget):
         self.auth_password_input.setText(user.auth_password)
         self.priv_password_input.setText(user.priv_password)
 
+    def addresses(self, text, field):
+        """The items of a list field, with host names turned into their addresses (the config gets addresses). A
+        name still being looked up, or with no address, is left as typed and said in name_problems."""
+        items = []
+        for index, item in enumerate(split_items(text)):
+            found = None
+            if "/" not in item:
+                try:
+                    found = self.names.address(item, 4, slot=(field, index))
+                    if found is None:
+                        self.name_problems.append(looking_up(item))
+                except NameNotFound as error:
+                    self.name_problems.append(str(error))
+                except ValueError:
+                    pass  # The config's own check explains
+            if found is None:
+                if is_host_name(item):
+                    self.names_typed.append(item)
+                items.append(item)
+                continue
+            if found.is_name:
+                self.name_notes.append(found.note())
+            items.append(found.address)
+        return items
+
     def options(self):
-        destinations = split_items(self.destinations_input.text())
+        self.name_notes, self.name_problems, self.names_typed = [], [], []
+        destinations = self.addresses(self.destinations_input.text(), "to")
         return ConfigOptions(
             access=self.access_group.isChecked(),
             community=self.community_input.text().strip() if self.community_check.isChecked() else "",
@@ -448,7 +479,7 @@ class SnmpConfigTab(QWidget):
             more_users=[item for item in self.more_credentials if is_v3(item)] if self.v3_check.isChecked() else [],
             group=self.group_input.text().strip(), view=self.view_input.text().strip(),
             acl=self.acl_input.text().strip(),
-            permit=destinations if self.permit_same.isChecked() else split_items(self.permit_input.text()),
+            permit=destinations if self.permit_same.isChecked() else self.addresses(self.permit_input.text(), "read"),
             location=self.location_input.text().strip(), contact=self.contact_input.text().strip(),
             ifindex_persist=self.ifindex_check.isChecked(), destinations=destinations,
             traps=self.traps_group.isChecked(), trap_version=self.trap_version_combo.currentData(),
@@ -462,6 +493,9 @@ class SnmpConfigTab(QWidget):
     def update_preview(self):
         options = self.options()
         found = problems(options)
+        if self.names_typed:  # Said better by name_problems than as "isn't an address"
+            found = list(dict.fromkeys(self.name_problems)) + [
+                problem for problem in found if not any(f"'{name}'" in problem for name in self.names_typed)]
         if found:
             self.lines = []
             self.preview.setPlainText("")
@@ -470,8 +504,9 @@ class SnmpConfigTab(QWidget):
             self.lines = build(options) if self.show_combo.currentData() == "add" else undo(options)
             self.preview.setPlainText("\n".join(self.lines))
             caution = cautions(options)
-            set_hint(self.status_label, " ".join([f"{len(self.lines)} lines, from the enable (#) prompt."] + caution),
-                     "warning" if caution else "info")
+            notes = [f"{note}." for note in dict.fromkeys(self.name_notes)]
+            set_hint(self.status_label, " ".join([f"{len(self.lines)} lines, from the enable (#) prompt."] + caution +
+                                                 notes), "warning" if caution else "info")
         has_lines = bool(self.lines)
         for widget in (self.send_button, self.copy_button, self.save_button):
             widget.setEnabled(has_lines)

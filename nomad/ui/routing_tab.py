@@ -10,9 +10,11 @@ from PyQt5.QtWidgets import QAbstractItemView, QAction, QApplication, QCheckBox,
 
 from ..routes import add_route, build_route_copy_command, connected_network_warning, delete_route, \
     gateway_suggestions, matching_routes, parse_route_lookup, validate_route_input
+from ..resolve import NameNotFound
 from ..snapshot import Route
 from ..system import CommandError
 from .common import ColumnFitter, SortableTableItem, set_hint, set_invalid
+from .name_lookup import NameResolver, looking_up, resolve_now
 from .theme import COLORS
 
 log = logging.getLogger(__name__)
@@ -36,6 +38,8 @@ class RoutingTab(QWidget):
         self.session_added_routes = set()  # match_keys of routes added or updated from this app
         self.route_form_spec = None  # Validated route from the form, or None
         self.restoring_route_selection = False
+        self.names = NameResolver(window, self)  # A gateway typed as a name
+        self.names.changed.connect(self.validate_route_form)
         self.init_ui()
         window.snapshot_changed.connect(lambda _: self.populate())
         self.apply_route_family_to_form()
@@ -360,7 +364,7 @@ class RoutingTab(QWidget):
             self.destination_input.setPlaceholderText("e.g. 10.0.0.0 or 10.0.0.0/24")
             self.netmask_input.setEnabled("/" not in self.destination_input.text())
             self.netmask_input.setPlaceholderText("e.g. 255.255.255.0 (filled in automatically for /24 notation)")
-            self.route_gateway_input.setPlaceholderText("e.g. 192.168.1.1 (leave blank for an on-link route)")
+            self.route_gateway_input.setPlaceholderText("e.g. 192.168.1.1 or a name (leave blank for an on-link route)")
         else:
             self.destination_input.setPlaceholderText("e.g. 2001:db8::/32")
             self.netmask_input.clear()
@@ -405,12 +409,39 @@ class RoutingTab(QWidget):
         elif not self.netmask_input.isEnabled():
             self.netmask_input.setEnabled(True)
 
+    def route_gateway(self, now=False):
+        """(the gateway to give the route, a note when a name was typed, a problem with the name or "", still looking
+        it up). A name becomes its address; anything else that isn't an address is left for the route check to
+        explain. now: wait for DNS (for a button) rather than look the name up in the background."""
+        text = self.route_gateway_input.text()
+        if not text.strip():
+            return text, "", "", False
+        family = self.current_route_family()
+        try:
+            if now:
+                found = resolve_now(text, family, self.window)
+            else:
+                found = self.names.address(text, family, slot="gateway")
+        except NameNotFound as error:
+            return text, "", str(error), False
+        except ValueError:
+            return text, "", "", False
+        if found is None:
+            return text, "", "", True
+        return found.address, found.note(), "", False
+
     def validate_route_form(self):
         """Validate the route form as the user types, flagging bad fields and enabling buttons."""
+        gateway, note, problem, waiting = self.route_gateway()
         spec, errors, warnings = validate_route_input(
             self.current_route_family(), self.destination_input.text(), self.netmask_input.text(),
-            self.route_gateway_input.text(), self.metric_input.text(), self.route_interface_combo.currentData(),
-            self.adapters)
+            gateway, self.metric_input.text(), self.route_interface_combo.currentData(), self.adapters)
+        if problem:
+            errors["gateway"], spec = problem, None
+        elif waiting:  # Not wrong, just not known yet
+            errors.pop("gateway", None)
+            errors.pop("interface", None)
+            spec = None
         self.route_form_spec = spec
 
         fields = {
@@ -426,6 +457,8 @@ class RoutingTab(QWidget):
         form_touched = any(line_edit.text().strip() for line_edit in fields.values())
         if errors and form_touched:
             set_hint(self.route_hint_label, next(iter(errors.values())), "error")
+        elif waiting:
+            set_hint(self.route_hint_label, looking_up(self.route_gateway_input.text()), "info")
         elif warnings:
             set_hint(self.route_hint_label, warnings[0], "warning")
         elif spec is not None:
@@ -433,6 +466,8 @@ class RoutingTab(QWidget):
             summary = f"Ready: {spec['network']} {'via ' + spec['gateway'] if spec['gateway'] else 'on-link'}"
             if adapter is not None:
                 summary += f" on {adapter.name}"
+            if note:
+                summary += f" ({note})"
             set_hint(self.route_hint_label, summary, "info")
         else:
             self.route_hint_label.clear()
@@ -524,10 +559,12 @@ class RoutingTab(QWidget):
 
     def read_route_form(self):
         """Return the validated route spec from the form, or None (after explaining why)."""
+        gateway, _, problem, _ = self.route_gateway(now=True)
         spec, errors, _ = validate_route_input(
             self.current_route_family(), self.destination_input.text(), self.netmask_input.text(),
-            self.route_gateway_input.text(), self.metric_input.text(), self.route_interface_combo.currentData(),
-            self.adapters)
+            gateway, self.metric_input.text(), self.route_interface_combo.currentData(), self.adapters)
+        if problem:
+            errors["gateway"] = problem
         if errors:
             QMessageBox.warning(self, "Invalid Route", "\n".join(errors.values()))
             return None

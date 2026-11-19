@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPlainT
 
 from ..icmp import IcmpClient, find_path_mtu, make_mtu_probe, path_mtu_steps, resolve_host
 from ..ipconfig import MAX_MTU, MIN_MTU
-from .common import StoppableThread, set_hint
+from .common import StoppableThread, release_thread, set_hint
 from .theme import COLORS, accent_button, monospace_font
 
 log = logging.getLogger(__name__)
@@ -134,7 +134,7 @@ class MtuTab(QWidget):
     def shutdown(self):
         if self.worker is not None:
             self.worker.stop()
-            self.worker.wait(3000)
+            release_thread(self.worker, 3000)
 
     def inputs(self):
         return {"host": self.host_input, "minimum": self.minimum_input, "maximum": self.maximum_input,

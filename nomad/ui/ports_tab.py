@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBo
 from ..icmp import resolve_host
 from ..ports import CLOSED, FILTERED, OPEN, PORT_PRESETS, SCAN_PASSES, WEB_PORTS, check_port, parse_ports, \
     scan_ports, summarize
-from .common import ColumnFitter, SortableTableItem, StoppableThread, set_hint, set_invalid
+from .common import ColumnFitter, SortableTableItem, StoppableThread, release_thread, set_hint, set_invalid
 from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
@@ -186,7 +186,7 @@ class PortsTab(QWidget):
     def shutdown(self):
         if self.worker is not None:
             self.worker.stop()
-            self.worker.wait(self.timeout_input.value() + 3000)
+            release_thread(self.worker, self.timeout_input.value() + 3000)
 
     def scan_host(self, host, ports=None):
         """Scan host now (the common ports unless given others), stopping any scan that's still running."""

@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import QCheckBox, QFormLayout, QHBoxLayout, QLabel, QLineEd
     QVBoxLayout, QWidget
 
 from ..icmp import IcmpClient, PingStats, format_reply, resolve_host
-from .common import StoppableThread
+from .common import StoppableThread, release_thread
 from .theme import accent_button, monospace_font
 
 log = logging.getLogger(__name__)
@@ -155,7 +155,7 @@ class PingTab(QWidget):
     def shutdown(self):
         if self.worker is not None:
             self.worker.stop()
-            self.worker.wait(3000)
+            release_thread(self.worker, 3000)
 
     # ----------------------------------------------------------------- Quick targets
 

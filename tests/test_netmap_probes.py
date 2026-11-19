@@ -526,8 +526,8 @@ def test_monitor_from_a_router_on_the_page(app, tmp_path, monkeypatch):
         assert dialog.planned() is None and "without spaces" in dialog.status_label.text()
         source.setEditText("")
         dialog.add_table.cellWidget(row, 2).setCurrentIndex(0)
-        dialog.add_table.cellWidget(row, 1).setText("sw-b.corp")
-        assert dialog.planned() is None and "isn't an IP address" in dialog.status_label.text()
+        dialog.add_table.cellWidget(row, 1).setText("10.20.5.300")
+        assert dialog.planned() is None and "isn't an IPv4 address or a host name" in dialog.status_label.text()
         dialog.close()
     finally:
         page.shutdown()

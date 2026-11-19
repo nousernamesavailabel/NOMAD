@@ -28,7 +28,9 @@ from ..netmap.mirror import BOTH, DIRECTION_NAMES, DIRECTIONS, ERSPAN, KIND_TITL
 from ..netmap.model import ROUTER, SWITCH, port_key, port_sort_key
 from ..netmap.vlans import ERROR, INFO, WARNING, port_info
 from ..oui import format_mac, normalize_mac
+from ..resolve import is_host_name
 from .common import StoppableThread, local_address_toward, read_only_table, release_thread, set_hint
+from .name_lookup import resolve_now
 from .session_send import SessionSender
 from .ssh_push import Job, LoginRow, PushThread
 from .theme import COLORS, accent_button, monospace_font
@@ -190,7 +192,7 @@ class MirrorTab(QWidget):
         self.request = None
         self.plan = None
         self.plan_tag = ""
-        self.pc_note = ""  # How This PC was turned into a destination
+        self.pc_note = ""  # How This PC (or a host name) was turned into a destination
         self.states = {}  # Device key -> SwitchState, read for the plan
         self.statuses = {}  # Plan step index -> status text
         self.record = None  # The MirrorRecord of the plan, once anything of it was sent
@@ -313,7 +315,7 @@ class MirrorTab(QWidget):
         self.adapter_combo.currentIndexChanged.connect(self.plan_outdated)
         to_layout.addWidget(self.adapter_combo, 1, 1)
         self.address_input = QLineEdit()
-        self.address_input.setPlaceholderText("The capture box's IP address, such as 10.1.1.50")
+        self.address_input.setPlaceholderText("The capture box's IP address or name, such as 10.1.1.50")
         self.address_input.textChanged.connect(self.plan_outdated)
         to_layout.addWidget(self.address_input, 2, 1)
         grid.addWidget(to_box, 1, 2, 1, 2)
@@ -822,6 +824,13 @@ class MirrorTab(QWidget):
             request.dest_port = self.dest_port_combo.currentText().strip()
         elif self.to_address_radio.isChecked():
             request.to, request.dest_ip = TO_ADDRESS, self.address_input.text().strip()
+            if is_host_name(request.dest_ip):  # The config gets its address
+                try:
+                    found = resolve_now(request.dest_ip, 4, self.window)
+                except ValueError as error:
+                    set_hint(self.status_label, str(error), "error")
+                    return None
+                request.dest_ip, self.pc_note = found.address, f"{found.note()}."
         elif not self.to_this_pc(network_map, request):
             return None
         return request

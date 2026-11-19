@@ -40,7 +40,7 @@ from ..snmp import V2C
 from ..snmpv3 import is_v3
 from ..terminal.credentials import CredentialError, protect, unprotect
 from .common import OneLineLabel, SortableTableItem, StoppableThread, add_submenu, drop_empty_submenus, \
-    format_size, read_only_table, set_hint
+    format_size, read_only_table, release_thread, set_hint
 from .host_menu import FIND_PORT, HostActions
 from .map_ipam_dialog import RecordDialog
 from .integration import IPAM, PLACEMENT, VLAN, MapNetworkDialog, TribeNetworkDialog, hub, split_key
@@ -243,7 +243,8 @@ class NetworkMapTab(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         self.seeds_input = QLineEdit()
-        self.seeds_input.setPlaceholderText("Core switch or gateway to start from (IP addresses, separated by commas)")
+        self.seeds_input.setPlaceholderText("Core switch or gateway to start from (IP addresses or names, separated "
+                                            "by commas)")
         self.gateway_button = QPushButton("Adapter's Gateway")
         self.communities_button = QPushButton("SNMP Credentials...")
         self.communities_button.setToolTip("The SNMP community strings and SNMPv3 users to try, including ones for "
@@ -877,13 +878,13 @@ class NetworkMapTab(QWidget):
         self.watcher.shutdown()
         for thread in list(self.check_threads):
             thread.stop()
-            thread.wait(self.timeout * 2 + 3000)
+            release_thread(thread, self.timeout * 2 + 3000)
         if self.save_timer.isActive():
             self.save_timer.stop()
             self.save_positions()
         if self.worker is not None:
             self.worker.stop()
-            self.worker.wait(self.timeout * 2 + 3000)
+            release_thread(self.worker, self.timeout * 2 + 3000)
         self.tribe.shutdown()
 
     # ----------------------------------------------------------------- Inputs

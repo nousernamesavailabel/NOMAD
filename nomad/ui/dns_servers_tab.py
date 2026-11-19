@@ -1,5 +1,4 @@
 """DNS Servers page: compare how quickly DNS servers answer, and check forward/reverse DNS."""
-import ipaddress
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,7 +10,9 @@ from PyQt5.QtWidgets import QAbstractItemView, QComboBox, QFormLayout, QGroupBox
 
 from ..dnsclient import RCODE_MEANINGS, benchmark_server, forward_reverse
 from ..lookup import HOSTNAME_PATTERN
-from .common import ColumnFitter, SortableTableItem, StoppableThread, format_ms, run_in_background, set_hint, set_invalid
+from .common import ColumnFitter, SortableTableItem, StoppableThread, format_ms, release_thread, run_in_background, \
+    set_hint, set_invalid
+from .name_lookup import resolve_now
 from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class DnsServersTab(QWidget):
             spin_box.setButtonSymbols(QSpinBox.NoButtons)
         add_row = QHBoxLayout()
         self.add_server_input = QLineEdit()
-        self.add_server_input.setPlaceholderText("Another DNS server's IP address")
+        self.add_server_input.setPlaceholderText("Another DNS server's IP address or name")
         self.add_server_button = QPushButton("Add Server")
         self.remove_server_button = QPushButton("Remove Selected")
         self.remove_server_button.setToolTip("Take the selected server off the list (Delete). Untick a server "
@@ -191,7 +192,7 @@ class DnsServersTab(QWidget):
     def shutdown(self):
         if self.dns_worker is not None:
             self.dns_worker.stop()
-            self.dns_worker.wait(self.dns_timeout_input.value() + 3000)
+            release_thread(self.dns_worker, self.dns_timeout_input.value() + 3000)
 
     # ----------------------------------------------------------------- DNS servers
 
@@ -247,11 +248,14 @@ class DnsServersTab(QWidget):
     def add_server(self):
         text = self.add_server_input.text().strip()
         try:
-            server = str(ipaddress.ip_address(text))
-        except ValueError:
+            found = resolve_now(text, window=self.window)
+        except ValueError as error:
             set_invalid(self.add_server_input, True)
-            set_hint(self.dns_status, f"'{text}' is not an IP address. DNS servers are added by address.", "error")
+            set_hint(self.dns_status, str(error), "error")
             return
+        server = found.address.partition("%")[0]
+        if found.is_name:
+            set_hint(self.dns_status, f"Added {found.note()}.", "info")
         if server in self.removed_servers:
             self.removed_servers.discard(server)  # Adding a removed built-in server brings it back
         elif server not in self.custom_servers and server not in [item for item, _ in self.candidate_servers()]:

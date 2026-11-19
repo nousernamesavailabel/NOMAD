@@ -17,6 +17,7 @@ from ..oui import format_mac, vendor
 from ..snmp import VERSIONS, community_is_valid
 from ..snmpv3 import AUTH_NAMES, PRIV_NAMES, V3User, is_v3
 from .common import ColumnFitter
+from .name_lookup import name_to_address
 from .theme import COLORS
 
 CHANGE_COLORS = {diff.ADDED: "success", diff.REMOVED: "error", diff.CHANGED: "warning", diff.MOVED: "link"}
@@ -433,6 +434,7 @@ class HostDialog(QDialog):
         self.port_combo.setEditText(host.port if host else port)
         self.name_input = QLineEdit(host.name if host else "")
         self.ip_input = QLineEdit(host.ip if host else "")
+        self.ip_input.setPlaceholderText("An address, or a name to look up")
         self.mac_input = QLineEdit(host.mac if host else "")
         self.mac_input.setPlaceholderText("Such as 00-1A-2B-3C-4D-5E")
         self.vlan_input = QSpinBox()
@@ -490,6 +492,7 @@ class HostDialog(QDialog):
 
     def accept(self):
         try:
+            name_to_address(self.ip_input, self.name_input)
             self.values()
         except ValueError as error:
             QMessageBox.warning(self, self.windowTitle(), str(error))
@@ -569,7 +572,7 @@ class DeviceDialog(QDialog):
         self.name_input = QLineEdit(device.name if device else name)
         self.name_input.setPlaceholderText("Such as closet-sw3")
         self.ip_input = QLineEdit(device.mgmt_ip if device else address)
-        self.ip_input.setPlaceholderText("To ping and check over SNMP (optional)")
+        self.ip_input.setPlaceholderText("To ping and check over SNMP (optional; a name is looked up)")
         self.kind_combo = QComboBox()
         for kind in (SWITCH, ROUTER, FIREWALL, WLC, AP, SERVER, UNKNOWN):
             self.kind_combo.addItem(KIND_NAMES[kind], kind)
@@ -649,6 +652,7 @@ class DeviceDialog(QDialog):
 
     def accept(self):
         try:
+            name_to_address(self.ip_input, self.name_input)
             self.values()
         except ValueError as error:
             QMessageBox.warning(self, self.windowTitle(), str(error))

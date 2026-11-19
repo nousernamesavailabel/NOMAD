@@ -8,7 +8,9 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBo
     QPlainTextEdit, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout
 
 from ..netmap import vpn
+from ..resolve import NameNotFound, is_host_name
 from .common import set_hint
+from .name_lookup import NameResolver, looking_up, resolve_now
 from .theme import accent_button, monospace_font
 
 
@@ -75,8 +77,10 @@ class NewVpnDialog(QDialog):
         self.far_about = QLabel()
         self.far_about.setWordWrap(True)
         far.addRow(self.far_about)
+        self.names = NameResolver(None, self)  # A far end typed as a host name
+        self.names.changed.connect(self.check)
         self.far_input = QLineEdit()
-        self.far_input.setPlaceholderText("203.0.113.10")
+        self.far_input.setPlaceholderText("203.0.113.10 or a host name")
         self.far_input.textChanged.connect(self.check)
         self.far_label = QLabel("Its WAN address:")
         far.addRow(self.far_label, self.far_input)
@@ -110,8 +114,34 @@ class NewVpnDialog(QDialog):
         return len(chosen) == 1
 
     def far_end(self):
-        """The far end's WAN address, when it's set up by hand ("" otherwise)."""
-        return self.far_input.text().strip() if self.far_wanted() else ""
+        """The far end's WAN address, when it's set up by hand ("" otherwise): a host name typed gives its address
+        (the lines get the address)."""
+        if not self.far_wanted():
+            return ""
+        found, _ = self.far_found()
+        return found.address if found is not None else self.far_input.text().strip()
+
+    def far_found(self):
+        """(Resolved or None, the problem with what's typed or "")."""
+        text = self.far_input.text().strip()
+        if not text:
+            return None, ""
+        try:
+            found = self.names.address(text, 4, slot="far")
+        except NameNotFound as error:
+            return None, str(error)
+        except ValueError:
+            return None, ""
+        return found, "" if found is not None else looking_up(text)
+
+    def accept(self):
+        if self.far_wanted() and is_host_name(self.far_input.text().strip()):
+            try:  # Asked again if it's been a while, so the lines get an address that's current
+                resolve_now(self.far_input.text(), 4)
+            except ValueError as error:
+                set_hint(self.hint, str(error), "warning")
+                return
+        super().accept()
 
     def on_kind(self, *_):
         kind = self.kind()
@@ -174,12 +204,16 @@ class NewVpnDialog(QDialog):
         elif not dmvpn and len(chosen) > 2:
             problem = f"Tick two routers ({len(chosen)} ticked): make a DMVPN for more."
         elif wanted and not vpn.ipaddress_like(self.far_end()):
-            problem = "Type the hub's WAN address (where the spokes reach it)." if dmvpn else \
-                "Type the far end's WAN address (where this router reaches it)."
+            problem = self.far_found()[1] or (
+                "Type the hub's WAN address or name (where the spokes reach it)." if dmvpn else
+                "Type the far end's WAN address or name (where this router reaches it).")
         elif dmvpn and all(role == vpn.HUB for _, role in chosen):
             info = "Only hubs: spokes can be added later (or set up by hand from a template). " + info
         if not self.name_input.text().strip():
             problem = problem or "Give it a name."
+        found = self.far_found()[0] if wanted else None
+        if found is not None and found.is_name:
+            info = f"{found.note()}. {info}"
         set_hint(self.hint, problem or info, "warning" if problem else "info")
         self.buttons.button(QDialogButtonBox.Ok).setEnabled(not problem)
 
@@ -241,7 +275,7 @@ class MemberDialog(QDialog):
                                     "unless NAT changes it)")
         form.addRow("WAN address:", self.local_input if self.free else self.local_label)
         self.public_input = QLineEdit(member.public_ip)
-        self.public_input.setPlaceholderText("Only if NAT changes it")
+        self.public_input.setPlaceholderText("Only if NAT changes it (an address or host name)")
         self.public_input.setToolTip("The address the other routers reach it at, when a NAT device in front of it "
                                      "changes it (its WAN address is then only its IKE identity)")
         form.addRow("Reached at:", self.public_input)
@@ -339,15 +373,24 @@ class MemberDialog(QDialog):
             return
         typed = self.design.template  # A template takes <PLACEHOLDERS> too
         public = self.public_input.text().strip()
-        if public and not vpn.ipaddress_like(public) and not (typed and vpn.is_placeholder(public)):
-            set_hint(self.hint, "Reached at has to be an IPv4 address.", "error")
-            return
-        if self.free:
-            local = self.local_input.text().strip()
-            if not (vpn.ipaddress_like(local) or typed and vpn.is_placeholder(local)):
-                set_hint(self.hint, "Type its WAN address (an IPv4 address" +
+        if public and not (typed and vpn.is_placeholder(public)):
+            try:  # A host name gives its address: the lines get the address
+                public = resolve_now(public, 4).address
+            except ValueError as error:
+                set_hint(self.hint, f"Reached at: {error}", "error")
+                return
+        local = self.local_input.text().strip()
+        if self.free and not (typed and vpn.is_placeholder(local)):
+            if not local:
+                set_hint(self.hint, "Type its WAN address (an IPv4 address or host name" +
                          (", or a <PLACEHOLDER>)." if typed else ")."), "error")
                 return
+            try:
+                local = resolve_now(local, 4).address
+            except ValueError as error:
+                set_hint(self.hint, f"WAN address: {error}", "error")
+                return
+        self.public_address, self.local_address = public, local
         if self.design.kind != vpn.CRYPTO_MAP:
             address = self.tunnel_input.text().strip()
             if address and not vpn.ipaddress_like(address) and not (typed and vpn.is_placeholder(address)):
@@ -363,10 +406,10 @@ class MemberDialog(QDialog):
         member.wan = self.wan() if not self.free else self.wan_combo.currentText().strip()
         if self.free:
             member.label = self.label_input.text().strip() or member.label
-            member.local_ip = self.local_input.text().strip()
+            member.local_ip = getattr(self, "local_address", self.local_input.text().strip())
         elif self.device is not None:
             member.local_ip = self.device.interface_address(member.wan)[0]
-        member.public_ip = self.public_input.text().strip()
+        member.public_ip = getattr(self, "public_address", self.public_input.text().strip())
         if member.public_ip == member.local_ip:
             member.public_ip = ""
         if self.design.kind != vpn.CRYPTO_MAP:

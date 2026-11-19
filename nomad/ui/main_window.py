@@ -16,7 +16,7 @@ from ..system import APP_FULL_NAME, APP_NAME, RESTARTED_FLAG, account_name, is_a
 from ..terminal.sessions import SessionFolderStore, SessionStore, TERMINAL_PROTOCOLS
 from .adapter_tab import AdapterTab
 from .capture_tab import CaptureTab
-from .common import add_action, run_in_background
+from .common import add_action, run_in_background, set_app_closing
 from .connections_tab import ConnectionsTab
 from .dhcp_tab import DhcpTab
 from .dialogs import AboutDialog, LogDialog, WhatsNewDialog
@@ -502,13 +502,29 @@ class MainWindow(QMainWindow):
                 not self.editor_tab.confirm_close():
             event.ignore()
             return
-        self.save_settings()
-        self.tribe_banner.stop()
+        log.info("Closing NOMAD")
+        set_app_closing()  # Threads still busy get a moment each, then are left to the end of the process
+        started = time.monotonic()
+        steps = []  # (seconds, what)
+
+        def timed(what, step):
+            began = time.monotonic()
+            try:
+                step()
+            except Exception:  # One page failing to shut down mustn't keep NOMAD open
+                log.exception("Closing: %s failed", what)
+            steps.append((time.monotonic() - began, what))
+
+        timed("saving settings", self.save_settings)
+        timed("the tribe banner", self.tribe_banner.stop)
         for window in list(self.navigator.popped.values()):  # Their pages back first, to shut down with the rest
             window.closing_app = True
-            window.close()
+            timed(f"the popped-out {window.title} window", window.close)
         for tab in self.all_tabs:
-            tab.shutdown()
+            timed(self.navigator.title(tab) or type(tab).__name__, tab.shutdown)
+        slow = sorted((step for step in steps if step[0] >= 0.1), key=lambda step: -step[0])
+        log.info("Closed in %.1f s%s", time.monotonic() - started,
+                 (": " + ", ".join(f"{what} {seconds:.1f} s" for seconds, what in slow)) if slow else "")
         super().closeEvent(event)
 
     # ----------------------------------------------------------------- Text size
@@ -800,6 +816,8 @@ class MainWindow(QMainWindow):
         if relaunch_as_admin([RESTARTED_FLAG]):
             if self.instance_server is not None:
                 self.instance_server.close()  # Copies opened from now on start on their own, as the new one is
+            log.info("Closing NOMAD to restart it as administrator")
+            set_app_closing()  # As closing does: threads still busy get a moment each
             for tab in self.all_tabs:
                 tab.shutdown()
             self.hide()

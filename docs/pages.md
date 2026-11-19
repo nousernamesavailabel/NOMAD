@@ -54,6 +54,14 @@ Tools that are popped out when you close NOMAD open in their own windows again, 
 - **F11** (focus mode) hides everything but the current page.
 - **View** > **Text Size** scales all text from 90% to 200%. **Ctrl+=**, **Ctrl+-** and **Ctrl+0** do the same.
 
+### Host names instead of addresses
+
+Most fields that ask for one IP address also take a host name or FQDN. These include the Routing Table gateway, the capture filter, SNMP Config, Port Mirroring, VPNs, probe targets, the ACL Packet Tester and the map's Add Device and Add Host. Subnets and IPAM addresses still need an address.
+
+NOMAD asks DNS first. If DNS doesn't know the name, NOMAD looks for it on the open map, in IPAM and in your saved sessions. A short name finds its FQDN there, and an FQDN finds its short name. The address it found shows next to the field, for example `nms1 → 10.0.0.60 (DNS)`.
+
+Configurations NOMAD writes always get the address, so the devices don't need DNS. A device or host added to the map keeps the address, and the name goes in its Name field if that's empty.
+
 ## This Computer
 
 ![The Interfaces page](screenshots/interfaces.png)

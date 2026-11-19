@@ -240,6 +240,7 @@ New IP settings, and disabling an adapter, revert on their own unless you confir
 | Local IPAM networks | `%APPDATA%\NOMAD\ipam.db` |
 | Network maps | `%APPDATA%\NOMAD\maps` |
 | Log (**Tools** > **View Log...**) | `%LOCALAPPDATA%\NOMAD\nomad.log` |
+| Freeze stacks, when the log's own report couldn't be written | `%LOCALAPPDATA%\NOMAD\nomad-freezes.txt` |
 | IPAM server | `%ProgramData%\NOMAD\server` |
 | Map Watcher service | `%ProgramData%\NOMAD\watcher` |
 

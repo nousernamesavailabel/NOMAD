@@ -47,8 +47,8 @@ def validate_filter(address, port, protocol):
             address = str(ipaddress.ip_network(address, strict=False)) if "/" in address else \
                 str(ipaddress.ip_address(address))
         except ValueError:
-            raise ValueError(f"'{address}' is not an IP address or subnet (such as 10.0.0.5 or 10.0.0.0/24).") \
-                from None
+            raise ValueError(f"'{address}' is not an IP address, subnet or host name (such as 10.0.0.5, "
+                             "10.0.0.0/24 or server1).") from None
     if port:
         if not port.isdigit() or not 1 <= int(port) <= 65535:
             raise ValueError(f"'{port}' is not a port number from 1 to 65535.")

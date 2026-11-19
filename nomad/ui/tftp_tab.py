@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBo
 from ..system import allow_inbound_port
 from ..tftp import CLIENT_BLOCK_SIZE, MAX_BLOCK_SIZE, MIN_BLOCK_SIZE, TFTP_PORT, TftpError, TftpServer, download, \
     safe_path, upload
-from .common import ColumnFitter, SortableTableItem, StoppableThread, format_size, set_hint, set_invalid
+from .common import ColumnFitter, SortableTableItem, StoppableThread, format_size, release_thread, set_hint, set_invalid
 from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
@@ -563,7 +563,7 @@ class TftpTab(QWidget):
         self.stop_server()
         if self.client_worker is not None:
             self.client_worker.stop()
-            self.client_worker.wait(5000)
+            release_thread(self.client_worker, 5000)
 
     def update_buttons(self):
         serving = self.server is not None

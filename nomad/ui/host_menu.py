@@ -8,9 +8,11 @@ from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import QApplication, QMenu, QMessageBox
 
 from ..oui import format_mac, normalize_mac
+from ..resolve import is_host_name
 from ..sweep import find_putty
 from ..terminal.sessions import RDP, SSH, TELNET
 from .common import add_submenu, drop_empty_submenus, menu_labels
+from .name_lookup import resolve_now
 
 ADD_TO_MAP = "Add Device to Map..."
 CONNECT, TOOLS = "Connect", "Tools"
@@ -100,13 +102,30 @@ class HostActions:
         try:
             ipaddress.ip_address(host)
         except ValueError:
-            return {}
+            if not is_host_name(host):
+                return {}
+            # A host name: each looks its address up when it's chosen
+            return self.add_missing(menu, {
+                "Show in IPAM": lambda: self.with_address(host, self.show_ipam),
+                "Show on Map": lambda: self.with_address(host, self.show_map),
+                ADD_TO_MAP: lambda: self.with_address(host, lambda address: self.add_to_map(address, name or host)),
+                "Copy IP Address": lambda: self.with_address(host, QApplication.clipboard().setText),
+            }, leave_out=leave_out)
         return self.add_missing(menu, {
             "Show in IPAM": lambda: self.show_ipam(host),
             "Show on Map": lambda: self.show_map(host),
             ADD_TO_MAP: lambda: self.add_to_map(host, name),
             "Copy IP Address": lambda: QApplication.clipboard().setText(host),
         }, leave_out=leave_out)
+
+    def with_address(self, name, then):
+        """then(address) for a host name's address, or say why it has none."""
+        try:
+            found = resolve_now(name, window=self.window)
+        except ValueError as error:
+            QMessageBox.warning(self.parent, "Look Up Name", str(error))
+            return
+        then(found.address)
 
     def add_to_map(self, host, name=""):
         """Add the host to a network map (the user chooses which) as a device added by hand."""

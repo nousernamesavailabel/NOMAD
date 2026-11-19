@@ -288,12 +288,27 @@ class StoppableThread(QThread):
 
 
 _orphaned_threads = set()  # Threads let go of while still running, kept alive until they finish
+CLOSING_WAIT_MS = 300  # While NOMAD closes: how long each stopped thread gets before it's let go
+_app_closing = False
+
+
+def set_app_closing(closing=True):
+    """NOMAD is closing: threads stopped from now on get only a moment to finish (main() ends the process without
+    waiting for those still running, so they can't hold the window up or crash its teardown)."""
+    global _app_closing
+    _app_closing = closing
+
+
+def app_closing():
+    return _app_closing
 
 
 def release_thread(thread, wait_ms=3000):
     """Wait for a stopped thread to finish; if it's still stuck (connecting, say), let it finish on its own. Its
     signals are cut and it no longer belongs to its widget, so closing the widget can't destroy a running thread
-    (which takes the whole program down)."""
+    (which takes the whole program down). While NOMAD closes, the wait is at most CLOSING_WAIT_MS."""
+    if _app_closing:
+        wait_ms = min(wait_ms, CLOSING_WAIT_MS)
     if thread.wait(wait_ms):
         return
     try:

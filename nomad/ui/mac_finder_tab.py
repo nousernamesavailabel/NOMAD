@@ -31,7 +31,7 @@ from ..oui import format_mac, normalize_mac, vendor
 from ..snmp import SnmpClient
 from ..terminal.hostkeys import KnownHosts
 from ..terminal.sessions import AUTH_PASSWORD, SSH, Session, same_host
-from .common import SortableTableItem, StoppableThread, read_only_table, run_in_background, set_hint
+from .common import SortableTableItem, StoppableThread, read_only_table, release_thread, run_in_background, set_hint
 from .credential_dialogs import CredentialPicker
 from .host_menu import FIND_PORT, HostActions
 from .prompts import SecretDialog
@@ -418,7 +418,7 @@ class MacFinderTab(QWidget):
         for thread in (self.worker, self.recorder):
             if thread is not None:
                 thread.stop()
-                thread.wait(5000)
+                release_thread(thread, 5000)
 
     def showEvent(self, event):
         super().showEvent(event)

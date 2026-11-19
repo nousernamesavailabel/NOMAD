@@ -4,6 +4,13 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-18
+
+- **New:** you can type a host name or FQDN in most places that only took an IP address, such as Routing Table gateways, SNMP Config, Port Mirroring, VPN far ends, probe targets, the ACL Packet Tester, capture filters and map devices. NOMAD looks the name up in DNS, then on the map, in IPAM and in saved sessions, and shows the address it found. Configurations always get the address.
+- **New:** right-click a host shown by name to **Show in IPAM**, **Show on Map**, add it to the map or copy its IP address.
+- **New:** if NOMAD stops answering for 2 seconds or more, it writes a freeze report to the log (Tools > View Log...). If NOMAD freezes for you, send the log with your report. The report says what NOMAD was doing at the time. It never includes anything you typed.
+- **Fixed:** closing NOMAD no longer freezes for many seconds while background work stops, such as tribe syncs, SSH sessions, map checks and the monitor.
+
 ## [2.3.0] - 2026-11-18
 
 - **New:** the **Editor** page (under Utilities) is a Notepad++-style editor for configurations, with tabs, regular expression find and replace, and Cisco coloring and folding.

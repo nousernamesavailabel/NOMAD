@@ -33,7 +33,7 @@ from ..ipam.vlan_team import TeamVlanStore
 from ..oui import normalize_mac
 from ..sweep import SWEEP_PASSES
 from ..system import log_dir
-from .common import SortableTableItem, add_action, run_in_background, set_hint
+from .common import SortableTableItem, add_action, release_thread, run_in_background, set_hint
 from .integration import MAP_DEVICE, MAP_SUBNET, PLACEMENT, VLAN, hub, link
 from .host_menu import HostActions
 from .ipam_dialogs import AddressDialog, ImportDialog, NetworkDialog, SubnetDialog
@@ -880,7 +880,7 @@ class IpamTab(QWidget):
         self.sync_timer.stop()
         if self.sweep_worker is not None:
             self.sweep_worker.stop()
-            self.sweep_worker.wait(5000)
+            release_thread(self.sweep_worker, 5000)
         self.stop_watching()
         for store in (self.local_store, self.team):
             if store is not None:

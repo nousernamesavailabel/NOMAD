@@ -13,7 +13,7 @@ from ..icmp import IcmpClient, resolve_host
 from ..latency import DEFAULT_WINDOW_SECONDS, WINDOW_OPTIONS, CsvLog, LatencyTarget, autoscale, \
     host_problem, targets_from_dicts
 from ..system import log_dir
-from .common import ColumnFitter, StoppableThread, set_hint, set_invalid
+from .common import ColumnFitter, StoppableThread, release_thread, set_hint, set_invalid
 from .latency_charts import GaugePanel, LatencyGauge, LatencyGraph, series_color
 from .theme import COLORS, accent_button, monospace_font
 
@@ -286,7 +286,7 @@ class LatencyTab(QWidget):
         workers = list(self.workers.values())
         self.stop()
         for worker in workers:
-            worker.wait(self.timeout_input.value() + 2000)
+            release_thread(worker, self.timeout_input.value() + 2000)
 
     # ----------------------------------------------------------------- Targets
 

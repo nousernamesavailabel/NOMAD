@@ -5,6 +5,7 @@ from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
 from ..netmap import counters, tunnels
 from ..snmp import SnmpClient
+from .common import release_thread
 
 
 class CounterThread(QThread):
@@ -93,4 +94,4 @@ class LinkCounters(QObject):
 
     def shutdown(self):
         if self.thread is not None:
-            self.thread.wait(10000)
+            release_thread(self.thread, 10000)

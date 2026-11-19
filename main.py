@@ -4,16 +4,18 @@ Run with:  python Main.py   (or pythonw Main.py to avoid a console window)
 """
 import ctypes
 import logging
+import os
 import sys
 import traceback
 
-from PyQt5.QtCore import QSettings
+from PyQt5.QtCore import QSettings, QTimer
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from nomad import __version__
 from nomad.logs import log_file_path, setup_logging
 from nomad.system import (APP_NAME, ELEVATED_FOR_FLAG, LEGACY_APP_NAME, RESTARTED_FLAG, account_name, elevated_for,
                           is_admin, relaunch_as_admin, shift_held)
+from nomad.ui.hang_watchdog import FREEZES_FILE, HangWatchdog, window_context
 from nomad.ui.icon import app_icon
 from nomad.ui.single_instance import InstanceServer, bring_to_front, find_running_copy, hang_up, needs_asking
 from nomad.ui.splash import StartupSplash, close_bootloader_splash
@@ -160,7 +162,26 @@ def main():
     if declined:
         window.show_status("Started without administrator rights: Windows' prompt for them was answered No. "
                            "File > Always Start as Administrator turns asking off.", "warning", 30000)
-    sys.exit(app.exec_())
+    # Freezes of 2 seconds or more are written to the log, with what NOMAD was doing (from once the window's up)
+    watchdog = HangWatchdog(lambda: window_context(window), freezes_path=str(log_file_path().with_name(FREEZES_FILE)))
+    QTimer.singleShot(0, watchdog.start)
+    code = app.exec_()
+    watchdog.stop()
+    log.info("%s closed", APP_NAME)
+    end_process(code)
+
+
+def end_process(code):
+    """End NOMAD now. Threads stopped while closing that are still finishing (a wait on the tribe server, an SSH
+    connection closing) would otherwise hold the process open, or crash Qt when they're freed while running."""
+    logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None:
+                stream.flush()
+        except (OSError, ValueError):
+            pass
+    os._exit(code)
 
 
 if __name__ == "__main__":
