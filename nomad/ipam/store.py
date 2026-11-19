@@ -23,6 +23,7 @@ its own.
 """
 import contextlib
 import datetime
+import functools
 import getpass
 import ipaddress
 import json
@@ -219,6 +220,13 @@ def parse_subnet(text):
         raise IpamError(f"{text!r} isn't a subnet (use CIDR like 10.1.2.0/24).") from None
 
 
+@functools.lru_cache(maxsize=65536)
+def _subnet_block(cidr):
+    """parse_subnet, remembered: a subnet's network is asked for over and over (Subnet Placement compares every
+    subnet with the others), and parsing it each time froze NOMAD for many seconds with a few hundred subnets."""
+    return parse_subnet(cidr)
+
+
 def _json_path(key):
     """The JSON path of a detail (json_extract), quoted so any name works."""
     return '$."' + key.replace('"', '\\"') + '"'
@@ -262,7 +270,7 @@ class Subnet:
 
     @property
     def network(self):
-        return parse_subnet(self.cidr)
+        return _subnet_block(self.cidr)
 
     def special_addresses(self):
         """Addresses in the subnet that can't be handed out: {address: label}."""

@@ -11,12 +11,13 @@ nothing is written to IPAM's networks, subnets or addresses.
 evaluate() puts the database and a map's netmap.placement.analyze() together into Rows, with what's wrong with each.
 """
 import datetime
+import functools
 import ipaddress
 import uuid
 from dataclasses import dataclass, field
 
 from ..netmap.placement import GLOBAL, segment_text, vrf_text
-from .roles import LOOPBACK, ONE_PLACE, POINT_TO_POINT, ROLE_NAMES, TUNNEL, VLAN, inside, loopback_pool, role_info, \
+from .roles import LOOPBACK, ONE_PLACE, POINT_TO_POINT, ROLE_NAMES, TUNNEL, VLAN, inside_all, loopback_pool, role_info, \
     single_address
 from .store import IpamError, Placement, SubnetMove, SubnetRole, _from_row, parse_subnet, subnet_key
 from .vlans import ACTIVE, VlanStore, check_number
@@ -189,6 +190,11 @@ class PlacementStore:
 
 # --------------------------------------------------------------------- Putting the plan and the map together
 
+@functools.lru_cache(maxsize=65536)
+def _parsed_network(cidr):
+    return ipaddress.ip_network(cidr)
+
+
 @dataclass
 class Finding:
     severity: str
@@ -213,7 +219,7 @@ class Row:
 
     @property
     def network(self):
-        return ipaddress.ip_network(self.cidr)
+        return _parsed_network(self.cidr)
 
     @property
     def severity(self):
@@ -260,6 +266,7 @@ def evaluate(network_map, ipam_store, vlan_store, placement_store, network_id):
     for cidr in set(subnets) | set(planned) | set(placements) | set(moves) | set(roles):
         if cidr not in on_map:
             rows[(GLOBAL, cidr)] = Row(GLOBAL, cidr)
+    inner = inside_all(subnets.values())
     for row in rows.values():
         row.subnet = subnets.get(row.cidr)
         row.planned = planned.get(row.cidr, [])
@@ -269,7 +276,7 @@ def evaluate(network_map, ipam_store, vlan_store, placement_store, network_id):
             row.pool = loopback_pool(subnets.values(), row.network)
         row.role = role_info(row.cidr, roles.get(row.cidr), subnet=row.subnet, places=row.places,
                              network_map=network_map, linked=[vlan.vlan for _, vlan in row.planned],
-                             inner=inside(row.subnet, subnets.values()) if row.subnet is not None else (),
+                             inner=inner.get(row.subnet.id, []) if row.subnet is not None else (),
                              pool=row.pool)
         _scope(row, network_map is not None, network_map)
         _findings(row, network_map, subnets, network_id, bool(domains))
@@ -418,17 +425,21 @@ def _overlaps(rows, network_map):
     """An advertised subnet inside another advertised one connected somewhere else: traffic for it goes to the more
     specific one, which is easy to do by mistake."""
     advertised = [row for row in rows if row.scope == ADVERTISED and row.found is not None]
+    by_network = {}  # (VRF, network) -> [(position, row)]: each row finds the ones around it without going
+    for position, row in enumerate(advertised):  # through them all
+        by_network.setdefault((row.vrf, row.network), []).append((position, row))
     for inner in advertised:
-        for outer in advertised:
-            if outer is inner or outer.vrf != inner.vrf or outer.network.version != inner.network.version:
-                continue
-            if inner.network.subnet_of(outer.network) and inner.network != outer.network:
-                inner_devices = {place.device for place in inner.places}
-                outer_devices = {place.device for place in outer.places}
-                if not inner_devices & outer_devices:
-                    where = "; ".join(segment_text(network_map, segment) for segment in outer.found.segments)
-                    inner.findings.append(Finding(WARNING, f"Inside {outer.cidr}, which is advertised from {where}: "
-                                                           "traffic for it goes here instead."))
+        network = inner.network
+        around = sorted((item for prefix in range(network.prefixlen)
+                         for item in by_network.get((inner.vrf, network.supernet(new_prefix=prefix)), [])),
+                        key=lambda item: item[0])
+        for _, outer in around:
+            inner_devices = {place.device for place in inner.places}
+            outer_devices = {place.device for place in outer.places}
+            if not inner_devices & outer_devices:
+                where = "; ".join(segment_text(network_map, segment) for segment in outer.found.segments)
+                inner.findings.append(Finding(WARNING, f"Inside {outer.cidr}, which is advertised from {where}: "
+                                                       "traffic for it goes here instead."))
 
 
 def move_check(row, move, network_map):

@@ -50,10 +50,19 @@ def is_ours(frame_summary):
     return "/nomad/" in name and "/site-packages/" not in name
 
 
+def frames_of(frame, limit=None, lines=False):
+    """A thread's stack, outermost first, its innermost limit frames. Source lines only when asked for: looking them
+    up while the UI thread is held up competes with it for Python's lock, and in the built NOMAD there's no source to
+    show (PyInstaller's importer is asked for it each time, slowly)."""
+    stack = traceback.StackSummary.extract(traceback.walk_stack(frame), limit=limit, lookup_lines=lines)
+    stack.reverse()
+    return stack
+
+
 def where(frame, depth=4):
     """'file:line function <- caller...' for the innermost frames of NOMAD's own code (or the innermost frames at
     all, when none are NOMAD's)."""
-    stack = traceback.extract_stack(frame)
+    stack = frames_of(frame, limit=60)
     ours = [item for item in stack if is_ours(item)]
     chosen = ours[-depth:] if ours else stack[-depth:]
     text = " <- ".join(short_frame(item) for item in reversed(chosen))
@@ -75,13 +84,17 @@ def format_threads(main_ident, skip_ident=None):
     main = frames.get(main_ident)
     if main is not None:
         lines.append("  UI thread:")
-        for entry in traceback.format_stack(main)[-MAIN_FRAMES:]:
-            lines.extend("    " + line for line in entry.rstrip("\n").splitlines())
+        with_source = not getattr(sys, "frozen", False)
+        for item in frames_of(main, limit=MAIN_FRAMES, lines=with_source):
+            lines.append(f'    File "{item.filename}", line {item.lineno}, in {item.name}')
+            source = item.line.strip() if with_source and item.line else ""
+            if source:
+                lines.append(f"      {source}")
     others = collections.OrderedDict()
     for ident, frame in frames.items():
         if ident in (main_ident, skip_ident):
             continue
-        stack = traceback.extract_stack(frame)[-OTHER_FRAMES:]
+        stack = frames_of(frame, limit=OTHER_FRAMES)
         key = " <- ".join(short_frame(item) for item in reversed(stack))
         others.setdefault(key, []).append(names.get(ident, f"thread {ident}"))
     lines.append(f"  Other threads ({sum(len(group) for group in others.values())}):")

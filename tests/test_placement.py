@@ -318,3 +318,85 @@ def test_who_advertises_and_who_only_has_an_address():
     assert subnet.role(network_map, "rtr") == "advertises it"
     assert subnet.role(network_map, "sw") == "address only (it doesn't route)"
     assert subnet.unseen == {"192.168.5.1": ["rtr"]} and subnet.unread == [("home", "sw", "Gi0/10")]
+
+
+# --------------------------------------------------------------------- Large maps, worked out quickly
+
+def test_summaries_longest_first_and_an_advertised_subnet_inside_another_is_warned():
+    """r2's /24 sits inside r1's /16, both advertised: traffic for the /24 goes to r2 (a warning on it). r3's own
+    subnet is only covered by summaries, the longest first (the default route isn't one)."""
+    network_map = NetworkMap()
+    network_map.devices["r1"] = Device("r1", "r1", source="snmp", interfaces_l3=[["10.1.0.1", 16, "Gi0/1"],
+                                                                                 ["10.0.13.1", 30, "Gi0/0"]])
+    network_map.devices["r2"] = Device("r2", "r2", source="snmp", interfaces_l3=[["10.1.5.1", 24, "Gi0/1"],
+                                                                                 ["10.0.23.1", 30, "Gi0/0"]])
+    network_map.devices["r3"] = Device("r3", "r3", source="snmp", interfaces_l3=[
+        ["10.0.13.2", 30, "Gi0/1"], ["10.0.23.2", 30, "Gi0/2"], ["10.20.5.1", 24, "Gi0/3"]], routes=[
+        ["10.1.0.0/16", "10.0.13.1", "Gi0/1", "ospf"], ["10.1.5.0/24", "10.0.23.1", "Gi0/2", "ospf"]])
+    for key, hop in (("r1", "10.0.13.2"), ("r2", "10.0.23.2")):
+        network_map.devices[key].routes = [["0.0.0.0/0", hop, "Gi0/0", "static"],
+                                           ["10.0.0.0/8", hop, "Gi0/0", "static"],
+                                           ["10.20.0.0/16", hop, "Gi0/0", "ospf"]]
+    found = {item.cidr: item for item in analyze(network_map)}
+    assert found["10.20.5.0/24"].summaries == [("10.20.0.0/16", ["r1", "r2"]), ("10.0.0.0/8", ["r1", "r2"])]
+    rows = {row.cidr: row for row in evaluate(network_map, None, NoDomains(), None, None)}  # No IPAM network
+    assert [finding.text for finding in rows["10.1.5.0/24"].findings if finding.text.startswith("Inside")] == [
+        "Inside 10.1.0.0/16, which is advertised from r1 Gi0/1: traffic for it goes here instead."]
+    assert not any(finding.text.startswith("Inside") for finding in rows["10.1.0.0/16"].findings)
+
+
+class NoDomains:
+    def domains(self):
+        return []
+
+
+def test_inside_all_matches_inside(local):
+    from nomad.ipam.roles import inside, inside_all
+    network = local.add_network("Nested")
+    for cidr in ("10.0.0.0/8", "10.1.0.0/16", "10.1.2.0/24", "10.1.2.128/25", "10.2.0.0/16", "192.168.0.0/24",
+                 "0.0.0.0/0", "2001:db8::/32", "2001:db8:1::/48", "2001:db8:1:2::/64"):
+        local.add_subnet(network.id, cidr)
+    subnets = local.subnets(network.id)
+    found = inside_all(subnets)
+    for subnet in subnets:
+        assert found.get(subnet.id, []) == inside(subnet, subnets), subnet.cidr
+
+
+def big_map(sites=10, vlans=10, other_routes=200):
+    """Routers at the core, a layer-3 switch per site with a subnet per VLAN, every route everywhere."""
+    network_map = NetworkMap()
+    every = [(f"10.{site}.{vlan}.0/24", site) for site in range(sites) for vlan in range(vlans)]
+    for core in range(2):
+        network_map.devices[f"core{core}"] = Device(f"core{core}", f"core{core}", source="snmp", interfaces_l3=[
+            [f"192.168.{core}.{site * 4 + 1}", 30, f"Te0/{site}"] for site in range(sites)])
+    for site in range(sites):
+        network_map.devices[f"sw{site}"] = Device(f"sw{site}", f"sw{site}", source="snmp", interfaces_l3=[
+            [f"10.{site}.{vlan}.1", 24, f"Vl{100 + vlan}"] for vlan in range(vlans)] + [
+            [f"192.168.{core}.{site * 4 + 2}", 30, f"Gi1/0/{core + 1}"] for core in range(2)],
+            vlans=[[100 + vlan, f"v{vlan}"] for vlan in range(vlans)])
+        for core in range(2):
+            network_map.links.append(Link(f"core{core}", f"Te0/{site}", f"sw{site}", f"Gi1/0/{core + 1}"))
+    for key, device in network_map.devices.items():
+        device.routes = [[cidr, f"192.168.0.{site * 4 + 2}" if key.startswith("core") else "192.168.0.1", "Gi0/0",
+                          "ospf"] for cidr, site in every if key != f"sw{site}"]
+        device.routes += [[f"{100 + number // 250}.{number % 250}.0.0/16", "203.0.113.1", "Gi0/0", "bgp"]
+                          for number in range(other_routes)]
+    return network_map
+
+
+def test_a_large_map_is_worked_out_quickly(local):
+    """Subnet Placement runs on each redraw of the map (for the logical view): a few hundred subnets and a few
+    thousand routes took 8 s with each subnet going through every route, and with each IPAM subnet compared with
+    every other (re-reading its CIDR each time) a network of 800 subnets took 50 s."""
+    import time
+    network_map = big_map()
+    network = local.add_network("Big")
+    for site in range(40):
+        local.add_subnet(network.id, f"10.{site}.0.0/16")
+        for vlan in range(20):
+            local.add_subnet(network.id, f"10.{site}.{vlan}.0/24")
+    started = time.perf_counter()
+    rows = evaluate(network_map, local, VlanStore(local), PlacementStore(local), network.id)
+    took = time.perf_counter() - started
+    assert len(rows) > 800 and len(analyze(network_map)) == 120  # 100 VLANs, 20 links
+    assert took < 2.0, took  # About 0.15 s now

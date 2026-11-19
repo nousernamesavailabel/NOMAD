@@ -256,12 +256,23 @@ def analyze(network_map):
         for vrf in set(device.port_vrfs.values()):
             if vrf not in device.vrf_routes:
                 vrfs_unread.setdefault(vrf, []).append(key)
-    learned_by_vrf = {}  # VRF -> [(network, device, next hop, port, protocol)] of every learned route
+    # Every learned route, indexed so each subnet finds its own without going through them all (a router's whole
+    # table, over every subnet, froze NOMAD for seconds on each redraw): VRF -> destination -> [(device, next hop,
+    # port, protocol)], and VRF -> parsed destination -> [destination] for the summaries
+    learned_by_vrf, parsed_by_vrf = {}, {}
     for (key, vrf), table in tables.items():
         for destination, entries in table.items():
             for next_hop, port, protocol in entries:
                 if next_hop or protocol not in CONNECTED_PROTOCOLS:
-                    learned_by_vrf.setdefault(vrf, []).append((destination, key, next_hop, port, protocol))
+                    learned_by_vrf.setdefault(vrf, {}).setdefault(destination, []).append(
+                        (key, next_hop, port, protocol))
+    for vrf, by_destination in learned_by_vrf.items():
+        parsed = parsed_by_vrf[vrf] = {}
+        for destination in by_destination:
+            other = _network(destination)
+            if other is not None and other.prefixlen > 0:
+                parsed.setdefault(other, []).append(destination)
+    unseen_by_vrf = _unseen_next_hops(tables, owners)
 
     results = []
     for (vrf, cidr), place_list in sorted(found.items(), key=lambda item: (item[0][0],
@@ -270,43 +281,60 @@ def analyze(network_map):
         subnet = MapSubnet(vrf, cidr, segments.group(place_list), routes_unknown=sorted(vrfs_unread.get(vrf, [])))
         here = {place.device for place in place_list}
         segment_of = {place.device: number for number, group in enumerate(subnet.segments) for place in group}
-        covering = {}
-        for destination, key, next_hop, port, protocol in learned_by_vrf.get(vrf, []):
-            if key in here:
-                continue  # Connected there: its own routes to it don't make it advertised
-            if destination == cidr:
+        by_destination = learned_by_vrf.get(vrf, {})
+        for key, next_hop, port, protocol in by_destination.get(cidr, []):
+            if key not in here:  # Connected there: its own routes to it don't make it advertised
                 subnet.learned.append(Learned(key, next_hop, port, protocol))
-            else:
-                other = ipaddress.ip_network(destination)
-                if 0 < other.prefixlen < network.prefixlen and other.version == network.version and \
-                        network.subnet_of(other):
-                    covering.setdefault(destination, set()).add(key)
         if not subnet.learned:
-            subnet.summaries = [(destination, sorted(keys)) for destination, keys in
-                                sorted(covering.items(), key=lambda item: ipaddress.ip_network(item[0]).prefixlen,
-                                       reverse=True)]
+            covering = []
+            parsed = parsed_by_vrf.get(vrf, {})
+            for prefix in range(network.prefixlen - 1, 0, -1):  # Longest summary first
+                for destination in parsed.get(network.supernet(new_prefix=prefix), []):
+                    keys = {entry[0] for entry in by_destination[destination]} - here
+                    if keys:
+                        covering.append((destination, sorted(keys)))
+            subnet.summaries = covering
         for route in subnet.learned:
             route.origin, route.beyond, route.origin_device = _follow(route, vrf, cidr, tables, owners, here,
                                                                       segment_of)
-        for (key, table_vrf), table in tables.items():
-            if table_vrf != vrf:
-                continue
-            for entries in table.values():
-                for next_hop, _, _ in entries:
-                    if next_hop and next_hop not in owners and _in(next_hop, network):
-                        subnet.unseen.setdefault(next_hop, set()).add(key)
-        subnet.unseen = {address: sorted(keys) for address, keys in
-                         sorted(subnet.unseen.items(), key=lambda item: ipaddress.ip_address(item[0]))}
+        unseen = {}
+        for address, keys in unseen_by_vrf.get(vrf, []):
+            if address in network:
+                unseen[str(address)] = keys
+        subnet.unseen = unseen
         subnet.unread = _unread_neighbors(network_map, place_list)
         results.append(subnet)
     return results
 
 
-def _in(address, network):
+def _network(text):
     try:
-        return ipaddress.ip_address(address) in network
+        return ipaddress.ip_network(text)
     except ValueError:
-        return False
+        return None
+
+
+def _unseen_next_hops(tables, owners):
+    """Next hops no device on the map has, per VRF: {VRF: [(address, [device keys whose routes use it])]}, by
+    address."""
+    found = {}
+    for (key, vrf), table in tables.items():
+        hops = found.setdefault(vrf, {})
+        for entries in table.values():
+            for next_hop, _, _ in entries:
+                if next_hop and next_hop not in owners:
+                    hops.setdefault(next_hop, set()).add(key)
+    result = {}
+    for vrf, hops in found.items():
+        parsed = []
+        for text, keys in hops.items():
+            try:
+                parsed.append((ipaddress.ip_address(text), sorted(keys)))
+            except ValueError:
+                continue
+        parsed.sort(key=lambda item: (item[0].version, item[0]))
+        result[vrf] = parsed
+    return result
 
 
 def _unread_neighbors(network_map, place_list):

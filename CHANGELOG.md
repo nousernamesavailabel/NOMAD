@@ -6,6 +6,13 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-11-19
+
+### Fixed
+
+- **Network Map: moving, adding or correcting devices froze NOMAD for seconds at a time, on large maps.** Each time the map was drawn again, for an edit or a change from the tribe, NOMAD worked out Subnet Placement's findings for the logical (L3) view on the UI thread. It went through every route on the map for each subnet, and compared each IPAM subnet with every other one, reading each address from text again each time. A map with 150 subnets and 4,000 routes took 8 seconds. A tribe network of 800 subnets took close to a minute. Each subnet now looks up only the routes and subnets around it, so the same work takes a tenth of a second or so. The logical view's subnet labels are also worked out only while that view is showing, or when you switch to it. Subnet Placement, IP Addresses and the VLANs page get the same speedup.
+- **Freeze reports slowed a freeze down.** While a freeze lasted, the report looked up source lines for every stack it noted, and in the installed NOMAD that asked PyInstaller for source it doesn't have. It no longer looks them up in the installed NOMAD, or for the notes it takes during a freeze.
+
 ## [2.4.0] - 2026-11-18
 
 ### Added

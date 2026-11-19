@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-11-19
+
+- **Fixed:** on large maps, moving, adding or correcting devices no longer freezes NOMAD for seconds at a time. Subnet Placement, IP Addresses and the VLANs page are faster with large networks too.
+
 ## [2.4.0] - 2026-11-18
 
 - **New:** you can type a host name or FQDN in most places that only took an IP address, such as Routing Table gateways, SNMP Config, Port Mirroring, VPN far ends, probe targets, the ACL Packet Tester, capture filters and map devices. NOMAD looks the name up in DNS, then on the map, in IPAM and in saved sessions, and shows the address it found. Configurations always get the address.

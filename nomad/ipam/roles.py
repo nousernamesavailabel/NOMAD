@@ -219,6 +219,33 @@ def inside(subnet, subnets):
             and other.network != network and other.network.subnet_of(network)]
 
 
+def inside_all(subnets):
+    """inside() for every subnet at once: {subnet id: [the other IPAM subnets inside it]}, in the order given. Each
+    subnet looks up the ones around it rather than going through them all."""
+    subnets = list(subnets)
+    by_network, lengths = {}, {}
+    for subnet in subnets:
+        network = subnet.network
+        by_network.setdefault(_block_key(network, network.prefixlen), []).append(subnet)
+        lengths.setdefault(network.version, set()).add(network.prefixlen)
+    lengths = {version: sorted(found) for version, found in lengths.items()}
+    found = {}
+    for subnet in subnets:  # In order, so each list keeps it
+        network = subnet.network
+        for prefix in lengths[network.version]:
+            if prefix >= network.prefixlen:
+                break
+            for other in by_network.get(_block_key(network, prefix), []):
+                found.setdefault(other.id, []).append(subnet)
+    return found
+
+
+def _block_key(block, prefix):
+    """What identifies the subnet of a prefix length holding a Block: (IP version, its leading bits, the length)."""
+    bits = 32 if block.version == 4 else 128
+    return block.version, int(block.first) >> (bits - prefix), prefix
+
+
 def subnet_roles(ipam_store, placement_store, vlan_store, network_id, network_map=None):
     """{CIDR: RoleInfo} for an IPAM network's subnets, from the map (or None) and what's set."""
     subnets = ipam_store.subnets(network_id)
@@ -232,7 +259,8 @@ def subnet_roles(ipam_store, placement_store, vlan_store, network_id, network_ma
                 for cidr in vlan.subnets:
                     linked.setdefault(cidr, []).append(vlan.vlan)
     roles = placement_store.roles(network_id)
+    inner = inside_all(subnets)
     return {subnet.cidr: role_info(subnet.cidr, roles.get(subnet.cidr), subnet=subnet,
                                    places=found.get(subnet.cidr, []), network_map=network_map,
-                                   linked=linked.get(subnet.cidr, []), inner=inside(subnet, subnets))
+                                   linked=linked.get(subnet.cidr, []), inner=inner.get(subnet.id, []))
             for subnet in subnets}

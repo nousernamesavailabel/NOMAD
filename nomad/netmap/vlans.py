@@ -285,6 +285,8 @@ def focus(network_map, vlan, domain=None):
     devices = network_map.devices
 
     def in_domain(device):
+        if domain is None:
+            return True  # Any domain: no need to work out the device's (which goes through every link)
         device_domain = domain_of(device)
         if not device.vlans and not device_domain:
             device_domain = linked_domain(network_map, device.key)

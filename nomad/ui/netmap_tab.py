@@ -182,6 +182,7 @@ class NetworkMapTab(QWidget):
         self.workers = WORKERS
         self.l3_nodes = {}
         self.l3_links = []
+        self.l3_stale = False  # The logical view's subnets need annotate_l3 when it's next shown
         self.arrange_style = TOP_DOWN
         self.arrange_spacing = NORMAL  # How far apart Re-arrange puts things
         self.last_arranged = None  # ((view, keys, group keys), style, spacing) of the last Arrange Selected
@@ -2316,7 +2317,13 @@ class NetworkMapTab(QWidget):
         table.setSortingEnabled(True)
 
     def annotate_l3(self):
-        """The logical view's subnets: their IPAM name and role, outlined by what Subnet Placement finds."""
+        """The logical view's subnets: their IPAM name and role, outlined by what Subnet Placement finds. Only when
+        the logical view is showing (else when it's next shown): working it out on each redraw of the physical
+        view, a move or a change from the tribe, held NOMAD up on large maps."""
+        if self.tabs.currentWidget() is not self.l3_view:
+            self.l3_stale = True
+            return
+        self.l3_stale = False
         integration = hub(self.window)
         facts = integration.facts(self.ipam_key()) if integration is not None and self.network_map is not None \
             else None
@@ -2577,6 +2584,8 @@ class NetworkMapTab(QWidget):
         self.find_input.blockSignals(False)
         self.set_find_placeholder()
         self.update_buttons()
+        if self.l3_stale and self.tabs.currentWidget() is self.l3_view and self.network_map is not None:
+            self.annotate_l3()
 
     def set_find_placeholder(self):
         here = self.tabs.currentWidget()

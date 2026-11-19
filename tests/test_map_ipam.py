@@ -125,6 +125,9 @@ def test_map_page_shows_and_records_ipam(pages, tmp_path, monkeypatch):
 
     nodes = page.l3_nodes
     users = nodes[l3.subnet_key(__import__("ipaddress").ip_network("10.50.0.0/24"))]
+    assert users.detail == "" and page.l3_stale  # Worked out only once the logical view is shown
+    page.tabs.setCurrentWidget(page.l3_view)
+    assert not page.l3_stale
     assert users.detail == "Users · VLAN" and users.tone == ""  # Linked to VLAN 50, where the map has it: well
     elsewhere = next(node for node in nodes.values() if node.kind == l3.SUBNET and node.label == "10.30.0.0/24")
     assert (elsewhere.detail, elsewhere.tone) == ("not in IPAM", "muted")
