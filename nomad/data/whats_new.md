@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.4.3] - 2026-11-19
+
+- **Fixed:** the Sweep page now shows **Proxy ARP from** a router or firewall for addresses where only it answered ARP. They aren't offered for recording in IPAM. If IPAM records one as used, it's listed under **Recorded but Silent**.
+
 ## [2.4.2] - 2026-11-19
 
 - **Fixed:** IP Addresses no longer shows empty addresses as answered when a router or firewall answered ARP for them (proxy ARP). Last Seen now says **No answer · proxy ARP from** the router or firewall. Those addresses aren't offered for recording, and their MAC column stays empty.

@@ -383,6 +383,32 @@ def test_comparing_the_network_with_ipam(store):
     assert [record.ip for record in quiet] == ["10.0.0.8"]  # Reserved addresses needn't answer
 
 
+def test_proxy_arp_isnt_a_device(store):
+    """A router (answers ping) and a firewall (ARP only, but IPAM records its MAC) answering ARP for empty addresses
+    with their own MACs: those findings are proxy ARP, never offered for recording."""
+    from nomad.ipam.reconcile import NOT_RECORDED, PROXY_ARP, RECORDED, compare, proxy_arp
+    router, firewall = "00-1E-BD-BC-92-BF", "CC-70-ED-B9-61-44"
+    lab = store.add_network("Lab")
+    store.add_subnet(lab.id, "10.10.10.0/24", "LAN")
+    store.set_address(lab.id, "10.10.10.43", USED, "fw", mac=firewall)
+    store.set_address(lab.id, "10.10.10.60", USED, "gone")
+    found = {"10.10.10.43": (firewall, ""), "10.10.10.44": (firewall, ""), "10.10.10.46": (router, ""),
+             "10.10.10.50": (router, "rtr"), "10.10.10.60": (router, ""), "10.10.10.70": ("AA-AA-AA-AA-AA-AA", ""),
+             "10.10.10.80": ("BB-BB-BB-BB-BB-BB", ""), "10.10.10.81": ("BB-BB-BB-BB-BB-BB", "")}
+    arp_only = set(found) - {"10.10.10.50"}
+    # Without IPAM: the router's ping gives it away; the firewall's MAC can't be told from the addresses it answers for
+    assert proxy_arp(found, arp_only) == {"10.10.10.46": "10.10.10.50", "10.10.10.60": "10.10.10.50",
+                                          "10.10.10.43": "", "10.10.10.44": "", "10.10.10.80": "",
+                                          "10.10.10.81": ""}
+    findings = compare(found, store, lab.id, arp_only)
+    assert {ip: finding.state for ip, finding in findings.items()} == {
+        "10.10.10.43": RECORDED, "10.10.10.44": PROXY_ARP, "10.10.10.46": PROXY_ARP, "10.10.10.50": NOT_RECORDED,
+        "10.10.10.60": PROXY_ARP, "10.10.10.70": NOT_RECORDED, "10.10.10.80": PROXY_ARP, "10.10.10.81": PROXY_ARP}
+    assert findings["10.10.10.44"].text == "Proxy ARP from 10.10.10.43"
+    assert findings["10.10.10.60"].text == "Proxy ARP from 10.10.10.50: IPAM has gone, which didn't answer"
+    assert compare(found, store, lab.id)["10.10.10.44"].state == NOT_RECORDED  # Not a sweep's: nothing to go on
+
+
 def test_loopback_subnets(store):
     network = store.add_network("Lab")
     pool = store.add_subnet(network.id, "10.0.0.0/29", "Loopbacks", loopbacks=True)

@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.4.3] - 2026-11-19
+
+### Fixed
+
+- **Sweep: addresses only a router or firewall answered ARP for were listed as devices.** The Sweep page now uses the same proxy ARP check as IP Addresses (2.4.2). A host that answered ARP but not ping, with a MAC that another address answered ping with, shows **Proxy ARP from** that address in Response Time, in gray. If you're comparing with IPAM, NOMAD also counts IPAM's records: a MAC recorded at another address marks the reply as proxy ARP. When it can't tell which address owns a MAC that several addresses answered with, it shows **Proxy ARP?**. In the IPAM column, these hosts show **Proxy ARP from** and are counted as "only proxy ARP (nothing there)". **Record Not in IPAM** and the right-click menu don't offer to record them. If IPAM records one of these addresses as used, the IPAM column says it didn't answer, and once the sweep finishes it's listed under **Recorded but Silent**. Proxy ARP is now in `ipam/reconcile.py` (`proxy_arp`, and `compare` takes `arp_only`).
+
 ## [2.4.2] - 2026-11-19
 
 ### Fixed

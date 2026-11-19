@@ -8,8 +8,8 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QComboBox, QDialog, QHBoxLayout, QLabel, QMessageBox, QPushButton, \
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
-from ..ipam.reconcile import MAC_DIFFERS, NOT_RECORDED, RECORDED, RESERVED_IN_USE, candidate_networks, compare, \
-    silent
+from ..ipam.reconcile import MAC_DIFFERS, NOT_RECORDED, PROXY_ARP, RECORDED, RESERVED_IN_USE, candidate_networks, \
+    compare, proxy_arp, silent
 from ..ipam.store import USED, IpamError
 from .common import set_hint
 from .ipam_dialogs import AddressDialog
@@ -18,7 +18,8 @@ from .theme import COLORS
 log = logging.getLogger(__name__)
 
 NO_COMPARISON = ""
-STATE_COLORS = {RECORDED: "success", NOT_RECORDED: "warning", MAC_DIFFERS: "error", RESERVED_IN_USE: "warning"}
+STATE_COLORS = {RECORDED: "success", NOT_RECORDED: "warning", MAC_DIFFERS: "error", RESERVED_IN_USE: "warning",
+                PROXY_ARP: "muted"}
 
 
 def finding_color(finding):
@@ -35,6 +36,8 @@ class IpamComparison(QWidget):
         self.window = window
         self.allow_silent = allow_silent
         self.found = {}  # {ip: (mac, name)}
+        self.arp_only = set()  # The ips that answered ARP but not ping (a sweep's), to tell proxy ARP apart
+        self.proxied = {}  # {ip: whose MAC answered for it, or ""}: only a router's proxy ARP answered there
         self.ranges = []  # Blocks swept in full, for addresses that didn't answer
         self.complete = False  # Whether every address in `ranges` was tried (a finished sweep)
         self.findings = {}  # {ip: Finding}
@@ -75,9 +78,11 @@ class IpamComparison(QWidget):
     def ipam(self):
         return self.window.ipam_tab
 
-    def set_devices(self, found, ranges=(), complete=False, soon=True):
-        """The devices on the page. Compares shortly after (so a running sweep isn't re-compared per host)."""
+    def set_devices(self, found, ranges=(), complete=False, soon=True, arp_only=()):
+        """The devices on the page (arp_only: those that answered ARP but not ping). Compares shortly after (so a
+        running sweep isn't re-compared per host)."""
         self.found, self.ranges, self.complete = dict(found), list(ranges), complete
+        self.arp_only = set(arp_only)
         if soon:
             self.pending_compare.start(400)
         else:
@@ -127,14 +132,20 @@ class IpamComparison(QWidget):
             selection = self.selection()
             if selection is None:
                 self.findings, self.quiet = {}, []
+                self.proxied = proxy_arp(self.found, self.arp_only)  # What the sweep alone shows
             else:
                 _, store, network_id = selection
-                self.findings = compare(self.found, store, network_id)
-                self.quiet = silent(store, network_id, self.found, self.ranges) \
+                self.findings = compare(self.found, store, network_id, self.arp_only)
+                self.proxied = proxy_arp(self.found, self.arp_only,
+                                         {ip: finding.record for ip, finding in self.findings.items()})
+                # A recorded address only proxy ARP answered for is as silent as one nothing answered for
+                answered = [ip for ip in self.found if ip not in self.proxied]
+                self.quiet = silent(store, network_id, answered, self.ranges) \
                     if self.allow_silent and self.complete else []
         except IpamError as error:
             log.warning("Comparing with IPAM failed: %s", error)
             self.findings, self.quiet = {}, []
+            self.proxied = proxy_arp(self.found, self.arp_only)
         self.show_summary()
         self.updated.emit()
 
@@ -163,6 +174,8 @@ class IpamComparison(QWidget):
             parts.append(f"{counts[MAC_DIFFERS]} with a different MAC")
         if counts[RESERVED_IN_USE]:
             parts.append(f"{counts[RESERVED_IN_USE]} reserved but answering")
+        if counts[PROXY_ARP]:
+            parts.append(f"{counts[PROXY_ARP]} only proxy ARP (nothing there)")
         problems = missing or counts[MAC_DIFFERS] or counts[RESERVED_IN_USE]
         set_hint(self.summary_label, ", ".join(parts), "warning" if problems else "success")
 
@@ -180,10 +193,12 @@ class IpamComparison(QWidget):
         source, _, network_id = selection
         finding = self.findings.get(ip)
         actions = []
+        if finding is not None and finding.state == PROXY_ARP and finding.record is None:
+            return []  # Nothing's there to record: a router answered for it
         if finding is None or finding.state == NOT_RECORDED:
             actions.append(("Record in IPAM...", lambda: self.record_one(ip, mac, name)))
         else:
-            if finding.state == MAC_DIFFERS and mac:
+            if finding.state == MAC_DIFFERS and mac:  # (A proxied one's MAC is the router's, so never offered)
                 actions.append((f"Update MAC in IPAM to {mac}", lambda: self.update_mac(ip, mac)))
             actions.append(("Edit in IPAM...", lambda: self.record_one(ip, mac, name)))
             actions.append(("Show in IPAM", lambda: self.ipam.show_address(source, network_id, ip)))

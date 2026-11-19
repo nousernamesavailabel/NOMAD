@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, wait
 
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, \
     QLineEdit, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox, QTableWidget, QVBoxLayout, QWidget
 
@@ -20,7 +21,7 @@ from ..terminal.sessions import SSH
 from .host_menu import HostActions
 from .common import ColumnFitter, SortableTableItem, StoppableThread, release_thread, set_hint, set_invalid
 from .ipam_compare import IpamComparison, finding_color
-from .theme import accent_button
+from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,21 @@ COL_ADDRESS, COL_RTT, COL_NAME, COL_MAC, COL_VENDOR, COL_IPAM = range(len(COLUMN
 PROGRESS_INTERVAL_SECONDS = 0.05  # Limit progress updates so big sweeps don't flood the UI
 NAME_LOOKUP_WORKERS = 16
 ARP_ONLY_SORT_KEY = 10 ** 9  # Hosts that only answered ARP sort after every response time
+
+
+def arp_only_item(proxy_owner):
+    """The Response Time cell of a host that answered ARP but not ping. proxy_owner (reconcile.proxy_arp's): the
+    address whose MAC answered for it, "" for a MAC several addresses share, or None for the host's own reply."""
+    if proxy_owner is None:
+        item = SortableTableItem("No ping reply", ARP_ONLY_SORT_KEY)
+        item.setToolTip("Found by ARP: the host is there, but its firewall drops ping.")
+        return item
+    item = SortableTableItem(f"Proxy ARP from {proxy_owner}" if proxy_owner else "Proxy ARP?", ARP_ONLY_SORT_KEY)
+    whose = f"the MAC of {proxy_owner}" if proxy_owner else "a MAC other addresses answered ARP with too"
+    item.setToolTip(f"Only an ARP reply came back, with {whose}: a router or firewall answering for an address it "
+                    "can reach (proxy ARP). There's probably no device here.")
+    item.setForeground(QColor(COLORS["muted"]))
+    return item
 
 
 class SweepThread(StoppableThread):
@@ -331,7 +347,8 @@ class SweepTab(QWidget):
         log.info(message)
         # Addresses IPAM expects that didn't answer only mean something once every address has been tried
         complete = not self.worker.stopping
-        self.ipam_bar.set_devices(self.devices(), self.swept, complete=complete, soon=False)
+        self.ipam_bar.set_devices(self.devices(), self.swept, complete=complete, soon=False,
+                                  arp_only=self.arp_only())
         selection = self.ipam_bar.selection()
         if selection is not None:  # Show what answered on the IP Addresses page too
             source, _, network_id = selection
@@ -362,8 +379,7 @@ class SweepTab(QWidget):
         self.table.insertRow(row)
         self.table.setItem(row, COL_ADDRESS, SortableTableItem(address, int(ipaddress.ip_address(address)), address))
         if hit.rtt is None:
-            rtt_item = SortableTableItem("No ping reply", ARP_ONLY_SORT_KEY)
-            rtt_item.setToolTip("Found by ARP: the host is there, but its firewall drops ping.")
+            rtt_item = arp_only_item(None)
         else:
             rtt_item = SortableTableItem("<1 ms" if hit.rtt < 1 else f"{hit.rtt} ms", hit.rtt)
         self.table.setItem(row, COL_RTT, rtt_item)
@@ -373,7 +389,7 @@ class SweepTab(QWidget):
         self.table.setItem(row, COL_IPAM, SortableTableItem(""))
         self.table.setSortingEnabled(True)
         self.update_buttons()
-        self.ipam_bar.set_devices(self.devices(), self.swept)
+        self.ipam_bar.set_devices(self.devices(), self.swept, arp_only=self.arp_only())
 
     def set_mac(self, row, mac):
         self.table.setItem(row, COL_MAC, SortableTableItem(mac))
@@ -395,7 +411,12 @@ class SweepTab(QWidget):
             self.set_mac(row, mac)
             self.table.item(row, COL_MAC).setToolTip("Reported by the host over NetBIOS.")
         self.table.setSortingEnabled(True)
-        self.ipam_bar.set_devices(self.devices(), self.swept)
+        self.ipam_bar.set_devices(self.devices(), self.swept, arp_only=self.arp_only())
+
+    def arp_only(self):
+        """The hosts that answered ARP but not ping (a router's proxy ARP looks like one of these)."""
+        return {self.table.item(row, COL_ADDRESS).text() for row in range(self.table.rowCount())
+                if self.table.item(row, COL_RTT).sort_key == ARP_ONLY_SORT_KEY}
 
     def devices(self):
         """{ip: (mac, host name)} of the hosts found, for comparing with IPAM."""
@@ -405,14 +426,17 @@ class SweepTab(QWidget):
                 for row in range(self.table.rowCount())}
 
     def show_ipam_column(self):
-        """What IPAM says about each host, from the comparison."""
+        """What IPAM says about each host, from the comparison, and which only a router's proxy ARP answered for."""
         self.table.setSortingEnabled(False)
         for row in range(self.table.rowCount()):
-            finding = self.ipam_bar.findings.get(self.table.item(row, COL_ADDRESS).text())
+            address = self.table.item(row, COL_ADDRESS).text()
+            finding = self.ipam_bar.findings.get(address)
             item = SortableTableItem(finding.text if finding else "", finding.state if finding else "")
             if finding is not None:
                 item.setForeground(finding_color(finding))
             self.table.setItem(row, COL_IPAM, item)
+            if self.table.item(row, COL_RTT).sort_key == ARP_ONLY_SORT_KEY:
+                self.table.setItem(row, COL_RTT, arp_only_item(self.ipam_bar.proxied.get(address)))
         self.table.setSortingEnabled(True)
 
     def clear_results(self):
