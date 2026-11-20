@@ -11,7 +11,6 @@ Assets come from the same two places as IPAM's networks: the tribe's, shared thr
 the IP Addresses page syncs, so they can be read and changed offline: changes wait until the server is back), and
 this computer's own (Local).
 """
-import csv
 import datetime
 import html
 import logging
@@ -24,6 +23,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBo
     QLineEdit, QMenu, QMessageBox, QPushButton, QSplitter, QTableWidget, QTextBrowser, QVBoxLayout, QWidget
 
 from .. import hostinfo
+from ..exporting import NO_PROGRESS, saving, write_csv
 from ..ipam import asset_compare
 from ..ipam.asset_team import TeamAssetStore
 from ..ipam.assets import DEVICE_KINDS, IN_SERVICE, KINDS, OUT_OF_SERVICE, PHONE, SERVER, STATUSES, AssetStore, \
@@ -37,6 +37,7 @@ from ..netmap import hardware, store as map_store
 from ..oui import format_mac
 from .asset_dialogs import AssetDialog, AssetImportDialog, AssetRefusedDialog, ReadDetailsDialog, Source, ValueDialog
 from .common import SortableTableItem, add_action, add_submenu, set_hint
+from .export_progress import error_text, run_export
 from .integration import MAP_DEVICE, hub, link
 from .ipam_tab import ago
 from .table_filter import TableFilter
@@ -977,18 +978,18 @@ class AssetsTab(QWidget):
         if not path:
             return
         rows = export_rows(source.assets.assets(), self.target_list)
-        try:
-            if path.lower().endswith(".csv") or "CSV" in chosen and not path.lower().endswith(".xlsx"):
-                with open(path, "w", newline="", encoding="utf-8-sig") as file:
-                    writer = csv.writer(file)
-                    writer.writerow(EXPORT_COLUMNS)
-                    writer.writerows(rows)
+        as_csv = path.lower().endswith(".csv") or "CSV" in chosen and not path.lower().endswith(".xlsx")
+
+        def write(progress):
+            if as_csv:
+                write_csv(path, rows, EXPORT_COLUMNS, progress)
             else:
-                write_workbook(path, rows)
-        except OSError as error:
-            set_hint(self.status_label, f"Couldn't export: {error}", "error")
-            return
-        set_hint(self.status_label, f"Exported {len(rows)} assets to {path}.", "success")
+                write_workbook(path, rows, progress)
+
+        run_export(self, "Export Assets", write,
+                   lambda _: set_hint(self.status_label, f"Exported {len(rows)} assets to {path}.", "success"),
+                   lambda error: set_hint(self.status_label, f"Couldn't export: {error_text(error)}", "error"),
+                   lambda: set_hint(self.status_label, "Export cancelled: nothing was saved.", "info"))
 
     # ----------------------------------------------------------------- The tribe
 
@@ -1068,7 +1069,7 @@ def export_rows(assets, targets=()):
     return rows
 
 
-def write_workbook(path, rows):
+def write_workbook(path, rows, progress=NO_PROGRESS):
     from openpyxl import Workbook
     from openpyxl.styles import Font
     book = Workbook()
@@ -1077,14 +1078,18 @@ def write_workbook(path, rows):
     sheet.append(EXPORT_COLUMNS)
     for cell in sheet[1]:
         cell.font = Font(bold=True)
+    progress.stage("Writing assets", len(rows))
     for row in rows:
         sheet.append(row)
+        progress.step()
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     for column in sheet.columns:
         width = max(len(str(cell.value or "")) for cell in column)
         sheet.column_dimensions[column[0].column_letter].width = min(max(10, width + 2), 50)
-    book.save(path)
+    progress.stage("Saving the workbook...")
+    with saving(path) as temporary:
+        book.save(temporary)
 
 
 def ip_sort_key(text):

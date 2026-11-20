@@ -1,5 +1,4 @@
 """SNMP Walk page: read a device's details, walk any part of its MIB, or summarize its interfaces and error counters."""
-import csv
 import logging
 import time
 
@@ -11,7 +10,9 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QComboBox, QFileDia
 from ..snmp import SYSTEM, VERSIONS, WALK_PRESETS, SnmpClient, SnmpError, community_is_valid, format_value, \
     interface_summary, oid_name, oid_text, parse_oid
 from ..snmpv3 import AUTH_NAMES, PRIV_NAMES, V3User, is_v3
+from ..exporting import write_csv
 from .common import SortableTableItem, StoppableThread, release_thread, set_hint, set_invalid
+from .export_progress import error_text, run_export
 from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
@@ -440,15 +441,11 @@ class SnmpTab(QWidget):
         if not path:
             return
         header, rows = self.table_text()
-        try:
-            with open(path, "w", newline="", encoding="utf-8") as file:
-                writer = csv.writer(file)
-                writer.writerow(header)
-                writer.writerows(rows)
-        except OSError as error:
-            QMessageBox.critical(self, "Export Failed", f"Couldn't save {path}:\n\n{error}")
-            return
-        self.window.show_status(f"Exported {len(rows)} rows to {path}.")
+        run_export(self, "Export SNMP Results", lambda progress: write_csv(path, rows, header, progress, "utf-8"),
+                   lambda _: self.window.show_status(f"Exported {len(rows)} rows to {path}."),
+                   lambda error: QMessageBox.critical(self, "Export Failed",
+                                                      f"Couldn't save {path}:\n\n{error_text(error)}"),
+                   lambda: self.window.show_status("Export cancelled: nothing was saved.", "info"))
 
     def update_buttons(self):
         running = self.worker is not None

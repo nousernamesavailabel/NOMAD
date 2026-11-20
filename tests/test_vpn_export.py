@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import QMessageBox
 
 from nomad.netmap.vpn import DMVPN, HUB, VTI
 from nomad.ui import vpn_tab
+from nomad.ui.export_progress import wait_for_exports
 from tests.test_vpn_tab import new_vti, page, read_both  # noqa: F401 (page: a fixture)
 from tests.test_vpn_tab import app  # noqa: F401
 
@@ -17,6 +18,7 @@ def export_to(page, folder, monkeypatch, answer=QMessageBox.Yes):  # noqa: F811
     monkeypatch.setattr(QMessageBox, "question", lambda parent, title, text, *args: asked.append(text) or answer)
     assert page.export_all_action.isEnabled()
     page.export_all()
+    assert wait_for_exports()
     return asked
 
 

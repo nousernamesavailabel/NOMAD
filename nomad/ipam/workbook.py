@@ -19,6 +19,7 @@ pages keep about a subnet stays in their own tables, never in a subnet's details
 """
 import re
 
+from ..exporting import NO_PROGRESS, saving
 from .store import RESERVED, STATUSES
 
 LIST_EVERY_ADDRESS_UP_TO = 256  # Larger subnets list only their recorded addresses (and the gateway)
@@ -30,6 +31,27 @@ UNNAMED_USED = "In use"
 CSV_COLUMNS = ["Subnet", "Subnet Name", "Gateway", "Address", "Status", "Name", "MAC Address", "Description",
                "Last Changed", "Changed By"]
 BAD_TITLE_CHARACTERS = re.compile(r"[\[\]:*?/\\]")
+
+
+class NetworkCopy:
+    """One network's subnets and addresses, read once from its store on the UI thread, answering the same questions
+    as the store (subnets, addresses) so an export can be written from it on a worker thread."""
+
+    def __init__(self, store, network):
+        self.network_id = network.id
+        self._subnets = list(store.subnets(network.id))
+        self._addresses = list(store.addresses(network.id))
+
+    def subnets(self, network_id):
+        return list(self._subnets) if network_id == self.network_id else []
+
+    def addresses(self, network_id):
+        return list(self._addresses) if network_id == self.network_id else []
+
+
+def copies(networks):
+    """[(store, network)] as [(NetworkCopy, network)], for writing on a worker thread."""
+    return [(NetworkCopy(store, network), network) for store, network in networks]
 
 
 def _name(subnet):
@@ -155,7 +177,7 @@ def outside_subnets(store, network):
             if not any(address.address in block for block in subnets)]
 
 
-def export_workbook(path, networks):
+def export_workbook(path, networks, progress=NO_PROGRESS):
     """Write [(store, network)] to an .xlsx workbook, a page per network. Returns the page titles."""
     from openpyxl import Workbook
     from openpyxl.styles import Font
@@ -164,11 +186,17 @@ def export_workbook(path, networks):
     workbook.remove(workbook.active)
     titles, taken = [], set()
     bold = Font(bold=True)
-    for store, network in networks:
+    for number, (store, network) in enumerate(networks, 1):
+        progress.stage(f"Laying out {network.name}..." if len(networks) == 1 else
+                       f"Laying out {network.name} (page {number} of {len(networks)})...")
+        rows = page_rows(store, network)
         sheet = workbook.create_sheet(_title(network, taken))
         titles.append(sheet.title)
-        for values in page_rows(store, network):
+        progress.stage(f"Writing {network.name}" + ("" if len(networks) == 1 else
+                                                     f" (page {number} of {len(networks)})"), len(rows))
+        for values in rows:
             sheet.append([value if value != "" else None for value in values])
+            progress.step()
         for cell in sheet[1]:
             cell.font = bold
         for row in sheet.iter_rows(min_row=2):
@@ -177,17 +205,22 @@ def export_workbook(path, networks):
         for column, width in zip("ABCDEFGH", (2, 40, 14, 18, 18, 18, 10, 40)):
             sheet.column_dimensions[column].width = width
         sheet.freeze_panes = "A2"
-    workbook.save(path)
+    progress.stage("Saving the workbook...")
+    with saving(path) as temporary:
+        workbook.save(temporary)
     return titles
 
 
-def csv_rows(store, network_id, subnets):
+def csv_rows(store, network_id, subnets, progress=NO_PROGRESS):
     """Export to CSV: the column names, a row per subnet, then a row per address with the smallest subnet holding it."""
     rows = [list(CSV_COLUMNS)]
     for subnet in subnets:
         rows.append([subnet.cidr, subnet.name, subnet.gateway, "", "", "", "", subnet.description, subnet.modified,
                      subnet.modified_by])
-    for address in store.addresses(network_id):
+    addresses = store.addresses(network_id)
+    progress.stage("Matching addresses to subnets", len(addresses))
+    for address in addresses:
+        progress.step()
         holding = [subnet for subnet in subnets if address.address in subnet.network]
         subnet = max(holding, key=lambda subnet: (subnet.network.prefixlen, subnet.network.first), default=None)
         rows.append([subnet.cidr if subnet else "", subnet.name if subnet else "", "", address.ip,

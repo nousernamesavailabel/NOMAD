@@ -14,6 +14,7 @@ from nomad.netmap import macfind
 from nomad.netmap.crawl import CrawlSettings, Crawler
 from nomad.netmap.sightings import SightingLog
 from nomad.snapshot import NetworkSnapshot
+from nomad.ui.export_progress import wait_for_exports  # noqa: E402
 from nomad.ui import mac_finder_tab
 from nomad.ui.mac_finder_tab import COL_NOTE, COL_PORT, COL_SOURCE, COL_SWITCH, MacFinderTab
 
@@ -200,6 +201,7 @@ def test_export_csv(setup, tmp_path, monkeypatch):
     path = tmp_path / "results.csv"
     monkeypatch.setattr(mac_finder_tab.QFileDialog, "getSaveFileName", lambda *args, **kwargs: (str(path), ""))
     page.export_csv()
+    assert wait_for_exports()
     text = path.read_text(encoding="utf-8")
     assert "MAC Address" in text and "Gi1/0/5" in text
 

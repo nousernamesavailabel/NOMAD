@@ -34,10 +34,11 @@ from PyQt5.QtWidgets import QAbstractItemView, QAction, QApplication, QCheckBox,
 from ..netmap import configpush, vpn, vpncheck, vpnfind, vpnpki, vpnstatus
 from ..netmap.model import ROUTER, SWITCH
 from ..netmap.vpnstatus import DOWN, ERROR, GOOD, INFO, NEGOTIATING, UNKNOWN, UP, WARNING
-from ..system import replace_file
+from ..exporting import NO_PROGRESS, saving
 from ..terminal.files import NOT_IN_WINDOWS_NAMES, WINDOWS_DEVICE_NAMES
 from ..terminal.sessions import SSH
 from .common import StoppableThread, local_address_toward, read_only_table, release_thread, set_hint
+from .export_progress import error_text, run_export
 from .session_send import SessionSender
 from .ssh_push import LoginRow
 from .theme import COLORS, accent_button, monospace_font
@@ -76,6 +77,30 @@ def export_file_name(text, taken):
     taken.add(name.casefold())
     return name
 
+
+
+class RouterFileError(Exception):
+    """Export Every Router stopped at a file it couldn't save; the ones before it were saved."""
+
+    def __init__(self, saved, file_name, error):
+        super().__init__(f"Couldn't save {file_name}: {error}")
+        self.saved, self.file_name, self.error = saved, file_name, error
+
+
+def write_router_files(folder, files, progress=NO_PROGRESS):
+    """Write [(file name, text)] into folder, each one whole or not at all; returns how many were saved."""
+    progress.stage(f"Saving {len(files)} files", len(files))
+    saved = 0
+    for file_name, text in files:
+        try:
+            with saving(os.path.join(folder, file_name)) as temporary, \
+                    open(temporary, "w", encoding="utf-8") as file:
+                file.write(text + "\n")
+        except OSError as error:
+            raise RouterFileError(saved, file_name, error) from error
+        saved += 1
+        progress.step()
+    return saved
 
 @dataclass
 class Target:
@@ -2266,24 +2291,20 @@ class VpnTab(QWidget):
                                     f"({listed}). Replace {'it' if one else 'them'}?",
                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) != QMessageBox.Yes:
                 return
-        saved = 0
-        for file_name, text in files:
-            path = os.path.join(folder, file_name)
-            try:
-                with open(path + ".tmp", "w", encoding="utf-8") as file:
-                    file.write(text + "\n")
-                replace_file(path + ".tmp", path)
-            except OSError as error:
-                try:
-                    os.remove(path + ".tmp")
-                except OSError:
-                    pass
-                set_hint(self.status_label, f"Saved {saved} of {len(files)} files, then couldn't save {file_name}: "
-                                            f"{error}", "error")
-                return
-            saved += 1
-        set_hint(self.status_label, f"Saved {saved} file{'' if saved == 1 else 's'} to {folder}" +
-                 (" (keys hidden: tick Show keys to export them)." if not reveal else "."), "success")
+        run_export(self, "Export Every Router", lambda progress: write_router_files(folder, files, progress),
+                   lambda saved: set_hint(self.status_label,
+                                          f"Saved {saved} file{'' if saved == 1 else 's'} to {folder}" +
+                                          (" (keys hidden: tick Show keys to export them)." if not reveal else "."),
+                                          "success"),
+                   lambda error: self.export_every_failed(error, len(files)),
+                   lambda: set_hint(self.status_label, "Export cancelled: the files already saved were kept.", "info"))
+
+    def export_every_failed(self, error, count):
+        if isinstance(error, RouterFileError):
+            set_hint(self.status_label, f"Saved {error.saved} of {count} files, then couldn't save {error.file_name}: "
+                                        f"{error_text(error.error)}", "error")
+        else:
+            set_hint(self.status_label, f"Couldn't export: {error_text(error)}", "error")
 
     def revert_minutes(self):
         return self.minutes_input.value() if self.revert_check.isChecked() else 0

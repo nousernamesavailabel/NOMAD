@@ -1,7 +1,8 @@
 """Exporting a map: tables as CSV, and the drawing as a draw.io file (which draw.io and Visio can open)."""
-import csv
 from xml.sax.saxutils import quoteattr
 
+from .. import exporting
+from ..exporting import NO_PROGRESS
 from .hardware import chassis
 from .layout import NODE_HEIGHT, NODE_WIDTH
 from .model import KIND_NAMES
@@ -90,11 +91,8 @@ def news_text(network_map, ref):
     return f"New {item.get('when', '')[:16].replace('T', ' ')}".strip() if item is not None else ""
 
 
-def write_csv(path, columns, rows):
-    with open(path, "w", newline="", encoding="utf-8-sig") as file:
-        writer = csv.writer(file)
-        writer.writerow(columns)
-        writer.writerows(rows)
+def write_csv(path, columns, rows, progress=NO_PROGRESS):
+    exporting.write_csv(path, list(rows), columns, progress)
 
 
 def drawio(network_map, positions, boxes=()):

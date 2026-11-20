@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-11-19
+
+- **New:** exports show a progress bar with **Cancel**: IPAM's CSV and workbook exports, Assets, VLANs, MAC Finder, SNMP and Sweep results, the Network Map's CSV exports, and VPN **Every Router to a Folder**. A cancelled export leaves no half-written file behind.
+
 ## [2.4.4] - 2026-11-19
 
 - **Fixed:** in IPAM, **Export All Networks to Workbook** names each page after its network again, so "XXXX Network Template" no longer comes out as "Network Template".

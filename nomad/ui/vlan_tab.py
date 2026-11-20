@@ -7,7 +7,6 @@ as pending until the server is back), and this computer's own (Local). A domain 
 whose subnets its VLANs carry; linking a subnet to a VLAN is only noted here, never on the subnet, so the IP
 Addresses page and its export to the workbook are as they were.
 """
-import csv
 import html
 import logging
 import time
@@ -26,7 +25,9 @@ from ..ipam.vlan_team import TeamVlanStore
 from ..ipam.vlans import STATUSES, VlanStore, name_problem, range_for
 from ..netmap import store as map_store
 from ..netmap import vlans as map_vlans
+from ..exporting import write_csv
 from .common import SortableTableItem, add_action, set_hint
+from .export_progress import error_text, run_export
 from .integration import PLACEMENT, hub, link
 from .ipam_tab import ago
 from .table_filter import TableFilter
@@ -841,20 +842,17 @@ class VlanTab(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "Export VLANs", f"{domain.name} VLANs.csv", "CSV files (*.csv)")
         if not path:
             return
-        try:
-            with open(path, "w", newline="", encoding="utf-8-sig") as file:
-                writer = csv.writer(file)
-                writer.writerow(["VLAN", "Name", "Status", "Range", "Subnets", "Description", "Last Changed",
-                                 "Changed By"])
-                for vlan in source.vlans.vlans(domain.id):
-                    block = range_for(domain, vlan.vlan)
-                    writer.writerow([vlan.vlan, vlan.name, STATUSES.get(vlan.status, vlan.status),
-                                     f"{block['first']}-{block['last']} {block['name']}".strip() if block else "",
-                                     " ".join(vlan.subnets), vlan.description, vlan.modified, vlan.modified_by])
-        except OSError as error:
-            set_hint(self.status_label, f"Couldn't export: {error}", "error")
-            return
-        set_hint(self.status_label, f"Exported {domain.name}'s VLANs to {path}.", "success")
+        rows = []  # Read from the store here, on the UI thread; written out on the export's own
+        for vlan in source.vlans.vlans(domain.id):
+            block = range_for(domain, vlan.vlan)
+            rows.append([vlan.vlan, vlan.name, STATUSES.get(vlan.status, vlan.status),
+                         f"{block['first']}-{block['last']} {block['name']}".strip() if block else "",
+                         " ".join(vlan.subnets), vlan.description, vlan.modified, vlan.modified_by])
+        header = ["VLAN", "Name", "Status", "Range", "Subnets", "Description", "Last Changed", "Changed By"]
+        run_export(self, "Export VLANs", lambda progress: write_csv(path, rows, header, progress),
+                   lambda _: set_hint(self.status_label, f"Exported {domain.name}'s VLANs to {path}.", "success"),
+                   lambda error: set_hint(self.status_label, f"Couldn't export: {error_text(error)}", "error"),
+                   lambda: set_hint(self.status_label, "Export cancelled: nothing was saved.", "info"))
 
     # ----------------------------------------------------------------- The tribe
 

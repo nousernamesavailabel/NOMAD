@@ -7,7 +7,6 @@ every few minutes and on Sync Now, so it can look everything up offline, and sen
 server while it can reach it. On the server itself, NOMAD running as administrator manages the server's data
 directly (Server admin): only there can spreadsheets be imported and tribe networks added or deleted.
 """
-import csv
 import ipaddress
 import logging
 import os
@@ -30,10 +29,12 @@ from ..ipam.store import ANYWHERE, DESCRIPTION, MAC, NAME, RESERVED, STATUSES, U
     Subnet
 from ..ipam.asset_team import TeamAssetStore
 from ..ipam.vlan_team import TeamVlanStore
+from ..exporting import write_csv
 from ..oui import normalize_mac
 from ..sweep import SWEEP_PASSES
 from ..system import log_dir
 from .common import SortableTableItem, add_action, release_thread, run_in_background, set_hint
+from .export_progress import error_text, run_export
 from .integration import MAP_DEVICE, MAP_SUBNET, PLACEMENT, VLAN, hub, link
 from .host_menu import HostActions
 from .ipam_dialogs import AddressDialog, ImportDialog, NetworkDialog, SubnetDialog
@@ -2394,7 +2395,7 @@ class IpamTab(QWidget):
                                         f"{page}.", "success")
 
     def export_workbook(self, every):
-        from ..ipam.workbook import export_workbook, outside_subnets
+        from ..ipam.workbook import copies, export_workbook, outside_subnets
         network = self.network()
         if network is None:
             return
@@ -2404,16 +2405,26 @@ class IpamTab(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "Export to Workbook", f"{name}.xlsx", "Excel workbooks (*.xlsx)")
         if not path:
             return
-        try:
-            export_workbook(path, [(store, item) for item in networks])
-        except OSError as error:
-            set_hint(self.status_label, f"Couldn't save {path}: {error.strerror or error}", "error")
-            return
-        left_out = sum(len(outside_subnets(store, item)) for item in networks)
-        note = (f" {left_out} recorded address{'' if left_out == 1 else 'es'} outside every subnet had nowhere to "
-                "go in the workbook layout (Check Data lists them)." if left_out else "")
+        pages = copies((store, item) for item in networks)  # Read here: the store belongs to the UI thread
         what = f"{len(networks)} networks" if every else network.name
-        set_hint(self.status_label, f"Exported {what} to {path}.{note}", "warning" if left_out else "success")
+
+        def write(progress):
+            export_workbook(path, pages, progress)
+            return sum(len(outside_subnets(copy, item)) for copy, item in pages)
+
+        def done(left_out):
+            note = (f" {left_out} recorded address{'' if left_out == 1 else 'es'} outside every subnet had nowhere "
+                    "to go in the workbook layout (Check Data lists them)." if left_out else "")
+            set_hint(self.status_label, f"Exported {what} to {path}.{note}", "warning" if left_out else "success")
+
+        run_export(self, "Export to Workbook", write, done, lambda error: self.export_failed(path, error),
+                   self.export_cancelled)
+
+    def export_failed(self, path, error):
+        set_hint(self.status_label, f"Couldn't save {path}: {error_text(error)}", "error")
+
+    def export_cancelled(self):
+        set_hint(self.status_label, "Export cancelled: nothing was saved.", "info")
 
     # ----------------------------------------------------------------- Finding
 
@@ -2543,11 +2554,12 @@ class IpamTab(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "Export Network", f"{network.name}.csv", "CSV files (*.csv)")
         if not path:
             return
-        from ..ipam.workbook import csv_rows
-        try:
-            with open(path, "w", newline="", encoding="utf-8-sig") as file:
-                csv.writer(file).writerows(csv_rows(self.store, network.id, self.subnets))
-        except OSError as error:
-            set_hint(self.status_label, f"Couldn't save {path}: {error.strerror or error}", "error")
-            return
-        set_hint(self.status_label, f"Exported {network.name} to {path}.", "success")
+        from ..ipam.workbook import NetworkCopy, csv_rows
+        copy, subnets = NetworkCopy(self.store, network), list(self.subnets)  # Read here, on the UI thread
+
+        def write(progress):
+            write_csv(path, csv_rows(copy, network.id, subnets, progress), progress=progress)
+
+        run_export(self, "Export Network", write,
+                   lambda _: set_hint(self.status_label, f"Exported {network.name} to {path}.", "success"),
+                   lambda error: self.export_failed(path, error), self.export_cancelled)

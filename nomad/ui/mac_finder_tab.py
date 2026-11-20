@@ -6,7 +6,6 @@ Also over SSH ticked, asks the ones that don't answer SNMP at their command line
 switches beyond the map; with no map, from a switch named to start at. Every crawl of the map and every live lookup
 is noted in the history (sightings.SightingLog).
 """
-import csv
 import datetime
 import html
 import ipaddress
@@ -31,7 +30,9 @@ from ..oui import format_mac, normalize_mac, vendor
 from ..snmp import SnmpClient
 from ..terminal.hostkeys import KnownHosts
 from ..terminal.sessions import AUTH_PASSWORD, SSH, Session, same_host
+from ..exporting import write_csv
 from .common import SortableTableItem, StoppableThread, read_only_table, release_thread, run_in_background, set_hint
+from .export_progress import error_text, run_export
 from .credential_dialogs import CredentialPicker
 from .host_menu import FIND_PORT, HostActions
 from .prompts import SecretDialog
@@ -1137,15 +1138,12 @@ class MacFinderTab(QWidget):
         if not path:
             return
         rows = self.visible_rows()
-        try:
-            with open(path, "w", newline="", encoding="utf-8") as file:
-                writer = csv.writer(file)
-                writer.writerow(COLUMNS)
-                writer.writerows(rows)
-        except OSError as error:
-            QMessageBox.critical(self, "Export Failed", f"Couldn't save {path}:\n\n{error}")
-            return
-        self.window.show_status(f"Exported {len(rows)} results to {path}.")
+        run_export(self, "Export MAC Finder Results",
+                   lambda progress: write_csv(path, rows, COLUMNS, progress, "utf-8"),
+                   lambda _: self.window.show_status(f"Exported {len(rows)} results to {path}."),
+                   lambda error: QMessageBox.critical(self, "Export Failed",
+                                                      f"Couldn't save {path}:\n\n{error_text(error)}"),
+                   lambda: self.window.show_status("Export cancelled: nothing was saved.", "info"))
 
     def can_locate(self):
         """Whether Locate Now has switches to ask: the open map's over SNMP, or with Also over SSH, its others or

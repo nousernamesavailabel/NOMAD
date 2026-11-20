@@ -15,6 +15,7 @@ from nomad.ipam.store import IpamStore  # noqa: E402
 from nomad.netmap import hardware  # noqa: E402
 from nomad.netmap.model import PHONE, Host  # noqa: E402
 from nomad.ui import assets_tab as assets_module  # noqa: E402
+from nomad.ui.export_progress import wait_for_exports  # noqa: E402
 from nomad.ui.asset_dialogs import AssetDialog, AssetImportDialog, ReadDetailsDialog  # noqa: E402
 from nomad.ui.assets_tab import COL_PROBLEMS, COL_SERIAL, COL_SLOT, COL_STATUS, AssetsTab  # noqa: E402
 from nomad.ui.ipam_history_dialog import HistoryDialog  # noqa: E402
@@ -202,6 +203,7 @@ def test_export(page, monkeypatch, tmp_path):
         path = str(tmp_path / name)
         monkeypatch.setattr(assets_module.QFileDialog, "getSaveFileName", lambda *args, **kwargs: (path, ""))
         tab.export()
+        assert wait_for_exports()
         assert os.path.exists(path) and "Exported 4 assets" in tab.status_label.text()
     text = open(tmp_path / "assets.csv", encoding="utf-8-sig").read()
     assert text.splitlines()[0].startswith("Hostname,Slot,Kind,Model") and "FOC2" in text

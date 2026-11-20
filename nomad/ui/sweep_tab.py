@@ -1,6 +1,5 @@
 """Sweep tab: find the hosts on a subnet, with their names, MAC addresses and vendors, then SSH, browse, ping,
 trace or port scan them, and compare them with IPAM (what's recorded, what's missing, what didn't answer)."""
-import csv
 import ipaddress
 import logging
 import os
@@ -19,7 +18,9 @@ from ..sweep import LARGE_SWEEP_HOSTS, SWEEP_PASSES, add_to_user_path, find_putt
 from ..ipam.store import parse_subnet
 from ..terminal.sessions import SSH
 from .host_menu import HostActions
+from ..exporting import write_csv
 from .common import ColumnFitter, SortableTableItem, StoppableThread, release_thread, set_hint, set_invalid
+from .export_progress import error_text, run_export
 from .ipam_compare import IpamComparison, finding_color
 from .theme import COLORS, accent_button
 
@@ -461,20 +462,18 @@ class SweepTab(QWidget):
         if not path:
             return
         by_address = {self.table.item(row, COL_ADDRESS).text(): row for row in range(self.table.rowCount())}
-        try:
-            with open(path, "w", newline="", encoding="utf-8") as file:
-                writer = csv.writer(file)
-                writer.writerow(["IP Address", "Response Time (ms)", "Host Name", "MAC Address", "Vendor", "IPAM"])
-                for address in self.addresses():
-                    row = by_address[address]
-                    rtt = self.table.item(row, COL_RTT).sort_key
-                    writer.writerow([address, "" if rtt == ARP_ONLY_SORT_KEY else rtt] +
-                                    [self.table.item(row, column).text()
-                                     for column in (COL_NAME, COL_MAC, COL_VENDOR, COL_IPAM)])
-        except OSError as error:
-            QMessageBox.critical(self, "Export Failed", f"Couldn't save {path}:\n\n{error}")
-            return
-        self.window.show_status(f"Exported {len(by_address)} hosts to {path}.")
+        rows = []  # Read from the table here, on the UI thread; written out on the export's own
+        for address in self.addresses():
+            row = by_address[address]
+            rtt = self.table.item(row, COL_RTT).sort_key
+            rows.append([address, "" if rtt == ARP_ONLY_SORT_KEY else rtt] +
+                        [self.table.item(row, column).text() for column in (COL_NAME, COL_MAC, COL_VENDOR, COL_IPAM)])
+        header = ["IP Address", "Response Time (ms)", "Host Name", "MAC Address", "Vendor", "IPAM"]
+        run_export(self, "Export Sweep Results", lambda progress: write_csv(path, rows, header, progress, "utf-8"),
+                   lambda _: self.window.show_status(f"Exported {len(rows)} hosts to {path}."),
+                   lambda error: QMessageBox.critical(self, "Export Failed",
+                                                      f"Couldn't save {path}:\n\n{error_text(error)}"),
+                   lambda: self.window.show_status("Export cancelled: nothing was saved.", "info"))
 
     def update_buttons(self):
         running = self.worker is not None

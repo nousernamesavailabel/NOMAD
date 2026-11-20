@@ -41,6 +41,7 @@ from ..snmpv3 import is_v3
 from ..terminal.credentials import CredentialError, protect, unprotect
 from .common import OneLineLabel, SortableTableItem, StoppableThread, add_submenu, drop_empty_submenus, \
     format_size, read_only_table, release_thread, set_hint
+from .export_progress import error_text, run_export
 from .host_menu import FIND_PORT, HostActions
 from .map_ipam_dialog import RecordDialog
 from .integration import IPAM, PLACEMENT, VLAN, MapNetworkDialog, TribeNetworkDialog, hub, split_key
@@ -4488,12 +4489,12 @@ class NetworkMapTab(QWidget):
         path = self.export_path(f"Export {which.title()}", f" {which}.csv", "CSV files (*.csv)")
         if not path:
             return
-        try:
-            export.write_csv(path, columns, rows(self.network_map))
-        except OSError as error:
-            QMessageBox.critical(self, "Export", f"Couldn't save the file:\n\n{error}")
-            return
-        self.window.show_status(f"Saved {path}.")
+        table = list(rows(self.network_map))  # Read here: the map belongs to the UI thread
+        run_export(self, f"Export {which.title()}", lambda progress: export.write_csv(path, columns, table, progress),
+                   lambda _: self.window.show_status(f"Saved {path}."),
+                   lambda error: QMessageBox.critical(self, "Export",
+                                                      f"Couldn't save the file:\n\n{error_text(error)}"),
+                   lambda: self.window.show_status("Export cancelled: nothing was saved.", "info"))
 
     def update_buttons(self):
         running = self.worker is not None

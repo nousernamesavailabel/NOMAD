@@ -83,7 +83,7 @@ The import button reads your addressing workbook (`.xlsx`, a network per page, o
 
 ### Export
 
-**Export to Workbook** writes networks back in the same layout, and it imports back unchanged. **Export to CSV** is there too.
+**Export to Workbook** writes networks back in the same layout, and it imports back unchanged. **Export to CSV** is there too. A large export shows a progress bar. If you click **Cancel**, nothing is saved, and a file that was already there is left as it was.
 
 ### Compare
 
