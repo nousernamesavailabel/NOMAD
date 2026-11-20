@@ -7,6 +7,8 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 ## [2.5.0] - 2026-11-19
 
 - **New:** exports show a progress bar with **Cancel**: IPAM's CSV and workbook exports, Assets, VLANs, MAC Finder, SNMP and Sweep results, the Network Map's CSV exports, and VPN **Every Router to a Folder**. A cancelled export leaves no half-written file behind.
+- **New:** with **Serial** picked for quick connect on the Terminal page, pick a COM port and a speed from lists instead of typing COM3. A cable plugged in later shows up the next time you open the list.
+- **Fixed:** the Editor logs in with a device's saved SSH session without asking for a user name and password first. If the session has no saved password, it asks for that password once. You can also type a saved session's name in **Pull**.
 
 ## [2.4.4] - 2026-11-19
 

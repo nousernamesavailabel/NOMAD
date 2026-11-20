@@ -1,6 +1,7 @@
 """The saved-session sidebar: quick connect, a filter, the session tree (folders, Recent), editing, importing and the
 master password button. Shared by the Terminal page (every protocol) and the SCP page (SSH only), which use the same
 session store."""
+import re
 import time
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -10,12 +11,12 @@ from PyQt5.QtWidgets import QAbstractItemView, QComboBox, QFileDialog, QHBoxLayo
 
 from ..terminal.securecrt import IMPORT_FOLDER as SECURECRT_FOLDER, SecureCrtError, WrongPassphrase, \
     import_securecrt, read_securecrt_export
-from ..terminal.sessions import CREDENTIAL_PROTOCOLS, PROTOCOLS, RDP, SSH, Session, import_putty, normalize_folder, \
-    parse_quick_connect
+from ..terminal.sessions import BAUD_RATES, CREDENTIAL_PROTOCOLS, PROTOCOLS, RDP, SERIAL, SSH, Session, \
+    import_putty, normalize_folder, parse_quick_connect
 from .common import set_hint
 from .folder_picker import FolderPickerDialog
 from .credential_dialogs import OWN_LOGIN, CredentialsDialog
-from .session_dialog import SessionDialog
+from .session_dialog import SerialPortCombo, SessionDialog
 from .vault_dialog import SecurityDialog, ensure_unlocked
 from .theme import COLORS
 
@@ -141,8 +142,22 @@ class SessionManager(QWidget):
                                     "admin@10.0.0.1 or admin@host:2222, then Enter")
         if self.launch_only:
             self.quick_input.setToolTip("Computer name, host:3389 or [IPv6]:3389, then Enter")
+        # With Serial picked, the COM ports on this computer and a speed, in place of the text box
+        self.quick_serial = SerialPortCombo()
+        self.quick_serial.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.quick_serial.setMinimumContentsLength(6)
+        self.quick_serial.setToolTip("COM port to open (the list looks again each time it's opened), then Enter")
+        self.quick_baud = QComboBox()
+        self.quick_baud.setEditable(True)
+        self.quick_baud.addItems([str(rate) for rate in BAUD_RATES])
+        self.quick_baud.setCurrentText("9600")
+        self.quick_baud.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.quick_baud.setMinimumContentsLength(6)
+        self.quick_baud.setToolTip("Speed (baud). Most switch and router consoles use 9600.")
         quick_row.addWidget(self.quick_protocol)
         quick_row.addWidget(self.quick_input, 1)
+        quick_row.addWidget(self.quick_serial, 1)
+        quick_row.addWidget(self.quick_baud)
         manager_layout.addLayout(quick_row)
         self.quick_status = QLabel()
         self.quick_status.setWordWrap(True)
@@ -188,6 +203,11 @@ class SessionManager(QWidget):
 
         self.quick_input.returnPressed.connect(self.quick_connect)
         self.quick_input.textChanged.connect(lambda: self.quick_status.setVisible(False))
+        self.quick_serial.lineEdit().returnPressed.connect(self.quick_connect)
+        self.quick_serial.currentTextChanged.connect(lambda: self.quick_status.setVisible(False))
+        self.quick_baud.lineEdit().returnPressed.connect(self.quick_connect)
+        self.quick_protocol.currentTextChanged.connect(self.update_quick_row)
+        self.update_quick_row()
         self.filter_input.textChanged.connect(lambda: self.fill_tree())
         self.tree.itemActivated.connect(self.on_item_activated)
         self.tree.customContextMenuRequested.connect(self.show_tree_menu)
@@ -205,6 +225,33 @@ class SessionManager(QWidget):
         delete_shortcut.activated.connect(self.delete_selected)
         self.update_protection()
         self.fill_tree()
+
+    def update_quick_row(self):
+        """Serial quick connect picks a COM port and speed from lists; everything else is typed."""
+        serial = self.quick_protocol.currentText() == SERIAL
+        self.quick_input.setVisible(not serial)
+        self.quick_serial.setVisible(serial)
+        self.quick_baud.setVisible(serial)
+        self.quick_status.setVisible(False)
+        if serial:
+            self.quick_serial.fill()  # A cable may have been plugged in since
+
+    def quick_text(self):
+        """What quick connect connects to: the typed text, or "COM3:9600" from the serial lists. Raises ValueError
+        with a message for the user."""
+        if self.quick_protocol.currentText() != SERIAL:
+            return self.quick_input.text()
+        text = self.quick_serial.currentText().strip()
+        if re.fullmatch(r"COM\d+[:\s]+\d+", text, re.IGNORECASE):
+            return text  # Typed with its own speed ("COM3:115200")
+        port = self.quick_serial.port()
+        if not re.fullmatch(r"COM\d+", port, re.IGNORECASE):
+            raise ValueError("Pick a COM port, or type one such as COM3." if not port else
+                             f"'{port}' isn't a COM port. Type one such as COM3.")
+        baud = self.quick_baud.currentText().strip() or "9600"
+        if not baud.isdigit() or int(baud) <= 0:
+            raise ValueError(f"'{baud}' isn't a speed. Pick one such as 9600.")
+        return f"{port}:{baud}"
 
     def shows_protocol(self, protocol):
         return self.protocols is None or protocol in self.protocols
@@ -227,12 +274,20 @@ class SessionManager(QWidget):
         prefix = self.settings_prefix
         settings.setValue(f"{prefix}/quick", self.quick_input.text())
         settings.setValue(f"{prefix}/quick_protocol", self.quick_protocol.currentText())
+        settings.setValue(f"{prefix}/quick_serial", self.quick_serial.port())
+        settings.setValue(f"{prefix}/quick_baud", self.quick_baud.currentText())
         settings.setValue(f"{prefix}/collapsed", "\n".join(sorted(folder for folder in self.collapsed if folder)))
 
     def restore_settings(self, settings):
         prefix = self.settings_prefix
         self.quick_input.setText(settings.value(f"{prefix}/quick", "", str))
+        self.quick_baud.setCurrentText(settings.value(f"{prefix}/quick_baud", "9600", str) or "9600")
+        last_port = settings.value(f"{prefix}/quick_serial", "", str)
         self.quick_protocol.setCurrentText(settings.value(f"{prefix}/quick_protocol", SSH, str))
+        if last_port and self.quick_serial.isVisibleTo(self):
+            self.quick_serial.fill(last_port)  # The last port used, if it's still there (or as typed)
+        elif last_port:
+            self.quick_serial.setEditText(last_port)
         self.collapsed = {folder for folder in settings.value(f"{prefix}/collapsed", "", str).split("\n") if folder}
         self.fill_tree()
 
@@ -279,11 +334,15 @@ class SessionManager(QWidget):
 
     def quick_connect_dialog(self, into=None):
         examples = "admin@10.0.0.1, telnet 10.0.0.5, COM3:115200" if self.quick_protocol.count() > 1 else             "admin@10.0.0.1, admin@host:2222"
-        text, ok = QInputDialog.getText(into or self, "Quick Connect", f"Connect to ({examples}):",
-                                        text=self.quick_input.text())
+        try:
+            current = self.quick_text()
+        except ValueError:
+            current = ""
+        text, ok = QInputDialog.getText(into or self, "Quick Connect", f"Connect to ({examples}):", text=current)
         if ok and text.strip():
-            self.quick_input.setText(text.strip())
-            self.quick_connect(into)
+            if self.quick_protocol.currentText() != SERIAL:
+                self.quick_input.setText(text.strip())
+            self.quick_connect(into, text.strip())
 
     def lock_now(self):
         self.store.vault.lock()
@@ -355,9 +414,11 @@ class SessionManager(QWidget):
         if changed:
             self.fill_tree()
 
-    def quick_connect(self, into=None):
+    def quick_connect(self, into=None, text=None):
+        """Connect to text, or to what the quick connect bar says."""
         try:
-            session = parse_quick_connect(self.quick_input.text(), self.quick_protocol.currentText())
+            session = parse_quick_connect(self.quick_text() if text is None else text,
+                                          self.quick_protocol.currentText())
             if not self.shows(session):
                 raise ValueError(f"This page only opens {' and '.join(sorted(self.protocols))} sessions.")
         except ValueError as error:

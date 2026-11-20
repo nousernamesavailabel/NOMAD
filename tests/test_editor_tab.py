@@ -215,7 +215,9 @@ def test_send_current_types_lines(page, app, monkeypatch):
     monkeypatch.setattr(editor_tab.SendDialog, "exec_", lambda self: (self.pull_after.setChecked(False),
                                                                      self.revert.setChecked(False),
                                                                      editor_tab.SendDialog.Accepted)[2])
-    monkeypatch.setattr(page.login_row, "logins", lambda status=None: (object(), ""))
+    asked = []
+    monkeypatch.setattr(page.login_row, "logins", lambda status=None, devices=None: (asked.append(devices),
+                                                                                     (object(), ""))[1])
     monkeypatch.setattr(page.login_row, "pusher_maker", lambda logins: (lambda should_stop: FakePusher()))
     FakePusher.sent.clear()
     page.docs.setCurrentWidget(doc)
@@ -226,6 +228,7 @@ def test_send_current_types_lines(page, app, monkeypatch):
     assert text == "configure terminal\ninterface Gi0/1\n description B\nexit\n!\nend"
     report = page.current_document()
     assert report.title == "Sent to 10.0.0.1" and "Every line was taken" in report.editor.text()
+    assert asked == [[("10.0.0.1", [])]]  # The device is named, so its saved session is used without asking
 
 
 def test_preview_diff_is_approximate_after(page, app):
@@ -270,6 +273,58 @@ def test_pull_dialog_lists_devices_to_pick(page, app):
     assert (typed["id"], typed["address"]) == ("10.5.5.5", "10.5.5.5")
     dialog.device.setEditText("")
     assert dialog.target(page.target_for_address) is None
+
+
+def test_a_saved_session_name_typed_pulls_its_host(page):
+    from nomad.terminal.sessions import Session
+    page.window.session_store.sessions.append(Session("Core SW", host="10.0.0.9"))
+    page.window.session_store.sessions.append(Session("Edge", host="10.0.0.1"))  # On the map as R1
+    target = page.target_for_address("core sw")
+    assert (target["address"], target["names"]) == ("10.0.0.9", ["Core SW"])
+    target = page.target_for_address("Edge")
+    assert (target["name"], target["address"], target["names"][-1]) == ("R1", "10.0.0.1", "Edge")
+
+
+def test_editor_logs_in_with_the_devices_saved_session_without_asking(page, monkeypatch):
+    from nomad.terminal.sessions import Session
+    from nomad.ui import ssh_push
+    store = page.window.session_store
+    store.put(Session("R1", host="10.0.0.1", username="admin", saved_password=store.vault.protect("pw")))
+    monkeypatch.setattr(page.login_row, "ask_login", lambda: pytest.fail("asked for a login"))
+    monkeypatch.setattr(ssh_push, "ensure_unlocked", lambda *args: True)
+    logins, _ = page.login_row.logins(None, [("10.0.0.1", ["R1"])])
+    session, label = logins.login_for("10.0.0.1", ["R1"])
+    assert label == "saved session R1" and store.vault.reveal(session.saved_password) == "pw"
+    assert logins.login_for("10.0.0.2") == (None, "")  # Nothing typed for the rest
+
+
+def test_a_saved_session_without_a_password_has_it_asked_once(page, monkeypatch):
+    from nomad.terminal.sessions import Session
+    from nomad.ui import ssh_push
+    page.window.session_store.put(Session("R1", host="10.0.0.1", username="admin"))
+    monkeypatch.setattr(page.login_row, "ask_login", lambda: pytest.fail("asked for a login"))
+    prompts = []
+
+    class Secret:
+        Accepted = 1
+
+        def __init__(self, parent, title, prompt, can_save):
+            prompts.append(prompt)
+            self.field = type("Field", (), {"text": lambda self: "typed"})()
+
+        def exec_(self):
+            return ssh_push.QDialog.Accepted
+    monkeypatch.setattr(ssh_push, "SecretDialog", Secret)
+    logins, _ = page.login_row.logins(None, [("10.0.0.1", [])])
+    assert logins.password == "typed" and prompts == ["Password for admin on R1 (its saved session has no saved "
+                                                      "password):"]
+
+
+def test_a_device_without_a_saved_session_still_asks(page, monkeypatch):
+    asked = []
+    monkeypatch.setattr(page.login_row.picker, "credential", lambda: None)
+    monkeypatch.setattr(page.login_row, "ask_login", lambda: asked.append(1))
+    assert page.login_row.logins(None, [("10.0.0.7", [])]) is None and asked == [1]
 
 
 def test_next_backup_column_and_back_up_now(page, app):

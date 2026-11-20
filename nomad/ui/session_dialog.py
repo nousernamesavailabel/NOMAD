@@ -13,6 +13,46 @@ from .credential_dialogs import AUTH_CHOICES, SAVED_PLACEHOLDER, CredentialPicke
 TERMINAL_TYPES = ["xterm-256color", "xterm", "vt100", "vt220", "linux"]
 
 
+class SerialPortCombo(QComboBox):
+    """The COM ports on this computer, with their descriptions ("COM3  (USB Serial Port)"). Editable, so a port that
+    isn't plugged in yet can still be typed, and it looks again each time it's opened (after plugging in a cable)."""
+
+    def __init__(self, current="", parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.fill(current)
+
+    def fill(self, current=None):
+        current = self.port() if current is None else current
+        self.clear()
+        try:
+            ports = serial_ports()
+        except Exception:  # Listing ports is a convenience; the name can still be typed
+            ports = []
+        for device, description in ports:
+            self.addItem(f"{device}  ({description})" if description and description != device else device, device)
+        self.lineEdit().setPlaceholderText("COM port" if ports else "No COM ports found; type one")
+        index = self.findData(current) if current else (0 if ports else -1)
+        if index >= 0:
+            self.setCurrentIndex(index)
+        else:
+            self.setEditText(current or "")
+
+    def showPopup(self):
+        self.fill()
+        self.view().setMinimumWidth(self.view().sizeHintForColumn(0) + 24)  # Whole descriptions, even when narrow
+        super().showPopup()
+
+    def port(self):
+        """The chosen port's name (COM3), or what was typed."""
+        text = self.currentText().strip()
+        index = self.findText(text)
+        if index >= 0 and self.itemData(index):
+            return self.itemData(index)
+        return text.split()[0] if text else ""
+
+
 class SessionDialog(QDialog):
     def __init__(self, parent, session, folders, title="Session", store=None):
         super().__init__(parent)
@@ -248,8 +288,7 @@ class SessionDialog(QDialog):
         form = QFormLayout(page)
         form.setContentsMargins(0, 0, 0, 0)
         session = self.session
-        self.serial_combo = QComboBox()
-        self.serial_combo.setEditable(True)
+        self.serial_combo = SerialPortCombo(session.serial_port)
         refresh = QPushButton("Refresh")
         refresh.setToolTip("Look for COM ports again (after plugging in a USB console cable).")
         serial_row = QHBoxLayout()
@@ -290,31 +329,13 @@ class SessionDialog(QDialog):
         hint.setWordWrap(True)
         form.addRow(hint)
         refresh.clicked.connect(self.fill_serial_ports)
-        self.fill_serial_ports()
         return page
 
     def fill_serial_ports(self):
-        current = self.serial_combo.currentText() or self.session.serial_port
-        self.serial_combo.clear()
-        try:
-            ports = serial_ports()
-        except Exception:  # Listing ports is a convenience; the name can still be typed
-            ports = []
-        for device, description in ports:
-            self.serial_combo.addItem(f"{device}  ({description})" if description and description != device
-                                      else device, device)
-        index = self.serial_combo.findData(current)
-        if index >= 0:
-            self.serial_combo.setCurrentIndex(index)
-        else:
-            self.serial_combo.setEditText(current)
+        self.serial_combo.fill()
 
     def serial_port(self):
-        text = self.serial_combo.currentText().strip()
-        index = self.serial_combo.findText(text)
-        if index >= 0 and self.serial_combo.itemData(index):
-            return self.serial_combo.itemData(index)
-        return text.split()[0] if text else ""
+        return self.serial_combo.port()
 
     def on_protocol_changed(self, protocol):
         self.pages.setCurrentIndex(1 if protocol == SERIAL else 0)

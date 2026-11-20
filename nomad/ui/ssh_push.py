@@ -133,8 +133,10 @@ class LoginRow(QWidget):
     def on_changed(self, *_):
         self.changed.emit()
 
-    def logins(self, status_label=None):
-        """(macssh.SshLogins, enable secret) for the devices, asking what's needed now; None if cancelled."""
+    def logins(self, status_label=None, devices=None):
+        """(macssh.SshLogins, enable secret) for the devices, asking what's needed now; None if cancelled.
+        devices: the (address, names) about to be logged in to, when known; if each has a saved SSH session, those
+        are used and nothing is asked for the rest."""
         store = self.sessions
         if store is None:
             if status_label is not None:
@@ -142,6 +144,10 @@ class LoginRow(QWidget):
                          "error")
             return None
         sessions = saved_ssh_sessions(store)
+        if devices:
+            matched = [macssh.SshLogins(sessions).login_for(address, names)[0] for address, names in devices]
+            if all(matched):
+                return self.session_logins(store, matched)
         credential = self.picker.credential() if self.picker is not None else None
         password = None
         if credential is None:
@@ -163,6 +169,24 @@ class LoginRow(QWidget):
         if secrets and not ensure_unlocked(self, store, f"{self.purpose} logs in to devices with saved passwords."):
             return None
         return SavedLogins(store, fallback, password, label), self.enable_input.text()
+
+    def session_logins(self, store, matched):
+        """Logins for devices that all have a saved SSH session: a session with no saved password has it asked for
+        once (as the terminal would)."""
+        password = None
+        needs = [session for session in matched if session.auth == AUTH_PASSWORD and not session.saved_password]
+        if needs:
+            session = needs[0]
+            who = f"{session.username} on {session.name}" if session.username else session.name
+            dialog = SecretDialog(self, "Password", f"Password for {who} (its saved session has no saved "
+                                                    f"password):", False)
+            if dialog.exec_() != QDialog.Accepted:
+                return None
+            password = dialog.field.text()
+        if any(session.saved_password or session.saved_passphrase for session in matched) and \
+                not ensure_unlocked(self, store, f"{self.purpose} logs in to devices with saved passwords."):
+            return None
+        return SavedLogins(store, None, password), self.enable_input.text()
 
     def ask_login(self):
         dialog = QDialog(self)

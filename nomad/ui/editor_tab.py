@@ -916,12 +916,12 @@ class EditorTab(QWidget):
                             config_text.IOS, len(lines))
         if dialog.exec_() != SendDialog.Accepted:
             return
-        logins = self.login_row.logins(self.status_label)
+        address = dialog.address.text().strip()
+        names = list(context.get("names") or [])
+        logins = self.login_row.logins(self.status_label, [(address, names)])
         if logins is None:
             return
         make = self.login_row.pusher_maker(logins)
-        address = dialog.address.text().strip()
-        names = list(context.get("names") or [])
         minutes = dialog.minutes.value() if dialog.revert.isChecked() else 0
         save, pull_after = dialog.save.isChecked(), dialog.pull_after.isChecked()
         target = self.target_of(context["device_id"]) if context.get("device_id") else \
@@ -1005,17 +1005,33 @@ class EditorTab(QWidget):
         return sorted(found.values(), key=lambda target: (target["name"].lower(), target["address"]))
 
     def target_for_address(self, address):
-        """What to pull for an address typed: the map device with it (or the archive's), else just the address."""
+        """What to pull for an address or name typed: the map device with it (or the archive's), else the saved SSH
+        session named that (its host), else just the address."""
+        found = self.known_target(address)
+        if found is not None:
+            return found
+        from ..terminal.sessions import SSH
+        store = getattr(self.window, "session_store", None)
+        for session in (store.sessions if store is not None else ()):
+            host = (session.host or "").strip()
+            if session.protocol == SSH and host and (session.name or "").strip().lower() == address.lower():
+                target = self.known_target(host) or {"id": host.lower(), "name": session.name, "address": host,
+                                                     "names": [], "platform": ""}
+                target["names"] = list(dict.fromkeys([*(target.get("names") or []), session.name]))
+                return target
+        return {"id": address.lower(), "name": address, "address": address, "names": [], "platform": ""}
+
+    def known_target(self, address):
+        """The map device with this address or name, or the archive's device with this id; None if neither."""
         network_map = getattr(self.window.netmap_tab, "network_map", None) if hasattr(self.window, "netmap_tab") \
             else None
         if network_map is not None:
             for device in network_map.devices.values():
                 if device.mgmt_ip and (device.owns(address) or device.name.lower() == address.lower()):
                     return self.target_for_device(device)
-        device_id = address.lower()
-        if self.device_row(device_id) is not None:
-            return self.target_of(device_id)
-        return {"id": device_id, "name": address, "address": address, "names": [], "platform": ""}
+        if self.device_row(address.lower()) is not None:
+            return self.target_of(address.lower())
+        return None
 
     @staticmethod
     def target_for_device(device):
@@ -1049,7 +1065,7 @@ class EditorTab(QWidget):
         before (last), with its startup-config (startup), or with a text (with: a standard is checked instead)."""
         if self.configs is None:
             return
-        logins = self.login_row.logins(self.status_label)
+        logins = self.login_row.logins(self.status_label, [(target["address"], list(target.get("names") or ()))])
         if logins is None:
             return
         make = self.login_row.pusher_maker(logins)

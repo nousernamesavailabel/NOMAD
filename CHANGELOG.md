@@ -12,6 +12,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 - **Progress bar for exports.** Exports now write their file in the background behind a progress dialog with a **Cancel** button. The dialog appears only when an export takes longer than a moment. This covers IPAM's **Export to CSV**, **Export to Workbook** and **Export All Networks to Workbook**; **Export Assets** (Excel or CSV); **Export VLANs**; the MAC Finder, SNMP and Sweep results exports; the Network Map's **Export Devices**, **Export Links** and **Export Hosts**; and the VPNs page's **Export > Every Router to a Folder**. Workbooks show each page as it's written, then "Saving the workbook...". An export is written to a `.part` file beside the target and put in place only once it's complete. A cancelled or failed export leaves no half-written file, and a file that was already there stays as it was. New `nomad/exporting.py` (Progress, `saving()`, `write_csv()`) and `nomad/ui/export_progress.py` (`run_export()`); IPAM exports read each network once with `NetworkCopy` so the writing can run off the UI thread.
 
+- **Terminal: quick connect lists the COM ports.** With **Serial** picked beside Quick connect, the text box becomes a list of this computer's COM ports with their descriptions ("COM3  (USB Serial Port)") and a speed list (9600 by default). Pick a port and press Enter. The list looks again each time it's opened, so a USB console cable plugged in afterward shows up. A port can still be typed, with or without a speed ("COM3:115200"). The last port and speed are remembered. The session editor's port list uses the same list and also looks again when opened.
+
+### Fixed
+
+- **Editor: pulling or sending to a device with a saved SSH session asked for a user name and password anyway.** When **Log in with** was set to "A user name and password asked for", the Editor asked for one before it looked at the device. **Pull**, **Pull Running vs Startup**, **Pull and Compare with Tab** and **Send** now check the device first. If it has a saved SSH session, the Editor logs in with that session and asks nothing more. A saved session with no saved password asks for its password once, the way the Terminal would. Typing a saved session's name in the Pull dialog now pulls that session's host. Devices without a saved session still use **Log in with**. `LoginRow.logins()` takes the devices about to be logged in to (`devices=[(address, names)]`); other pages don't pass them yet, so they behave as before.
+
 ## [2.4.4] - 2026-11-19
 
 ### Fixed

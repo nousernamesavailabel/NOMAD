@@ -22,6 +22,7 @@ Everything for talking to devices and servers, sharing the same saved sessions a
 
 - **Sessions** are saved in folders. Import them from PuTTY or a SecureCRT export.
 - **Quick connect** takes `admin@10.0.0.1`, `telnet 10.0.0.5`, `raw 10.0.0.9:9100` or `COM3:115200`.
+- With **Serial** picked beside quick connect, the text box becomes a list of this computer's COM ports and a speed list. Pick a port and press Enter. The list looks for ports again each time you open it, so a USB console cable plugged in afterward shows up.
 - **Recent** at the top of the list keeps your last 10 connections.
 - **Layout** tiles sessions side by side, stacked, or in a 2 × 2 or 3 × 2 grid. Drag tabs between panes and windows.
 - **Pop out** any tab into its own window (right-click the tab).
