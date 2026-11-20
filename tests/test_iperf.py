@@ -81,13 +81,23 @@ def test_formatting():
 ])
 def test_loopback(server, params):
     port, log = server
-    intervals = []
-    result = IperfClient("127.0.0.1", port, params, on_interval=intervals.append).run()
-    assert result.sender_bytes > 0 and result.receiver_bytes > 0
-    assert intervals and intervals[-1].end == pytest.approx(1.0, abs=0.2)
-    if params.udp:
+    target = params.bitrate * params.parallel
+    # Client and server share this process's GIL, so a busy machine can starve the paced UDP
+    # sender and undershoot the rate for one run. A pacing bug undershoots every time, so a
+    # slow run gets two more tries; overshooting (no pacing) fails at once.
+    for attempt in range(3):
+        intervals = []
+        result = IperfClient("127.0.0.1", port, params, on_interval=intervals.append).run()
+        assert result.sender_bytes > 0 and result.receiver_bytes > 0
+        assert intervals and intervals[-1].end == pytest.approx(1.0, abs=0.2)
+        if not params.udp:
+            break
         assert result.packets > 0
-        assert result.receiver_bps == pytest.approx(params.bitrate * params.parallel, rel=0.3)
+        assert result.receiver_bps <= target * 1.3
+        if result.receiver_bps >= target * 0.7:
+            break
+    else:
+        pytest.fail(f"UDP rate stayed below {target} bits/s in 3 runs (last {result.receiver_bps:.0f})")
     assert any(line.startswith("Test from 127.0.0.1") for line in log)
 
 
