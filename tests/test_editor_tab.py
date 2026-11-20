@@ -364,3 +364,66 @@ def test_recent_backups_from_every_computer(page, app):
     assert table.rowCount() == 2
     assert [table.item(0, column).text() for column in (1, 2, 3)] == ["R1", "PC2 (bob)", "Couldn't: timed out"]
     assert [table.item(1, column).text() for column in (2, 3)] == ["CORE service", "first copy"]
+
+
+class FakeBackupThread:
+    def __init__(self, *args):
+        self.stepped = self.failed = type("Signal", (), {"connect": lambda self, slot: None})()
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def wait(self, ms):
+        return True
+
+
+def test_ticking_backups_with_the_master_password_locked_asks_for_it(page, monkeypatch):
+    page.update_local_scope()
+    store = page.window.session_store
+    monkeypatch.setattr(type(store.vault), "enabled", property(lambda self: True))
+    unlocked = []
+    monkeypatch.setattr(type(store.vault), "unlocked", property(lambda self: bool(unlocked)))
+    monkeypatch.setattr(editor_tab, "BackupThread", FakeBackupThread)
+    asked = []
+
+    def unlock(parent, store, reason=""):
+        asked.append(reason)
+        unlocked.append(1)
+        return True
+    monkeypatch.setattr(editor_tab, "ensure_unlocked", unlock)
+    page.backups_panel.run_check.setChecked(True)
+    assert len(asked) == 1 and "master password" in asked[0]
+    assert page.backups_panel.run_check.isChecked() and page.backup_thread is not None
+    assert "Running" in page.backups_panel.status.text()
+
+
+def test_cancelling_the_master_password_leaves_a_link_to_unlock(page, monkeypatch):
+    page.update_local_scope()
+    store = page.window.session_store
+    monkeypatch.setattr(type(store.vault), "enabled", property(lambda self: True))
+    monkeypatch.setattr(type(store.vault), "unlocked", property(lambda self: False))
+    asked = []
+    monkeypatch.setattr(editor_tab, "ensure_unlocked", lambda *args: asked.append(1) and False)
+    page.backups_panel.run_check.setChecked(True)
+    assert asked == [1] and not page.backups_panel.run_check.isChecked() and page.backup_thread is None
+    assert 'href="unlock"' in page.backups_panel.status.text()
+    page.backups_link("unlock")  # The link asks again
+    assert asked == [1, 1]
+
+
+def test_backups_at_start_with_the_master_password_locked_wait_without_a_dialog(page, monkeypatch):
+    from PyQt5.QtCore import QSettings
+    page.update_local_scope()
+    store = page.window.session_store
+    monkeypatch.setattr(type(store.vault), "enabled", property(lambda self: True))
+    monkeypatch.setattr(type(store.vault), "unlocked", property(lambda self: False))
+    monkeypatch.setattr(editor_tab, "ensure_unlocked", lambda *args: pytest.fail("asked while starting"))
+    settings = QSettings(str(page.window.session_store.path) + ".ini", QSettings.IniFormat)
+    settings.setValue("editor/run_backups", True)
+    page.restore_settings(settings)
+    assert not page.backups_panel.run_check.isChecked() and 'href="unlock"' in page.backups_panel.status.text()
+    page.save_settings(settings)
+    assert settings.value("editor/run_backups", False, bool)  # Still on for next time

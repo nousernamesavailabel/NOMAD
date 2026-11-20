@@ -14,6 +14,10 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 - **Terminal: quick connect lists the COM ports.** With **Serial** picked beside Quick connect, the text box becomes a list of this computer's COM ports with their descriptions ("COM3  (USB Serial Port)") and a speed list (9600 by default). Pick a port and press Enter. The list looks again each time it's opened, so a USB console cable plugged in afterward shows up. A port can still be typed, with or without a speed ("COM3:115200"). The last port and speed are remembered. The session editor's port list uses the same list and also looks again when opened.
 
+### Changed
+
+- **Editor: ticking "Run scheduled config backups on this computer" asks for the master password when it's locked.** Before, it showed an error and unticked the box. Now NOMAD asks for the master password and starts the backups once it's entered. If you cancel, the box stays unticked and the message has an **Unlock and Start Backups...** link that asks again. When NOMAD starts with backups turned on and the master password locked, it doesn't open a dialog at startup. It shows the same link instead and keeps backups turned on for the next start. A tribe key change, or a fallback to this computer's archive, restarts backups the same quiet way.
+
 ### Fixed
 
 - **Editor: pulling or sending to a device with a saved SSH session asked for a user name and password anyway.** When **Log in with** was set to "A user name and password asked for", the Editor asked for one before it looked at the device. **Pull**, **Pull Running vs Startup**, **Pull and Compare with Tab** and **Send** now check the device first. If it has a saved SSH session, the Editor logs in with that session and asks nothing more. A saved session with no saved password asks for its password once, the way the Terminal would. Typing a saved session's name in the Pull dialog now pulls that session's host. Devices without a saved session still use **Log in with**. `LoginRow.logins()` takes the devices about to be logged in to (`devices=[(address, names)]`); other pages don't pass them yet, so they behave as before.

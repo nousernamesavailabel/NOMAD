@@ -26,6 +26,7 @@ from .editor_panels import ArchivePanel, BackupThread, BackupsPanel, ChangesPane
     PullDialog, SendDialog, StandardsPanel, when_text
 from .remote_editor import decode, encode, looks_binary
 from .ssh_push import LoginRow
+from .vault_dialog import ensure_unlocked
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +81,8 @@ class EditorTab(QWidget):
         self.window = window
         self.configs = None
         self.sync_thread = self.backup_thread = None
+        self.quiet_start = False  # Starting backups on its own (not the box ticked): no master password dialog
+        self.backups_waiting = False  # Ticked at start but the master password was locked: kept for next time
         self.archive_note = ""
         self.jobs = {}
         self.job_ids = itertools.count(1)
@@ -190,6 +193,8 @@ class EditorTab(QWidget):
         self.standards_panel.check_button.clicked.connect(self.check_dialog)
         self.standards_panel.open_result.connect(self.open_result)
         self.backups_panel.run_toggled.connect(self.set_backups_running)
+        self.backups_panel.status.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.backups_panel.status.linkActivated.connect(self.backups_link)
         self.backups_panel.interval_applied.connect(self.apply_interval)
         self.backups_panel.refresh_button.clicked.connect(self.refresh_runners)
         self.backups_panel.due_all_button.clicked.connect(self.back_up_everything_now)
@@ -289,7 +294,7 @@ class EditorTab(QWidget):
         running = self.backups_panel.run_check.isChecked()
         self.setup_archive()
         if running:
-            self.set_backups_running(True)
+            self.restart_backups_quietly()
 
     def on_synced(self, changed):
         self.last_sync = time.time()
@@ -308,7 +313,7 @@ class EditorTab(QWidget):
             self.use_local_archive("The tribe server is older than this NOMAD and keeps no config archive, so it's "
                                    "kept on this computer until the server is updated.")
             if running:
-                self.set_backups_running(True)
+                self.restart_backups_quietly()
             self.refresh_views()
             return
         waiting = self.configs.waiting() if hasattr(self.configs, "waiting") else 0
@@ -1318,19 +1323,25 @@ class EditorTab(QWidget):
             self.backup_thread = None
         if not on:
             if not keep_setting:
+                self.backups_waiting = False
                 self.backups_panel.status.setText("Not running on this computer.")
             return
         if self.configs is None:
             return
         logins = self.login_row.quiet_logins()
+        if logins is None and not self.quiet_start and self.unlock_for_backups():
+            logins = self.login_row.quiet_logins()
         if logins is None:
-            set_hint(self.backups_panel.status, "Backups need the saved passwords unlocked (the vault), and a login "
-                                                "with a saved password below for devices without a saved session.",
-                     "error")
+            # Master password still locked: the link asks for it. Started on its own (NOMAD starting), the setting is
+            # kept for next time; ticked by hand and Cancelled, it isn't newly kept
+            self.backups_waiting = self.quiet_start or self.backups_waiting
+            set_hint(self.backups_panel.status, "Backups need the master password unlocked on this computer. "
+                                                "<a href=\"unlock\">Unlock and Start Backups...</a>", "error")
             self.backups_panel.run_check.blockSignals(True)
             self.backups_panel.run_check.setChecked(False)
             self.backups_panel.run_check.blockSignals(False)
             return
+        self.backups_waiting = False
         make = self.login_row.pusher_maker(logins)
         from ..configs import runner
         thread_ref = {}
@@ -1346,6 +1357,29 @@ class EditorTab(QWidget):
         self.backup_thread.failed.connect(self.backups_failed)
         self.backup_thread.start()
         set_hint(self.backups_panel.status, "Running: devices due are backed up a few at a time.", "success")
+
+    def restart_backups_quietly(self):
+        """Start backups with nothing asked (NOMAD starting, the archive changing): a locked master password leaves
+        the link that unlocks it instead of a dialog."""
+        self.quiet_start = True
+        try:
+            self.backups_panel.run_check.blockSignals(True)
+            self.backups_panel.run_check.setChecked(True)
+            self.backups_panel.run_check.blockSignals(False)
+            self.set_backups_running(True)
+        finally:
+            self.quiet_start = False
+
+    def unlock_for_backups(self):
+        """Ask for the master password so backups can use saved passwords. True once unlocked."""
+        store = self.login_row.sessions
+        if store is None or not store.vault.enabled:
+            return False
+        return ensure_unlocked(self, store, "Scheduled backups log in to devices with saved passwords, so the master "
+                                            "password must be unlocked on this computer.")
+
+    def backups_link(self, _link):
+        self.backups_panel.run_check.setChecked(True)  # Asks for the master password, then starts them
 
     def backups_done(self, done):
         good = sum(1 for item in done if item.ok)
@@ -1529,7 +1563,7 @@ class EditorTab(QWidget):
     def save_settings(self, settings):
         settings.setValue("editor/splitter", self.splitter.saveState())
         settings.setValue("editor/side_tab", self.side.currentIndex())
-        settings.setValue("editor/run_backups", self.backups_panel.run_check.isChecked())
+        settings.setValue("editor/run_backups", self.backups_panel.run_check.isChecked() or self.backups_waiting)
         settings.setValue("editor/compare_mode", self.compare_mode)
         settings.setValue("editor/folder", self.last_folder)
         self.login_row.save_settings(settings, "editor/login")
@@ -1543,7 +1577,7 @@ class EditorTab(QWidget):
         self.last_folder = settings.value("editor/folder", self.last_folder, str)
         self.login_row.restore_settings(settings, "editor/login")
         if settings.value("editor/run_backups", False, bool):
-            self.backups_panel.run_check.setChecked(True)  # Starts them
+            self.restart_backups_quietly()
 
     def shutdown(self):
         self.stop_archive()
