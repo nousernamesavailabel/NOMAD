@@ -1,8 +1,15 @@
-"""Syslog page: receive log messages from switches, firewalls and access points, and filter or save them."""
+"""Syslog page: receive log messages from switches, firewalls and access points, and filter or save them.
+
+The messages come from one of two places:
+- The NOMAD Syslog Collector service on this computer, when it runs: it keeps every message (90 days by default),
+  so the page shows the latest as they come and can search everything kept (Search Kept).
+- This NOMAD listening on the port itself (Start Listening), only while it's open.
+"""
 import collections
 import logging
 import os
 import threading
+import time
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor
@@ -10,8 +17,10 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QCheckBox, QComboBo
     QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QSpinBox, QTableWidget, QVBoxLayout, QWidget
 
 from ..syslog import SEVERITIES, SYSLOG_PORT, format_line, hub
+from ..syslogs.api import SyslogServiceSource, SyslogSourceError
+from ..syslogs.feed import ServiceFeed
 from ..system import allow_inbound_port
-from .common import ColumnFitter, SortableTableItem, set_hint
+from .common import ColumnFitter, SortableTableItem, run_in_background, set_hint
 from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
@@ -21,8 +30,22 @@ COL_MESSAGE = COLUMNS.index("Message")
 MAX_MESSAGES = 20000  # Older messages are dropped from the list (the log file, if on, keeps everything)
 FLUSH_MILLISECONDS = 250
 FIREWALL_RULE = "NOMAD syslog"
+BACKLOG = 2000  # Kept messages shown at once when the page starts reading the Syslog Collector service
+HISTORY_LIMIT = 5000  # Most kept messages one search shows
+SINCE_CHOICES = [("Last hour", 3600), ("Last 24 hours", 86400), ("Last 7 days", 7 * 86400),
+                 ("Last 30 days", 30 * 86400), ("Everything kept", 0)]
 SEVERITY_COLORS = {0: COLORS["error"], 1: COLORS["error"], 2: COLORS["error"], 3: COLORS["error"],
                    4: COLORS["warning"], 7: COLORS["muted"]}
+
+
+def service_state():
+    """The Syslog Collector service's state as Windows has it ("Not installed", "Stopped", "Running"...), or "" when
+    it can't be asked (then the service's API is asked instead)."""
+    try:
+        from ..syslogs.service import status
+        return status()
+    except Exception:
+        return ""
 
 
 class SyslogTab(QWidget):
@@ -35,6 +58,12 @@ class SyslogTab(QWidget):
         self.incoming_lock = threading.Lock()
         self.total_received = 0
         self.log_file = None
+        self.feed = None  # Reading the Syslog Collector service (a ServiceFeed)
+        self.service_source = None
+        self.service_status = {}
+        self.feed_problem = self.shown_problem = ""  # Set by the feed's thread, shown by the timer
+        self.history = None  # Kept messages found by Search Kept, while they're shown
+        self.searching = False
         self.init_ui()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.flush)
@@ -44,7 +73,8 @@ class SyslogTab(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         intro = QLabel("Receive syslog messages from network devices. Point the device's logging at this computer's "
-                       "address (for example, \"logging host 10.0.0.5\" on Cisco).")
+                       "address (for example, \"logging host 10.0.0.5\" on Cisco). To keep every message all the "
+                       "time, whether NOMAD is open or not, install the Syslog Collector service.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -84,6 +114,10 @@ class SyslogTab(QWidget):
         buttons.addWidget(self.stop_button)
         buttons.addStretch()
         buttons.addWidget(self.firewall_button)
+        self.service_button = QPushButton("Collector Service...")
+        self.service_button.setToolTip("Install the NOMAD Syslog Collector service: keeps every message whether NOMAD "
+                                       "is open or not, for everyone using NOMAD on this computer.")
+        buttons.addWidget(self.service_button)
         layout.addLayout(buttons)
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
@@ -101,8 +135,18 @@ class SyslogTab(QWidget):
         self.follow_check.setChecked(True)
         self.clear_button = QPushButton("Clear")
         self.save_button = QPushButton("Save...")
+        self.since_combo = QComboBox()
+        for text, seconds in SINCE_CHOICES:
+            self.since_combo.addItem(text, seconds)
+        self.since_combo.setCurrentIndex(1)
+        self.since_combo.setToolTip("How far back Search Kept looks.")
+        self.search_button = QPushButton("Search Kept")
+        self.search_button.setToolTip("Search every message the Syslog Collector service kept for the filter's "
+                                      "words, at the severity chosen (the newest 5,000 found are shown).")
         view_row.addWidget(self.filter_input, 1)
         view_row.addWidget(self.severity_combo)
+        view_row.addWidget(self.since_combo)
+        view_row.addWidget(self.search_button)
         view_row.addWidget(self.follow_check)
         view_row.addWidget(self.clear_button)
         view_row.addWidget(self.save_button)
@@ -123,6 +167,9 @@ class SyslogTab(QWidget):
         self.start_button.clicked.connect(self.start)
         self.stop_button.clicked.connect(self.stop)
         self.firewall_button.clicked.connect(self.open_firewall)
+        self.service_button.clicked.connect(self.show_service)
+        self.search_button.clicked.connect(self.toggle_search)
+        self.filter_input.returnPressed.connect(self.search_on_enter)
         self.file_browse.clicked.connect(self.browse_log_file)
         self.filter_input.textChanged.connect(self.refill)
         self.severity_combo.currentIndexChanged.connect(self.refill)
@@ -158,6 +205,145 @@ class SyslogTab(QWidget):
 
     def shutdown(self):
         self.stop()
+        self.stop_feed()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.feed is None and self.receiver is None:
+            self.check_source()
+
+    # ----------------------------------------------------------------- The Syslog Collector service
+
+    def check_source(self):
+        """Read the Syslog Collector service if it runs here (unless this NOMAD listens itself)."""
+        if self.feed is not None or self.receiver is not None:
+            return
+        run_in_background(self.ask_service, self.on_service_answer)
+
+    @staticmethod
+    def ask_service():
+        """(the service, its status), or None when it isn't running (not an error: it's usually not installed).
+        Windows' service manager is asked first: it answers at once, where connecting to a port nothing listens on
+        takes Windows two seconds."""
+        if service_state() in ("Not installed", "Stopped"):
+            return None
+        source = SyslogServiceSource(timeout=2)
+        try:
+            return source, source.status()
+        except SyslogSourceError:
+            return None
+
+    def on_service_answer(self, answer):
+        if answer is None or self.feed is not None or self.receiver is not None:
+            return
+        self.use_service(*answer)
+
+    def use_service(self, source, status, feed_factory=ServiceFeed):
+        self.service_source, self.service_status = source, status
+        self.messages.clear()
+        self.history = None
+        self.table.setRowCount(0)
+        self.feed_problem = self.shown_problem = ""
+        self.feed = feed_factory(self.on_message, backlog=BACKLOG, source=SyslogServiceSource(source.port),
+                                 on_problem=self.on_feed_problem)
+        self.feed.start()
+        self.timer.start(FLUSH_MILLISECONDS)
+        log.info("Syslog page reading the Syslog Collector service")
+        self.update_service_label()
+        self.update_count()
+
+    def stop_feed(self):
+        if self.feed is None:
+            return
+        self.feed.stop()
+        self.feed = None
+        self.service_source = None
+        self.timer.stop()
+
+    def on_feed_problem(self, text):
+        """From the feed's thread: shown by the timer."""
+        self.feed_problem = text
+
+    def update_service_label(self):
+        status = self.service_status
+        port = status.get("port", SYSLOG_PORT)
+        protocols = "UDP and TCP" if status.get("tcp") else "UDP"
+        senders = len(status.get("senders") or {})
+        text = (f"Messages from the NOMAD Syslog Collector service on this computer, listening on port {port} "
+                f"({protocols}) and keeping them {status.get('keep_days', 90)} days. ")
+        kind = "success"
+        if self.feed_problem:
+            text = f"{self.feed_problem} Showing what came before it stopped answering."
+            kind = "warning"
+        elif status.get("error"):
+            text += status["error"]
+            kind = "warning"
+        elif senders:
+            text += f"{senders} device{'s' if senders != 1 else ''} sent messages since it started."
+        else:
+            text += "Nothing received since it started: point the devices' logging at this computer."
+            kind = "info"
+        set_hint(self.status_label, text, kind)
+
+    def show_service(self):
+        from .syslog_service_dialog import SyslogCollectorDialog  # Loads pywin32 only when it's needed
+        SyslogCollectorDialog(self.window, self).exec_()
+        self.service_changed()
+
+    def service_changed(self):
+        """The service was set up, started, stopped or removed from this NOMAD."""
+        if self.feed is not None and service_state() != "Running":
+            self.stop_feed()
+            self.history = None
+            self.search_button.setText("Search Kept")
+            set_hint(self.status_label, "The Syslog Collector service isn't running. Click Start Listening to "
+                                        "listen while NOMAD is open.", "info")
+            self.update_buttons()
+        self.check_source()
+
+    # ----------------------------------------------------------------- Searching what the service kept
+
+    def search_on_enter(self):
+        if self.feed is not None:
+            self.search_kept()
+
+    def toggle_search(self):
+        if self.history is not None:
+            self.back_to_live()
+        else:
+            self.search_kept()
+
+    def search_kept(self):
+        if self.service_source is None or self.searching:
+            return
+        seconds = self.since_combo.currentData()
+        text, severity = self.filter_input.text().strip(), self.severity_combo.currentData()
+        start = time.time() - seconds if seconds else None
+        source = SyslogServiceSource(self.service_source.port, timeout=60)
+        self.searching = True
+        self.search_button.setText("Searching...")
+        self.update_buttons()
+        run_in_background(lambda: source.search(text, severity, start=start, limit=HISTORY_LIMIT),
+                          self.on_history, self.on_history_failed)
+
+    def on_history(self, messages):
+        self.searching = False
+        if self.feed is None:  # The service went away meanwhile
+            return
+        self.history = messages
+        self.search_button.setText("Back to Live")
+        self.refill()
+
+    def on_history_failed(self, error):
+        self.searching = False
+        self.search_button.setText("Search Kept")
+        set_hint(self.status_label, f"Couldn't search the kept messages: {error}", "error")
+        self.update_buttons()
+
+    def back_to_live(self):
+        self.history = None
+        self.search_button.setText("Search Kept")
+        self.refill()
 
     # ----------------------------------------------------------------- Listening
 
@@ -174,7 +360,7 @@ class SyslogTab(QWidget):
         self.address_combo.blockSignals(False)
 
     def start(self):
-        if self.receiver is not None:
+        if self.receiver is not None or self.feed is not None:
             return
         if self.file_check.isChecked():
             path = self.file_input.text().strip()
@@ -224,12 +410,18 @@ class SyslogTab(QWidget):
             self.incoming.append(message)
 
     def flush(self):
+        if self.feed is not None and self.feed_problem != self.shown_problem:
+            self.shown_problem = self.feed_problem
+            self.update_service_label()
         with self.incoming_lock:
             batch = list(self.incoming)
             self.incoming.clear()
         if not batch:
             return
         self.total_received += len(batch)
+        if self.history is not None:  # Search results are shown: the new ones wait for Back to Live
+            self.messages.extend(batch)
+            return
         if self.log_file is not None:
             try:
                 self.log_file.write("".join(format_line(message) + "\n" for message in batch))
@@ -278,10 +470,20 @@ class SyslogTab(QWidget):
 
     def refill(self):
         self.table.setRowCount(0)
-        self.append_rows([message for message in self.messages if self.matches(message)])
+        messages = self.history if self.history is not None else self.messages
+        self.append_rows([message for message in messages if self.matches(message)])
         self.update_count()
 
     def update_count(self):
+        if self.history is not None:
+            found, shown = len(self.history), self.table.rowCount()
+            text = f"{shown:,} of {found:,} kept messages found shown" if shown != found \
+                else f"{found:,} kept messages found"
+            if found >= HISTORY_LIMIT:
+                text += f" (the newest {HISTORY_LIMIT:,}: narrow the search to see older ones)"
+            self.count_label.setText(text + ". Click Back to Live to see new messages again.")
+            self.update_buttons()
+            return
         shown, stored = self.table.rowCount(), len(self.messages)
         text = f"{shown:,} of {stored:,} messages shown" if shown != stored else f"{stored:,} messages"
         if self.total_received > stored:
@@ -290,6 +492,9 @@ class SyslogTab(QWidget):
         self.update_buttons()
 
     def clear(self):
+        if self.history is not None:
+            self.history = None
+            self.search_button.setText("Search Kept")
         self.messages.clear()
         self.table.setRowCount(0)
         self.update_count()
@@ -305,9 +510,16 @@ class SyslogTab(QWidget):
             menu.addAction("Copy Raw Message"): lambda: QApplication.clipboard().setText(message.raw),
             menu.addAction(f"Show Only {message.source}"): lambda: self.filter_input.setText(message.source),
         }
+        if self.feed is not None:
+            actions[menu.addAction(f"Search Kept from {message.source}")] = lambda: self.search_source(message.source)
         chosen = menu.exec_(self.table.viewport().mapToGlobal(position))
         if chosen in actions:
             actions[chosen]()
+
+    def search_source(self, address):
+        self.filter_input.setText(address)
+        self.history = None
+        self.search_kept()
 
     # ----------------------------------------------------------------- Files and firewall
 
@@ -341,9 +553,15 @@ class SyslogTab(QWidget):
 
     def update_buttons(self):
         listening = self.receiver is not None
-        self.start_button.setEnabled(not listening)
+        service = self.feed is not None
+        self.start_button.setEnabled(not listening and not service)
+        self.start_button.setToolTip("The Syslog Collector service listens on this computer already: its messages "
+                                     "are shown here." if service else "")
         self.stop_button.setEnabled(listening)
         for widget in (self.address_combo, self.port_input, self.tcp_check, self.file_check, self.file_input,
-                       self.file_browse):
-            widget.setEnabled(not listening)
+                       self.file_browse, self.firewall_button):
+            widget.setEnabled(not listening and not service)
         self.save_button.setEnabled(self.table.rowCount() > 0)
+        self.since_combo.setVisible(service)
+        self.search_button.setVisible(service)
+        self.search_button.setEnabled(service and not self.searching)

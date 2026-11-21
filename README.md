@@ -36,7 +36,18 @@ To simplify operations, check the "Always start as administrator" box at the top
 
 Press **F1** at any time for the keyboard guide.
 
-### 3. Map your network
+### 3. Set up services and the firewall
+
+Some features run as Windows services, so they keep working when NOMAD is closed. Others need a port open in Windows Firewall. You can set all of them up in one place.
+
+1. Start NOMAD as administrator.
+2. Open **Tools** > **Services & Firewall...**
+3. Tick the services this computer needs, and click **Install Ticked**.
+4. If a firewall rule says **Missing** or **Needs fixing**, click **Fix All**.
+
+A laptop usually needs no services. Install them on a computer that's always on, such as a server. See [Services and firewall](docs/services.md) for what each one does.
+
+### 4. Map your network
 
 For automatic device discovery, read-only SNMP is required on your switches. [SNMP Config](docs/snmp-config.md) can build and send that configuration.
 
@@ -49,7 +60,7 @@ The map draws itself as devices are found. Double-click a switch to see the host
 
 Manually adding devices that do not support SNMP is also supported. Right-click the map, **Add Device Here...**
 
-### 4. Open a terminal session
+### 5. Open a terminal session
 
 1. Open **Terminal**.
 2. Type into the **Quick connect** box, such as `admin@10.0.0.1`, `telnet 10.0.0.5` or `COM3:115200`, and press Enter.
@@ -61,21 +72,21 @@ Manually adding devices that do not support SNMP is also supported. Right-click 
 2. Save your credentials: **Tools** > **Saved Credentials...**
 3. You can now select these from a dropdown when you create terminal/SCP sessions. 
 
-### 5. Track your addresses
+### 6. Track your addresses
 
 1. Open **IP Addresses**.
 2. Click **Network** > **New Network...**, or **Import Locally (Not Shared)...** if you have an addressing workbook.
 3. Click **Add Subnet...** and enter a subnet.
 4. Select the subnet and click **Use Next Free...** to record an address.
 
-### 6. Share with your tribe
+### 7. Share with your tribe
 
 The tribe is everyone sharing one IPAM server. You need one always-on Windows machine for the server.
 
 **On the server:**
 
 1. Run NOMAD as administrator.
-2. Open **Tools** > **Tribe Management...** and click **Install Service**.
+2. Open **Tools** > **Tribe Management...** and click **Install Service**. You can also tick **Tribe Server** in **Tools** > **Services & Firewall...**
 3. Click **Save Tribe Key File**. Anyone with this file can change the tribe's data, so share it carefully.
 
 **On each laptop:**
@@ -163,6 +174,7 @@ For more on each page, see [All pages](docs/pages.md).
 | **VLANs** | Each domain's VLANs and the subnets they carry |
 | **Subnet Placement** | Where each subnet should be, and where it really is |
 | **SNMP Config** | Build the switch configuration NOMAD needs, and send it |
+| **NetFlow Config** | Build the router configuration that sends flows to NOMAD, and send it |
 | **ACLs & Route Maps** | Read, edit, test and safely send ACLs, prefix lists and route maps |
 | **VPNs** | Build, edit and troubleshoot IPsec, GRE and DMVPN |
 | **Assets** | Hardware inventory by serial number, with software targets |
@@ -174,7 +186,8 @@ For more on each page, see [All pages](docs/pages.md).
 | --- | --- |
 | **Packet Capture** | Capture with Windows' pktmon, and a Wireshark-style viewer |
 | **Port Mirroring** | SPAN, RSPAN or ERSPAN in a click, removed on a timer |
-| **Syslog** | Receive syslog, colored and filterable |
+| **Syslog** | Receive syslog, colored and filterable, or keep it all with the Syslog Collector service |
+| **NetFlow** | Top talkers, applications and live rate on each router interface |
 
 ### Utilities
 
@@ -188,6 +201,7 @@ For more on each page, see [All pages](docs/pages.md).
 | Guide | Covers |
 | --- | --- |
 | [All pages](docs/pages.md) | Getting around, and what each page does |
+| [Services and firewall](docs/services.md) | Installing NOMAD's services, and checking its Windows Firewall rules |
 | [Network map](docs/network-map.md) | Crawling, overlays, monitoring, watching, tribe maps |
 | [SNMP Config](docs/snmp-config.md) | Setting switches up for NOMAD |
 | [Terminal, SCP and RDP](docs/terminal-scp.md) | Sessions, credentials, file transfer, backups |
@@ -196,6 +210,8 @@ For more on each page, see [All pages](docs/pages.md).
 | [ACLs and route maps](docs/acls-route-maps.md) | Editing and safely sending changes |
 | [VPNs](docs/vpns.md) | Building, checking and troubleshooting VPNs |
 | [Packet capture and mirroring](docs/capture-mirroring.md) | Capturing, the viewer, SPAN/RSPAN/ERSPAN |
+| [Syslog](docs/syslog.md) | Receiving syslog, the Syslog Collector service, searching what it kept |
+| [NetFlow](docs/netflow.md) | Collecting flows, setting routers up, top talkers |
 | [Editor](docs/editor.md) | Editing and comparing configs, the config archive, backups, standards |
 | [Keyboard guide](docs/keyboard-shortcuts.md) | Every shortcut |
 | [Development](docs/development.md) | Running from source, building, releasing |
@@ -211,7 +227,8 @@ The diagnostics, Terminal, SCP and IPAM work with anything. Features that read o
 | Network Map | Devices answering SNMP with CDP or LLDP: Cisco, Palo Alto (LLDP), Aruba ArubaOS 8 controllers, pfSense |
 | MAC Finder over SSH | Cisco IOS, IOS XE and NX-OS |
 | Hardware over SSH | Cisco IOS, IOS XE, NX-OS and ASA |
-| SNMP Config, Carry VLAN, ACLs & Route Maps, VPNs, Port Mirroring, router probes | Cisco IOS and IOS XE |
+| SNMP Config, NetFlow Config, Carry VLAN, ACLs & Route Maps, VPNs, Port Mirroring, router probes | Cisco IOS and IOS XE |
+| NetFlow | NetFlow v5, v9 and IPFIX (Cisco Flexible NetFlow) |
 | Ansible Inventory | Cisco IOS / IOS XE, NX-OS, IOS XR and ASA, Palo Alto PAN-OS, Juniper Junos, Arista EOS, Fortinet FortiOS, Linux / Unix servers |
 
 ## Good to know
@@ -243,6 +260,9 @@ New IP settings, and disabling an adapter, revert on their own unless you confir
 | Freeze stacks, when the log's own report couldn't be written | `%LOCALAPPDATA%\NOMAD\nomad-freezes.txt` |
 | IPAM server | `%ProgramData%\NOMAD\server` |
 | Map Watcher service | `%ProgramData%\NOMAD\watcher` |
+| Flows collected in NOMAD | `%LOCALAPPDATA%\NOMAD\flows.db` |
+| Flow Collector service | `%ProgramData%\NOMAD\flows` |
+| Syslog Collector service | `%ProgramData%\NOMAD\syslog` |
 
 The first time NOMAD runs, it moves over the folders and settings from NIC Manager.
 

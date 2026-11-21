@@ -36,6 +36,7 @@ class SyslogMessage:
     message: str = ""
     raw: str = ""
     protocol: str = "UDP"
+    id: int = 0  # Its number in the Syslog Collector service's store (0 when received by this NOMAD)
 
     @property
     def severity_name(self):
@@ -130,6 +131,7 @@ class SyslogReceiver:
     port: int = SYSLOG_PORT
     tcp: bool = False
     stopping: threading.Event = field(default_factory=threading.Event)
+    exclusive: bool = False  # Nobody else may take the port alongside (the Syslog Collector service)
 
     def __post_init__(self):
         self.sockets = []
@@ -140,16 +142,20 @@ class SyslogReceiver:
         self.stopping.clear()
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
+            self._exclusive(udp)
             udp.bind((self.address, self.port))
         except OSError:
             udp.close()
             raise
+        if self.port == 0:  # Any free port (tests): TCP takes the same one
+            self.port = udp.getsockname()[1]
         udp.settimeout(0.5)
         self.sockets.append(udp)
         self._thread(self.receive_udp, udp)
         if self.tcp:
             server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
+                self._exclusive(server)
                 server.bind((self.address, self.port))
                 server.listen(16)
             except OSError:
@@ -159,6 +165,10 @@ class SyslogReceiver:
             server.settimeout(0.5)
             self.sockets.append(server)
             self._thread(self.accept_tcp, server)
+
+    def _exclusive(self, sock):
+        if self.exclusive and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
 
     def _thread(self, target, *args):
         thread = threading.Thread(target=target, args=args, name="syslog", daemon=True)

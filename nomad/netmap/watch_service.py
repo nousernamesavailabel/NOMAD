@@ -25,6 +25,8 @@ from pathlib import Path
 
 from ..snmp import TRAP_PORT
 from ..syslog import SYSLOG_PORT, SyslogReceiver
+from ..syslogs.feed import SyslogListener
+from ..syslogs.service import DISPLAY_NAME as SYSLOG_SERVICE_NAME
 from . import triggers, watch
 from .crawl import credentials_from_json, ordered_credentials
 
@@ -40,6 +42,7 @@ LEASE_SECONDS = 60
 STEP_SECONDS = 2
 SERVICE_USER = "Map Watcher service"
 BACKUP_SECONDS = 30
+SYSLOG_CHECK_SECONDS = 60  # Checking whether the Syslog Collector service has been installed or removed here
 
 
 def watcher_dir():
@@ -113,7 +116,7 @@ class WatchEngine:
     a clock, so it can be tested with fakes."""
 
     def __init__(self, maps, map_ids, holder, timers=None, crawl=watch.crawl_from, client_factory=None,
-                 clock=time.time, listen=True, ports=(SYSLOG_PORT, TRAP_PORT), backups=None):
+                 clock=time.time, listen=True, ports=(SYSLOG_PORT, TRAP_PORT), backups=None, syslog_options=None):
         """timers: {name: seconds}, as watch.TIMERS has them (the defaults for any left out)."""
         from ..snmp import SnmpClient
         self.maps, self.holder = maps, holder
@@ -125,6 +128,10 @@ class WatchEngine:
         self.queue = triggers.TriggerQueue(delay=timers["trigger_delay"], clock=clock)
         self.listen, self.ports = listen, ports
         self.receivers = []
+        self.syslog = None  # A syslogs.feed.SyslogListener while listening
+        self.syslog_options = syslog_options or {}  # For the SyslogListener (tests)
+        self.next_syslog_check = 0.0
+        self.syslog_problem = ""
         self.v3_users = {}  # Map ID -> its V3Users, for checking v3 traps
         self.next_sync = self.next_lease = self.next_backup = 0.0
         self.stop_event = threading.Event()
@@ -137,12 +144,11 @@ class WatchEngine:
         if not self.listen:
             return
         syslog_port, trap_port = self.ports
-        syslog = SyslogReceiver(self.on_syslog, port=syslog_port)
+        self.syslog = self.syslog_listener(syslog_port)
         try:
-            syslog.start()
-            self.receivers.append(syslog)
-            log.info("Listening for syslog on UDP %s", syslog_port)
+            self.said_syslog(self.syslog.start())
         except OSError as error:
+            self.syslog_problem = str(error)
             log.warning("Couldn't listen for syslog on UDP %s: %s", syslog_port, error)
         traps = triggers.TrapReceiver(self.on_trap, port=trap_port, v3_users=self.all_v3_users)
         try:
@@ -152,7 +158,34 @@ class WatchEngine:
         except OSError as error:
             log.warning("Couldn't listen for SNMP traps on UDP %s: %s", trap_port, error)
 
+    def syslog_listener(self, port):
+        """Syslog from the NOMAD Syslog Collector service when it runs here (it has the port), else from the port."""
+        receiver = SyslogReceiver(self.on_syslog, port=port)
+        return SyslogListener(self.on_syslog, receiver.start, receiver.stop, **self.syslog_options)
+
+    def check_syslog(self):
+        """Move to the Syslog Collector service when it's been installed here, or back to the port without it."""
+        if self.syslog is None:
+            return
+        try:
+            self.said_syslog(self.syslog.check())
+        except OSError as error:
+            if str(error) != self.syslog_problem:  # Once, not every minute
+                log.warning("Couldn't listen for syslog on UDP %s: %s", self.ports[0], error)
+            self.syslog_problem = str(error)
+
+    def said_syslog(self, mode):
+        if mode:
+            self.syslog_problem = ""
+        if mode == SyslogListener.SERVICE:
+            log.info("Reading syslog from the %s", SYSLOG_SERVICE_NAME)
+        elif mode == SyslogListener.PORT:
+            log.info("Listening for syslog on UDP %s", self.ports[0])
+
     def stop_listening(self):
+        if self.syslog is not None:
+            self.syslog.stop()
+            self.syslog = None
         for receiver in self.receivers:
             receiver.stop()
         self.receivers = []
@@ -177,6 +210,9 @@ class WatchEngine:
         if now >= self.next_lease:
             self.next_lease = now + LEASE_SECONDS
             self.claim_all()
+        if self.syslog is not None and now >= self.next_syslog_check:
+            self.next_syslog_check = now + SYSLOG_CHECK_SECONDS
+            self.check_syslog()
         if self.backups is not None and now >= self.next_backup:
             self.next_backup = now + BACKUP_SECONDS
             self.back_up()

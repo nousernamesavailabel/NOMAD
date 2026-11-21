@@ -364,7 +364,7 @@ Set the switches to send syslog and SNMP traps to the computer watching. The Wat
 
 A port coming up, a CDP or LLDP change, or a MAC address learned then has that switch read 45 seconds later.
 
-Watching shares UDP 514 with the Syslog page, carries on while you use other pages, and starts again with NOMAD if it was on.
+Watching shares UDP 514 with the Syslog page, carries on while you use other pages, and starts again with NOMAD if it was on. When the [Syslog Collector service](syslog.md#the-map-watcher-and-the-service) runs on the same computer, watching reads syslog from it instead of listening on UDP 514.
 
 ## Tribe maps
 
@@ -403,7 +403,9 @@ Watching runs where the switches can be reached, and the tribe server may not be
 2. **Tools** > **Map Watcher Service...** and install it.
 3. Tick the tribe maps to watch, and set the timers.
 
-The service takes over from NOMAD left open elsewhere, listens for the switches' syslog and traps (opening UDP 514 and 162 in Windows Firewall) and adds what it finds to the tribe maps.
+The service takes over from NOMAD left open elsewhere, listens for the switches' syslog and traps (opening UDP 514 and 162 in Windows Firewall) and adds what it finds to the tribe maps. If the Syslog Collector service runs on the same computer, the Map Watcher reads syslog from it instead of listening on UDP 514.
+
+You can also install it from **Tools** > **Services & Firewall...** (see [Services and firewall](services.md)).
 
 Its settings and log are in `%ProgramData%\NOMAD\watcher`. To try it in a console, run `NOMAD.exe --map-watcher`.
 

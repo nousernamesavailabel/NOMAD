@@ -30,7 +30,8 @@ class MapWatcherDialog(QDialog):
                        "nobody has NOMAD open. Use a computer that's usually on and can reach the switches over SNMP "
                        "(the tribe server may not). It takes over watching from NOMAD left open elsewhere, and adds "
                        "what it finds to the tribe maps, tagged NEW. Switches can send it syslog (UDP 514) and SNMP "
-                       "traps (UDP 162) so it reads a switch the moment something's plugged in.")
+                       "traps (UDP 162) so it reads a switch the moment something's plugged in. When the Syslog "
+                       "Collector service runs on this computer, it reads syslog from that instead.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         form = QFormLayout()

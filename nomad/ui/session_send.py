@@ -9,6 +9,7 @@ from .common import set_hint
 
 SEND_DELAY = 150  # ms between lines sent to a switch: older Catalysts drop characters from a fast paste
 PROMPT_WAIT = 20000  # ms to wait for a session just opened to show its prompt
+PROMPT_CHECK = 500  # ms between looks at its prompt
 
 
 def prompt_of(view):
@@ -25,6 +26,8 @@ class SessionSender(QObject):
         super().__init__(page)
         self.page, self.window, self.status_label = page, window, status_label
         self.waiting = None  # (view, QTimer, text, tag) for a session opened to send to, until it shows its prompt
+        self.waited = 0  # ms waited for it so far
+        self.ready = None  # (view, text, tag): it showed its prompt, and send_to runs next
 
     def terminal(self):
         return getattr(self.window, "terminal_tab", None)
@@ -160,32 +163,48 @@ class SessionSender(QObject):
             self.wait_for_prompt(view, text, tag)
 
     def wait_for_prompt(self, view, text, tag=None):
-        """Once the session just opened shows a prompt, offer to send to it."""
-        from .terminal_view import CONNECTED, DISCONNECTED
+        """Once the session just opened shows a prompt, offer to send to it.
+
+        The timer and the hand-over to send_to call this object's own methods, never lambdas or closures: Qt drops
+        a queued call to a method when its object is freed (the page closed meanwhile), but a lambda still runs,
+        on a freed page, and crashes NOMAD."""
         self.stop_waiting()
+        self.ready = None
         if view is None:
             return
         timer = QTimer(self)
-        timer.setInterval(500)
-        waited = [0]
-
-        def check():
-            waited[0] += timer.interval()
-            prompt = prompt_of(view) if view.state == CONNECTED else ""
-            if view.state == DISCONNECTED or waited[0] > PROMPT_WAIT:
-                self.stop_waiting()
-                set_hint(self.status_label, f"{view.title} didn't connect, so nothing was sent.", "warning")
-            elif prompt.endswith("#"):
-                self.stop_waiting()
-                QTimer.singleShot(0, lambda: self.send_to(view, text(), tag=tag))
-            elif prompt.endswith(">"):
-                self.stop_waiting()
-                set_hint(self.status_label, f"{view.title} is at the > prompt: type enable (and its password) "
-                                            "there, then Send to Session again.", "warning")
-        timer.timeout.connect(check)
-        timer.start()
+        timer.setInterval(PROMPT_CHECK)
+        timer.timeout.connect(self.check_prompt)
         self.waiting = (view, timer, text, tag)
+        self.waited = 0
+        timer.start()
         set_hint(self.status_label, f"Connecting to {view.title}...", "info")
+
+    def check_prompt(self):
+        """Every PROMPT_CHECK ms while waiting: send once the session is at the enable (#) prompt."""
+        from .terminal_view import CONNECTED, DISCONNECTED
+        if self.waiting is None:
+            return
+        view, _timer, text, tag = self.waiting
+        self.waited += PROMPT_CHECK
+        prompt = prompt_of(view) if view.state == CONNECTED else ""
+        if view.state == DISCONNECTED or self.waited > PROMPT_WAIT:
+            self.stop_waiting()
+            set_hint(self.status_label, f"{view.title} didn't connect, so nothing was sent.", "warning")
+        elif prompt.endswith("#"):
+            self.stop_waiting()
+            self.ready = (view, text, tag)
+            QTimer.singleShot(0, self.send_when_ready)  # After this timer's call: send_to asks in a modal box
+        elif prompt.endswith(">"):
+            self.stop_waiting()
+            set_hint(self.status_label, f"{view.title} is at the > prompt: type enable (and its password) "
+                                        "there, then Send to Session again.", "warning")
+
+    def send_when_ready(self):
+        if self.ready is None:
+            return
+        (view, text, tag), self.ready = self.ready, None
+        self.send_to(view, text(), tag=tag)
 
     def stop_waiting(self):
         if self.waiting is not None:

@@ -49,14 +49,9 @@ def run_command(command, timeout=120):
 
 def allow_inbound_port(rule_name, port, protocols=("UDP",)):
     """Add (or replace) a Windows Firewall rule allowing inbound traffic to a local port. Needs administrator
-    rights."""
-    try:
-        run_command(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule_name}"])
-    except CommandError:
-        pass  # No existing rule
-    for protocol in protocols:
-        run_command(["netsh", "advfirewall", "firewall", "add", "rule", f"name={rule_name}", "dir=in",
-                     "action=allow", f"protocol={protocol}", f"localport={int(port)}"])
+    rights. (nomad/firewall.py has the list of NOMAD's rules.)"""
+    from .firewall import open_rule
+    open_rule(rule_name, port, protocols)
 
 
 def ps_quote(value):

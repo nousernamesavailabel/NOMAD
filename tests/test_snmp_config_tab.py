@@ -6,7 +6,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PyQt5.QtCore import QSettings, Qt  # noqa: E402
+from PyQt5.QtCore import QEvent, QSettings, Qt  # noqa: E402
 from PyQt5.QtTest import QTest  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox, QWidget  # noqa: E402
 
@@ -323,6 +323,16 @@ def test_a_session_not_at_enable_is_warned_about(page, monkeypatch):
     assert view.sent == []
 
 
+def wait_until(condition, ms=5000):
+    """Let the prompt checks (every half second) run until condition() holds: a busy machine takes longer than a
+    fixed wait allows."""
+    waited = 0
+    while not condition() and waited < ms:
+        QTest.qWait(50)
+        waited += 50
+    return condition()
+
+
 def test_a_session_opened_to_send_to_waits_for_its_prompt(page, monkeypatch, app):
     monkeypatch.setattr(session_send.QInputDialog, "getText", lambda *args, **kwargs: ("10.0.0.12", True))
     monkeypatch.setattr(QMessageBox, "exec_", lambda self: QMessageBox.Yes)
@@ -333,8 +343,7 @@ def test_a_session_opened_to_send_to_waits_for_its_prompt(page, monkeypatch, app
     QTest.qWait(700)
     assert view.sent == []  # No prompt yet
     view.model.prompt = "acc2#"
-    QTest.qWait(1200)
-    assert view.sent and page.waiting is None
+    assert wait_until(lambda: view.sent) and page.waiting is None
 
 
 def test_a_session_at_user_exec_is_not_sent_to(page, monkeypatch):
@@ -342,7 +351,7 @@ def test_a_session_at_user_exec_is_not_sent_to(page, monkeypatch):
     page.open_new_session()
     view = page.window.terminal_tab.views[-1]
     view.model.prompt = "acc3>"
-    QTest.qWait(1200)
+    assert wait_until(lambda: page.waiting is None)
     assert view.sent == [] and "type enable" in page.status_label.text() and page.waiting is None
 
 
@@ -351,7 +360,7 @@ def test_a_session_that_never_connects_gives_up(page, monkeypatch):
     page.open_new_session()
     view = page.window.terminal_tab.views[-1]
     view.state = DISCONNECTED
-    QTest.qWait(1200)
+    assert wait_until(lambda: "didn't connect" in page.status_label.text())
     assert view.sent == [] and "didn't connect" in page.status_label.text()
 
 
@@ -375,5 +384,21 @@ def test_a_saved_session_is_opened_and_sent_to(page, monkeypatch):
     view = page.window.terminal_tab.views[-1]
     assert page.window.terminal_tab.opened == ["access-sw-09"]
     view.model.prompt = "access-sw-09#"
-    QTest.qWait(1200)
-    assert view.sent and page.waiting is None
+    assert wait_until(lambda: view.sent) and page.waiting is None
+
+
+def test_closing_the_page_drops_a_send_that_was_due(page, monkeypatch):
+    """The prompt showed, and the send was handed to the next turn of the event loop, but the page went first: the
+    hand-over is to the sender's own method, so Qt drops it instead of running it on a freed page."""
+    asked = []
+    monkeypatch.setattr(QMessageBox, "exec_", lambda self: asked.append(self) or QMessageBox.Yes)
+    page.open_saved(page.window.terminal_tab.store.sessions[1])
+    view = page.window.terminal_tab.views[-1]
+    view.model.prompt = "access-sw-09#"
+    sender = page.session_sender
+    sender.check_prompt()  # The prompt is there: send_when_ready is queued
+    assert sender.ready is not None and sender.waiting is None
+    page.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    QTest.qWait(50)  # The queued call would have run by now
+    assert asked == [] and view.sent == []

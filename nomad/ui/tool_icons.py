@@ -78,6 +78,8 @@ TOOL_ART = {
     "SNMP Config": '<path d="M4 5h16M4 12h16M4 19h16 M8 3v4m8 3v4m-6 3v4"/>'
                    '<circle cx="8" cy="5" r="2"/><circle cx="16" cy="12" r="2"/>'
                    '<circle cx="10" cy="19" r="2"/>',
+    "NetFlow Config": '<path d="M3 6h11 M3 12h7 M3 18h5"/><path d="M14 18c2 0 2-6 4-6s1.5 3 3 3"/>'
+                      '<circle cx="17" cy="6" r="2"/><path d="M17 2v2m0 4v2m4-4h-2m-4 0h-2"/>',
     "ACLs & Route Maps": '<path d="M12 2 4 5v6c0 5 3.5 9 8 11 4.5-2 8-6 8-11V5z"/>'
                          '<path d="M9 9h6M9 13h6M9 17h3"/>',
     "VPNs": '<rect x="3" y="11" width="18" height="11" rx="2"/>'
@@ -88,6 +90,8 @@ TOOL_ART = {
                          '<path d="M9 3V1h6v2 M8 9h1m3 0h4 M8 13h1m3 0h4 M8 17h1m3 0h4"/>',
     "Packet Capture": '<path d="M2 7h20M5 7l3 13h8l3-13 M12 2v12m-3-3 3 3 3-3"/>',
     "Syslog": '<path d="M5 2h10l4 4v16H5z M15 2v5h4 M8 11h8m-8 4h8m-8 4h5"/>',
+    "NetFlow": '<path d="M3 20h18 M3 20V4"/><path d="M6 16c3 0 3-7 6-7s3 4 6 4 2-6 3-6"/>'
+               '<path d="M6 20v-3m4 3v-6m4 6v-4m4 4v-5"/>',
     "Subnet Calculator": '<rect x="5" y="2" width="14" height="20" rx="2"/>'
                          '<path d="M8 6h8 M8 11h1m6 0h1m-8 4h1m6 0h1m-8 4h1m6 0h1"/>',
     "Editor": '<path d="M4 3h9l4 4v6 M13 3v4h4 M4 3v18h7 M7 9h4 M7 13h3"/>'

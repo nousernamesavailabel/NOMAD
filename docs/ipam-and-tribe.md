@@ -118,6 +118,8 @@ Networks are either **Local** (on this computer) or **Tribe** (shared by an IPAM
 3. Click **Save Tribe Key File**, and give it only to the tribe. Anyone with it can change the tribe's IPAM.
 4. After updating NOMAD, click **Update Service** in the same window.
 
+You can also install the server from **Tools** > **Services & Firewall...** Tick **Tribe Server** and click **Install Ticked**, and the Tribe Management window opens. See [Services and firewall](services.md).
+
 NOMAD checks the server's version each time it starts and when you connect. If the server is older than your copy of NOMAD needs, a banner names the version to update to, and **How to Update...** shows the steps and what the update brings. The server keeps working in the meantime. The banner goes away once the server is updated. A server newer than your copy is fine.
 
 **Change Tribe Key** locks out every old copy.

@@ -188,6 +188,7 @@ Like pathping, it separates real loss from a router that just doesn't answer pin
 | **VLANs** | Each VLAN domain's VLANs and the subnets they carry, brought in from what the map finds | [VLANs](vlans-subnets-assets.md#vlans) |
 | **Subnet Placement** | Where each subnet is planned to be and where the map finds it, whether it's advertised, what's wrong, and moving subnets | [Subnet Placement](vlans-subnets-assets.md#subnet-placement) |
 | **SNMP Config** | Builds the Cisco IOS / IOS-XE configuration that sets a switch up for NOMAD, and types it into a terminal session | [SNMP Config](snmp-config.md) |
+| **NetFlow Config** | Builds the Cisco IOS / IOS-XE Flexible NetFlow configuration that sends a router's flows to NOMAD, and sends it into a session or over SSH | [NetFlow](netflow.md#set-a-router-up) |
 | **ACLs & Route Maps** | Reads, builds and edits ACLs, prefix lists and route maps, finds entries that never match and changes that would lock you out, tests packets and routes, and sends changes with a revert timer | [ACLs and route maps](acls-route-maps.md) |
 | **VPNs** | Builds and edits IPsec VTI, GRE over IPsec, GRE, crypto map and DMVPN VPNs between Cisco routers, checks the design, sends it with a revert timer, and says why one is down | [VPNs](vpns.md) |
 | **Assets** | Every piece of hardware on the network, with hostname, model, serial number and software version kept together | [Assets](vlans-subnets-assets.md#assets) |
@@ -228,7 +229,8 @@ Good to know:
 | --- | --- | --- |
 | **Packet Capture** | Captures with Windows' built-in pktmon to a pcapng file, and looks through it (or any pcap/pcapng file): Wireshark-style filters, decoding, conversations, problems found, following a stream | [Packet capture](capture-mirroring.md#capture-packets) |
 | **Port Mirroring** | Sets up SPAN, RSPAN or ERSPAN on Cisco IOS / IOS-XE switches in a click, checks the ports first, and takes it away again | [Port mirroring](capture-mirroring.md#mirror-a-port) |
-| **Syslog** | Receives syslog from network devices, colored by severity and filterable | |
+| **Syslog** | Receives syslog from network devices, colored by severity and filterable, or reads and searches every message the Syslog Collector service kept | [Syslog](syslog.md) |
+| **NetFlow** | The top talkers, destinations, conversations and applications on each router interface, from the flows routers send, with the interface's live rate from SNMP | [NetFlow](netflow.md) |
 
 ## Utilities
 
@@ -247,4 +249,5 @@ A text editor for configurations, like Notepad++: tabs, find and replace with re
 - **Diagnostics report:** **Tools** > **Run Diagnostics Report...** (Ctrl+R).
 - **What's new:** **Help** > **What's New...** lists what each version added and fixed, newest first, with the version running marked.
 - **Saved password protection:** **Tools** > **Saved Password Protection...** adds a master password.
+- **Services and firewall:** **Tools** > **Services & Firewall...** installs NOMAD's services and checks its Windows Firewall rules. See [Services and firewall](services.md).
 - **Splash:** a splash says what NOMAD is loading while it starts.

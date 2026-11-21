@@ -1,5 +1,5 @@
 """Shared test set-up: free the Qt objects each test left for deletion, let go of keys a test left held, and keep the
-map monitor off the network.
+map monitor off the network, and keep the NOMAD services installed on this computer out of the tests.
 
 Tests end with window.deleteLater() and processEvents(), but outside a running event loop processEvents() doesn't
 carry out deferred deletes: every test's windows stayed alive until the interpreter shut down, and freeing them all
@@ -35,6 +35,21 @@ class _NoSnmp:
     def __init__(self, host, *args, **kwargs):
         from nomad.snmp import SnmpError
         raise SnmpError(f"No answer from {host} (tests don't use the network).")
+
+
+@pytest.fixture(autouse=True)
+def _no_nomad_services(monkeypatch):
+    """Tests see no NOMAD service on this computer, whatever is installed on it: a Flow or Syslog Collector really
+    running here would otherwise be read instead of the test's own data. Tests about the services stand in for them
+    themselves."""
+    try:
+        from nomad.syslogs import service as syslog_service
+        from nomad.ui import flows_tab, syslog_tab
+    except ImportError:
+        return
+    monkeypatch.setattr(syslog_service, "running", lambda: False)
+    monkeypatch.setattr(flows_tab, "service_state", lambda: "Not installed")
+    monkeypatch.setattr(syslog_tab, "service_state", lambda: "Not installed")
 
 
 @pytest.fixture(autouse=True)

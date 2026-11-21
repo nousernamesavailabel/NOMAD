@@ -106,6 +106,22 @@ def main():
         from nomad.netmap.watch_service import run_in_foreground
         run_in_foreground()
         return
+    if "--flow-collector-service" in sys.argv:  # Started by Windows as the NOMAD Flow Collector service
+        from nomad.flows.service import run_service_dispatcher
+        run_service_dispatcher()
+        return
+    if "--flow-collector" in sys.argv:  # The Flow Collector in this console, for trying it out or troubleshooting
+        from nomad.flows.service import run_in_foreground
+        run_in_foreground()
+        return
+    if "--syslog-collector-service" in sys.argv:  # Started by Windows as the NOMAD Syslog Collector service
+        from nomad.syslogs.service import run_service_dispatcher
+        run_service_dispatcher()
+        return
+    if "--syslog-collector" in sys.argv:  # The Syslog Collector in this console, for trying it out or troubleshooting
+        from nomad.syslogs.service import run_in_foreground
+        run_in_foreground()
+        return
     if "--ipam-server" in sys.argv:  # The IPAM server in this console, for trying it out or troubleshooting
         from nomad.ipam.server import run_in_foreground
         run_in_foreground()

@@ -4,6 +4,19 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-11-20
+
+- **New:** install **Tools > Syslog Collector Service...** to keep every syslog message all the time (90 days by default), for everyone using NOMAD on the computer. The Syslog page then shows the service's messages, and **Search Kept** searches everything it kept.
+- **New:** **Tools > Services & Firewall...** shows every NOMAD service and Windows Firewall rule in one place. Install, start, stop or remove the services together or one at a time, and open, fix or remove NOMAD's firewall rules. It also warns when Windows Firewall would ignore them.
+- **Changed:** the Map Watcher reads syslog from the Syslog Collector service when both run on the same computer, so they don't fight over UDP 514.
+
+## [2.6.0] - 2026-11-19
+
+- **New:** the **NetFlow** page shows who and what is using each router interface: top talkers, destinations, applications and conversations from the flows Cisco routers send, with the interface's live rate from SNMP and its totals in and out for the time you choose. The tables filter and sort like the map's tables. **Find Flows** lists every flow to or from an address.
+- **New:** collect flows with **Collect Here**, or install **Tools > Flow Collector Service...** so a server shared over Remote Desktop collects for everyone using NOMAD on it.
+- **New:** the **NetFlow Config** page builds the router configuration that sends flows to NOMAD, and sets it up over SSH on several routers at once.
+- **New:** right-click a link, port or router on the map for its top talkers.
+
 ## [2.5.0] - 2026-11-19
 
 - **New:** exports show a progress bar with **Cancel**: IPAM's CSV and workbook exports, Assets, VLANs, MAC Finder, SNMP and Sweep results, the Network Map's CSV exports, and VPN **Every Router to a Folder**. A cancelled export leaves no half-written file behind.

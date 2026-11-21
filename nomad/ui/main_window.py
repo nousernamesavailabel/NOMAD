@@ -53,6 +53,8 @@ from .mirror_tab import MirrorTab
 from .acl_tab import AclTab
 from .vpn_tab import VpnTab
 from .syslog_tab import SyslogTab
+from .flows_tab import FlowsTab
+from .flow_config_tab import FlowConfigTab
 from .tftp_tab import TftpTab
 from .theme import COLORS, DEFAULT_TEXT_SCALE, TEXT_SCALES, closest_text_scale, set_text_scale
 from .traceroute_tab import TracerouteTab
@@ -205,9 +207,11 @@ class MainWindow(QMainWindow):
         self.capture_tab = CaptureTab(self)
         self.mirror_tab = MirrorTab(self)  # The Network Map's switches, saved sessions' SSH logins, Packet Capture
         self.syslog_tab = SyslogTab(self)
+        self.flows_tab = FlowsTab(self)  # Reads the Network Map's SNMP credentials for the live rate
         self.tftp_tab = TftpTab(self)
         self.subnet_tab = SubnetTab(self)
         self.snmp_config_tab = SnmpConfigTab(self)
+        self.flow_config_tab = FlowConfigTab(self)
         self.startup_step("Loading ACLs & Route Maps and VPNs...", 0.52)
         self.acl_tab = AclTab(self)  # The Network Map's switches and routers, saved sessions' SSH logins
         self.vpn_tab = VpnTab(self)  # The same, and the IP Addresses page (for tunnel subnets)
@@ -243,10 +247,11 @@ class MainWindow(QMainWindow):
                                       (self.web_check_tab, "Web Check")]),
             ("Network Management", [(self.netmap_tab, "Network Map"), (self.ipam_tab, "IP Addresses"),
                 (self.vlan_tab, "VLANs"), (self.placement_tab, "Subnet Placement"),
-                (self.snmp_config_tab, "SNMP Config"), (self.acl_tab, "ACLs & Route Maps"), (self.vpn_tab, "VPNs"),
+                (self.snmp_config_tab, "SNMP Config"), (self.flow_config_tab, "NetFlow Config"),
+                (self.acl_tab, "ACLs & Route Maps"), (self.vpn_tab, "VPNs"),
                 (self.assets_tab, "Assets"), (self.inventory_tab, "Ansible Inventory")]),
             ("Capture & Logs", [(self.capture_tab, "Packet Capture"), (self.mirror_tab, "Port Mirroring"),
-                                (self.syslog_tab, "Syslog")]),
+                                (self.syslog_tab, "Syslog"), (self.flows_tab, "NetFlow")]),
             ("Utilities", [(self.subnet_tab, "Subnet Calculator"), (self.editor_tab, "Editor")]),
         ]
         self.all_tabs = []
@@ -394,8 +399,12 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("&Flush DNS Cache", self.flush_dns)
         tools_menu.addAction("Saved Password &Protection...", lambda: self.terminal_tab.manager.show_protection())
         tools_menu.addAction("Saved &Credentials...", lambda: self.terminal_tab.manager.show_credentials())
+        tools_menu.addSeparator()
+        tools_menu.addAction("Services && Fire&wall...", self.show_services)
         tools_menu.addAction("&Tribe Management...", self.show_tribe_management)
         tools_menu.addAction("&Map Watcher Service...", self.show_map_watcher)
+        tools_menu.addAction("F&low Collector Service...", self.show_flow_collector)
+        tools_menu.addAction("S&yslog Collector Service...", self.show_syslog_collector)
         tools_menu.addSeparator()
         tools_menu.addAction("Add &PuTTY to PATH", self.sweep_tab.add_putty_to_path)
         tools_menu.addAction("Default &Browser Settings...", self.open_default_apps)
@@ -417,6 +426,17 @@ class MainWindow(QMainWindow):
         Map's credentials, and location (a map device's Site / Building / Room)."""
         self.navigator.setCurrentWidget(self.snmp_config_tab)
         self.snmp_config_tab.prefill(destination, credential, from_map, location)
+
+    def show_flows(self, addresses=(), port=""):
+        """The NetFlow page, on the router with one of addresses (a Network Map device's) and its port."""
+        self.navigator.setCurrentWidget(self.flows_tab)
+        if addresses:
+            self.flows_tab.show_flows_for(addresses, port)
+
+    def show_flow_config(self, routers=(), ports=(), destination=""):
+        """The NetFlow Config page, sending flows to destination (this computer when not given) from routers."""
+        self.navigator.setCurrentWidget(self.flow_config_tab)
+        self.flow_config_tab.prefill(routers, ports, destination)
 
     def show_acls(self, device=None, acl="", port=""):
         """The ACLs page, with the Network Map device's ACLs (read now if they haven't been): acl, or the one on
@@ -770,6 +790,20 @@ class MainWindow(QMainWindow):
         if left:
             self.tribe_banner.check()
         return left
+
+    def show_services(self):
+        from .services_dialog import ServicesDialog  # Loads pywin32 only when it's needed
+        ServicesDialog(self).exec_()
+
+    def show_syslog_collector(self):
+        from .syslog_service_dialog import SyslogCollectorDialog  # Loads pywin32 only when it's needed
+        SyslogCollectorDialog(self, self.syslog_tab).exec_()
+        self.syslog_tab.service_changed()
+
+    def show_flow_collector(self):
+        from .flow_service_dialog import FlowCollectorDialog  # Loads pywin32 only when it's needed
+        FlowCollectorDialog(self, self.flows_tab).exec_()
+        self.flows_tab.check_source()
 
     def show_map_watcher(self):
         from .watch_service_dialog import MapWatcherDialog  # Loads pywin32 only when it's needed

@@ -15,12 +15,14 @@ from ..netmap import triggers, watch
 from ..netmap.monitor import duration_text
 from ..snmp import TRAP_PORT
 from ..syslog import SYSLOG_PORT, hub
+from ..syslogs import feed as syslog_feed
 from .common import release_thread
 from .theme import monospace_font
 
 log = logging.getLogger(__name__)
 
 LOG_LINES = 20000
+SYSLOG_CHECK_SECONDS = 60  # Checking whether the Syslog Collector service has been installed or removed here
 TICK_MS = 5000  # Checking for switches a syslog message or trap asked to be read
 LEASE_RENEW_SECONDS = 60
 UNKNOWN_SENDERS_LOGGED = 50
@@ -160,6 +162,16 @@ def default_crawl(network_map, options, seeds, should_stop):
     return watch.crawl_from(network_map, options, seeds, should_stop=should_stop)
 
 
+def syslog_service_running():
+    """The NOMAD Syslog Collector service runs on this computer (then syslog is read from it)."""
+    return syslog_feed.service_running()
+
+
+def make_syslog_feed(callback):
+    """Reads new messages from the Syslog Collector service for the Map Watcher."""
+    return syslog_feed.ServiceFeed(callback)
+
+
 class MapWatcher(QObject):
     """Owns watching: page is the NetworkMapTab (for the map, how to read it, and what to do with what's found)."""
     applied = pyqtSignal(object)  # A WatchResult added to the map
@@ -182,6 +194,8 @@ class MapWatcher(QObject):
         self.releasing = []  # Threads giving up the watching of a tribe map (stopping, or another map opened)
         self.recheck_again = False  # The credentials changed while devices were being asked: ask again after
         self.trap_receiver = None
+        self.syslog = None  # A syslogs.feed.SyslogListener while listening
+        self.syslog_checked = 0.0
         self.listening = []  # What's being listened on, for the tab
         self.unknown_senders = set()
         self.lines = []
@@ -448,9 +462,12 @@ class MapWatcher(QObject):
     def start_listening(self):
         if self.listening:
             return
+        # From the Syslog Collector service when it runs on this computer (it has the port), else from the port
+        self.syslog = syslog_feed.SyslogListener(self.on_syslog, self.subscribe_syslog, self.unsubscribe_syslog,
+                                                 running=syslog_service_running, feed_factory=make_syslog_feed)
+        self.syslog_checked = time.time()
         try:
-            hub.subscribe(self.on_syslog, self.syslog_port)
-            self.listening.append(f"syslog on UDP {self.syslog_port}")
+            self.listening.append(self.syslog_text(self.syslog.start()))
         except OSError as error:
             self.log(f"Couldn't listen for syslog on UDP {self.syslog_port}: {error.strerror or error} (another "
                      "syslog server may have it). Watching by checking every so often only.")
@@ -465,9 +482,45 @@ class MapWatcher(QObject):
         if self.listening:
             self.log("Listening for " + " and ".join(self.listening))
 
+    def subscribe_syslog(self):
+        hub.subscribe(self.on_syslog, self.syslog_port)
+
+    def unsubscribe_syslog(self):
+        hub.unsubscribe(self.on_syslog, self.syslog_port)
+
+    def syslog_text(self, mode):
+        if mode == syslog_feed.SyslogListener.SERVICE:
+            return "syslog from the Syslog Collector service"
+        return f"syslog on UDP {self.syslog_port}"
+
+    def check_syslog(self):
+        """Move to the Syslog Collector service when it's been installed here, or back to the port without it
+        (every minute while listening, and when the service is set up from this NOMAD)."""
+        self.syslog_checked = time.time()
+        if self.syslog is None:
+            return
+        had = [item for item in self.listening if item.startswith("syslog")]
+        try:
+            mode = self.syslog.check()
+        except OSError as error:
+            if had:
+                self.listening.remove(had[0])
+                self.log(f"Couldn't listen for syslog on UDP {self.syslog_port}: {error.strerror or error}.")
+                self.update_summary()
+            return
+        if not mode:
+            return
+        for item in had:
+            self.listening.remove(item)
+        text = self.syslog_text(mode)
+        self.listening.insert(0, text)
+        self.log(f"Getting {text} now")
+        self.update_summary()
+
     def stop_listening(self):
-        if any(item.startswith("syslog") for item in self.listening):
-            hub.unsubscribe(self.on_syslog, self.syslog_port)
+        if self.syslog is not None:
+            self.syslog.stop()
+            self.syslog = None
         if self.trap_receiver is not None:
             self.trap_receiver.stop()
             self.trap_receiver = None
@@ -490,6 +543,8 @@ class MapWatcher(QObject):
     def tick(self):
         if not self.running:
             return
+        if self.syslog is not None and time.time() - self.syslog_checked >= SYSLOG_CHECK_SECONDS:
+            self.check_syslog()
         if self.page.tribe_map_id is not None and time.time() - self.lease_checked >= LEASE_RENEW_SECONDS:
             self.claim()
         network_map = self.page.network_map

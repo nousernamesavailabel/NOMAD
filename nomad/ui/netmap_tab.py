@@ -2785,6 +2785,11 @@ class NetworkMapTab(QWidget):
                           and action.text() == "Tools"), menu)
             location = shown.device_group_label(key)  # Site / Building / Room, as its location
             actions[tools.addAction("Generate SNMP Config...")] = lambda: self.watcher.open_config_builder(location)
+        if device.kind in (SWITCH, ROUTER) and device.mgmt_ip and hasattr(self.window, "show_flows"):
+            tools = next((action.menu() for action in menu.actions() if action.menu() is not None
+                          and action.text() == "Tools"), menu)
+            actions[tools.addAction("Top Talkers (NetFlow)")] = lambda: self.show_flows(key)
+            actions[tools.addAction("Set Up NetFlow...")] = lambda: self.set_up_netflow(key)
         current = self.tabs.currentWidget()
         here_keys = current.selected_keys() if current in (self.view, self.l3_view) else []
         readable = [item for item in (here_keys if key in here_keys else [key])
@@ -3064,6 +3069,8 @@ class NetworkMapTab(QWidget):
             self.add_mirror_actions(menu, actions, key, port, hosts, to_here=device.kind == SWITCH)
             if hasattr(self.window, "show_acls"):
                 actions[menu.addAction("ACLs on This Port...")] =                     lambda: self.window.show_acls(device=key, port=port)
+            if hasattr(self.window, "show_flows") and device.mgmt_ip:
+                actions[menu.addAction("Top Talkers on This Port (NetFlow)")] = lambda: self.show_flows(key, port)
         if len(hosts) == 1:
             self.add_address_link(menu, actions, hosts[0].ip)
         if actions:
@@ -3246,11 +3253,46 @@ class NetworkMapTab(QWidget):
         if known:
             text = "What If It Fails?" if len(known) == 1 else f"What If All {len(known)} Links Fail?"
             actions[menu.addAction(text)] = lambda: self.show_overlay(overlays.IMPACT, known)
+        flow_end = self.flow_end(links[0]) if len(links) == 1 and hasattr(self.window, "show_flows") else None
+        if flow_end is not None:
+            actions[menu.addAction("Top Talkers on This Link (NetFlow)")] = lambda: self.show_flows(*flow_end)
         menu.addSeparator()
         self.add_link_actions(menu, actions, links)
         chosen = menu.exec_(position)
         if chosen in actions:
             actions[chosen]()
+
+    def flow_end(self, link):
+        """(device key, port) of the end of a link whose router (else switch) would send its flows, or None."""
+        ends = []
+        for key, port in ((link.a, link.a_port), (link.b, link.b_port)):
+            device = self.network_map.devices.get(key)
+            if device is not None and port and device.mgmt_ip and device.kind in (ROUTER, SWITCH):
+                ends.append((device.kind != ROUTER, key, port))
+        return min(ends)[1:] if ends else None
+
+    def device_addresses(self, key):
+        """Every address the map knows a device by (a router sends its flows from any of them)."""
+        device = self.network_map.devices.get(key) if self.network_map is not None else None
+        if device is None:
+            return []
+        found = [device.mgmt_ip, *(device.addresses or []),
+                 *(item[0] for item in device.interfaces_l3 or [] if item)]
+        return [address for address in dict.fromkeys(found) if address]
+
+    def show_flows(self, key, port=""):
+        """The NetFlow page on this device (and port)."""
+        self.window.show_flows(self.device_addresses(key), port)
+
+    def set_up_netflow(self, key):
+        """The NetFlow Config page, for this router (and the ports of its links)."""
+        device = self.network_map.devices.get(key) if self.network_map is not None else None
+        if device is None:
+            return
+        ports = [port for link in self.network_map.links for end, port in ((link.a, link.a_port),
+                                                                            (link.b, link.b_port))
+                 if end == key and port]
+        self.window.show_flow_config([device.mgmt_ip], list(dict.fromkeys(ports)))
 
     def show_links_in_table(self, links):
         self.tabs.setCurrentWidget(self.links_table)

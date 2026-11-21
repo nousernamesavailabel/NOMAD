@@ -174,9 +174,12 @@ def _copy_exe(source, target):
 
 
 def shared_exe_specs():
-    """The services that run the same copy of NOMAD.exe in Program Files: the IPAM server and the Map Watcher."""
+    """The services that run the same copy of NOMAD.exe in Program Files: the IPAM server, the Map Watcher, the
+    Flow Collector and the Syslog Collector."""
+    from ..flows.service import spec as flows_spec
     from ..netmap.watch_service import spec as watcher_spec
-    return [IPAM, watcher_spec()]
+    from ..syslogs.service import spec as syslog_spec
+    return [IPAM, watcher_spec(), flows_spec(), syslog_spec()]
 
 
 def secure_folder(directory, grants=FOLDER_GRANTS, owner=ADMINISTRATORS_SID):
@@ -271,14 +274,13 @@ def owner_problem(directory, owner=None, me=None):
 
 
 def open_firewall(port, rule=FIREWALL_RULE, protocol="TCP"):
-    close_firewall(rule)
-    _run(["netsh", "advfirewall", "firewall", "add", "rule", f"name={rule}", "dir=in", "action=allow",
-          f"protocol={protocol}", f"localport={port}", "profile=any"])
+    from ..firewall import open_rule
+    open_rule(rule, port, (protocol,))
 
 
 def close_firewall(rule=FIREWALL_RULE):
-    subprocess.run(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule}"],
-                   capture_output=True, creationflags=_hidden())
+    from ..firewall import close_rule
+    close_rule(rule)
 
 
 def register(spec):

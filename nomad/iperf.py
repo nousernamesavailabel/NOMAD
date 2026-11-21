@@ -24,7 +24,6 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from .system import CommandError, run_command
 
 log = logging.getLogger(__name__)
 
@@ -620,15 +619,10 @@ LEGACY_FIREWALL_RULE_NAME = "NICManager-iperf-server"  # From before the rename
 
 
 def open_firewall_port(port):
-    """Allow inbound iperf tests (TCP and UDP) through Windows Firewall. Needs administrator rights."""
-    for name in (FIREWALL_RULE_NAME, LEGACY_FIREWALL_RULE_NAME):  # Replace any rule from an earlier port
-        try:
-            run_command(["netsh", "advfirewall", "firewall", "delete", "rule", f"name={name}"])
-        except CommandError:
-            pass  # No existing rule
-    for protocol in ("TCP", "UDP"):
-        run_command(["netsh", "advfirewall", "firewall", "add", "rule", f"name={FIREWALL_RULE_NAME}", "dir=in",
-                     "action=allow", f"protocol={protocol}", f"localport={int(port)}"])
+    """Allow inbound iperf tests (TCP and UDP) through Windows Firewall, replacing the rule for an earlier port.
+    Needs administrator rights."""
+    from .firewall import open_rule
+    open_rule(FIREWALL_RULE_NAME, port, ("TCP", "UDP"), legacy=(LEGACY_FIREWALL_RULE_NAME,))
 
 
 class IperfServer:
