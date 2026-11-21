@@ -61,7 +61,8 @@ class FlowPushThread(StoppableThread):
             return False, f"Couldn't log in: {pusher.problems.get(address, 'no reason given')}", ""
         options = self.options
         names = [options.monitor, flowconfig.monitor6(options)]
-        monitored = flowconfig.parse_monitored(shell.run(MONITORED_COMMAND), names)
+        running = shell.run(MONITORED_COMMAND)
+        monitored = flowconfig.parse_monitored(running, names)
         removal = pusher.take_away(address, "\n".join(flowconfig.undo(
             flowconfig.FlowOptions(**{**options.__dict__, "write_memory": False}), monitored)))
         refused = [(line, errors) for line, errors in removal.refused
@@ -80,8 +81,9 @@ class FlowPushThread(StoppableThread):
             return True, (f"Taken out (from {taken} interface{'s' if taken != 1 else ''})." if taken else
                           "Taken out (it was on no interface)."), removal.transcript
         interfaces = self.interfaces
-        if self.every_routed:
-            interfaces = flowconfig.routed_interfaces(shell.run("show ip interface brief"))
+        if self.every_routed and not interfaces:  # Interfaces typed are the ones wanted
+            interfaces = flowconfig.routed_interfaces(shell.run("show ip interface brief"),
+                                                      flowconfig.configured_interfaces(running))
             if not interfaces:
                 return False, "It has no interface with an IPv4 address that's up to monitor.", removal.transcript
         outcome = pusher.set_up(address, "\n".join(flowconfig.build(options, interfaces)))
@@ -185,6 +187,13 @@ class FlowConfigTab(QWidget):
         routers_row.addWidget(self.routers_input, 1)
         routers_row.addWidget(self.map_button)
         ssh_layout.addLayout(routers_row)
+        self.routed_check = QCheckBox("No interfaces typed: every interface with an IPv4 address that's up, read "
+                                      "from each router")
+        self.routed_check.setToolTip("Used only when the Interfaces box is empty: interfaces typed are always the "
+                                     "ones set up. Interfaces the router made for itself (PIM register tunnels, "
+                                     "Virtual-Access) are left out.")
+        self.routed_check.setChecked(True)
+        ssh_layout.addWidget(self.routed_check)
         self.login_row = LoginRow(self, getattr(self.window, "session_store", None), "NetFlow Config")
         ssh_layout.addWidget(self.login_row)
         push_row = QHBoxLayout()
@@ -220,6 +229,7 @@ class FlowConfigTab(QWidget):
         self.remove_button.clicked.connect(self.take_out)
         self.stop_button.clicked.connect(self.stop_push)
         self.routers_input.textChanged.connect(self.update_buttons)
+        self.routed_check.toggled.connect(self.update_preview)
         for widget in form_widget.findChildren(QLineEdit):
             widget.textChanged.connect(self.update_preview)
         for widget in form_widget.findChildren(QCheckBox):
@@ -316,10 +326,6 @@ class FlowConfigTab(QWidget):
         self.interfaces_input.setToolTip("Monitored as traffic comes in; NOMAD counts it going out of the other "
                                          "interface too, so put it on every interface traffic comes in on.")
         form.addRow("Interfaces:", self.interfaces_input)
-        self.routed_check = QCheckBox("Over SSH: every interface with an IPv4 address that's up, read from each "
-                                      "router")
-        self.routed_check.setChecked(True)
-        form.addRow("", self.routed_check)
         self.write_check = QCheckBox("Save it (write memory)")
         form.addRow("", self.write_check)
         return group
@@ -393,6 +399,7 @@ class FlowConfigTab(QWidget):
                                                   "every interface with an address)."]
             set_hint(self.status_label, " ".join([f"{len(self.lines)} lines, from the enable (#) prompt."] + note +
                                                  caution), "warning" if caution or note else "info")
+        self.routed_check.setEnabled(not options.interfaces)
         has_lines = bool(self.lines)
         for widget in (self.send_button, self.copy_button, self.save_button):
             widget.setEnabled(has_lines)
@@ -528,7 +535,7 @@ class FlowConfigTab(QWidget):
         options = self.options()
         if flowconfig.problems(options) or not routers:
             return
-        every = self.routed_check.isChecked()
+        every = self.routed_check.isChecked() and not options.interfaces
         if setting_up and not every and not options.interfaces:
             set_hint(self.status_label, "Type the interfaces to monitor, or tick every interface with an address.",
                      "warning")

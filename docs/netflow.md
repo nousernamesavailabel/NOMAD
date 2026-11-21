@@ -51,7 +51,7 @@ You can send it three ways:
 | --- | --- |
 | **Send to Session** | Types the lines into a terminal session at the enable (#) prompt |
 | **Copy** or **Save As...** | For pasting it yourself |
-| **Set Up over SSH** | Sets it up on each router in **Routers** in turn. With **every interface with an IPv4 address** ticked, each router's own interfaces are read from it. Whatever NOMAD set up before is taken out first, because IOS can't change a flow record that's in use. |
+| **Set Up over SSH** | Sets it up on each router in **Routers** in turn. It uses the interfaces you typed. If you typed none and **every interface with an IPv4 address** is ticked, each router's own interfaces are read from it, leaving out ones the router made for itself, such as PIM register tunnels. Whatever NOMAD set up before is taken out first, because IOS can't change a flow record that's in use. |
 
 **Take Out over SSH** takes the monitor off every interface it's on and removes the record, exporter and monitor. Check a router with `show flow monitor NOMAD-MONITOR statistics` and `show flow exporter NOMAD-EXPORTER statistics`.
 

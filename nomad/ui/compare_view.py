@@ -1,7 +1,7 @@
 """Compare, as in Notepad++'s Compare: two files side by side (or one pane showing both), scrolled together and lined
 up by blank space (annotations, so neither file changes), with the changes colored. Both sides can be edited; the
 arrows in the margin copy a change from one side to the other, and the comparison follows every edit."""
-from PyQt5.Qsci import QsciStyle
+from PyQt5.Qsci import QsciScintilla, QsciStyle
 from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPixmap, QPolygonF
 from PyQt5.QtWidgets import QComboBox, QHBoxLayout, QLabel, QMenu, QPushButton, QSplitter, QStackedWidget, \
@@ -338,9 +338,24 @@ class CompareView(QWidget):
                     self.inline.go_to(number)
                     break
         else:
-            self.left.editor.go_to(min(hunk.a_start, max(self.left.editor.lines() - 1, 0)))
-            self.right.editor.setCursorPosition(min(hunk.b_start, max(self.right.editor.lines() - 1, 0)), 0)
+            self.show_lines(hunk.a_start, hunk.b_start)
         self.show_position()
+
+    def show_lines(self, left_line, right_line):
+        """Put the cursor on left_line on the left and right_line on the right, then scroll both sides to the same
+        place (a few rows above whichever comes first), so they stay lined up. Scrolling from code doesn't pass
+        through the scroll bars' sync, so both sides are set here."""
+        rows = []
+        for pane, line in ((self.left, left_line), (self.right, right_line)):
+            editor = pane.editor
+            line = max(0, min(line, editor.lines() - 1))
+            editor.setCursorPosition(line, 0)
+            rows.append(editor.SendScintilla(QsciScintilla.SCI_VISIBLEFROMDOCLINE, line))
+        top = max(min(rows) - 3, 0)
+        self.syncing = True
+        for pane in (self.left, self.right):
+            pane.editor.setFirstVisibleLine(top)
+        self.syncing = False
 
     def next_change(self):
         self.go_to_change(self.current + 1)
@@ -352,11 +367,10 @@ class CompareView(QWidget):
         rows = self.result.rows if self.result else []
         if not rows:
             return
-        row = rows[min(int(fraction * len(rows)), len(rows) - 1)]
-        if row.a is not None:
-            self.left.editor.go_to(row.a)
-        elif row.b is not None:
-            self.right.editor.go_to(row.b)
+        index = min(int(fraction * len(rows)), len(rows) - 1)
+        left_line = next((row.a for row in rows[index:] if row.a is not None), len(self.result.a_lines))
+        right_line = next((row.b for row in rows[index:] if row.b is not None), len(self.result.b_lines))
+        self.show_lines(left_line, right_line)
 
     # ----------------------------------------------------------------- Copying across
 

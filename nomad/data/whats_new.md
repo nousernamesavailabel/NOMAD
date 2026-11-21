@@ -4,6 +4,11 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-11-20
+
+- **Fixed:** NetFlow Config sent over SSH sets up only the interfaces you typed. Before, the **every interface with an IPv4 address** box (ticked by default) won, and a router's own PIM tunnel could refuse the setup. The box now applies only when no interfaces are typed, it skips interfaces the router made for itself, and it's in the **Over SSH** box under **Routers**, where you can see it.
+- **Fixed:** **Prev** and **Next** in the Editor's Compare keep the left and right sides lined up. Before, only the left side moved to the change. Clicking the change strip on the right edge is fixed too.
+
 ## [2.7.0] - 2026-11-20
 
 - **New:** install **Tools > Syslog Collector Service...** to keep every syslog message all the time (90 days by default), for everyone using NOMAD on the computer. The Syslog page then shows the service's messages, and **Search Kept** searches everything it kept.

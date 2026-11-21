@@ -6,6 +6,13 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.7.1] - 2026-11-20
+
+### Fixed
+
+- **NetFlow Config over SSH sets up only the interfaces typed.** With **every interface with an IPv4 address** ticked (the default), sending over SSH put the monitor on every routed interface it read from the router and ignored the ones typed, which the pasted config didn't do. A PIM register tunnel (Tunnel0, which the router makes for itself) then refused it with "% This interface cannot be modified". Interfaces typed now always win: the box only applies when none are typed, and it's grayed out while some are. The box also moved from the bottom of the form, where it was usually scrolled out of sight, into the **Over SSH** box under **Routers**. When it does apply, interfaces that aren't in the running config (PIM's register tunnels, Virtual-Access) are left out. New `flowconfig.configured_interfaces`; `routed_interfaces` takes the names configured.
+- **Compare's Prev and Next keep the two sides lined up.** Going to a change scrolled the left side to it but left the right side where it was (scrolling from code doesn't pass through the scroll bars' sync), so the sides no longer matched line for line. Clicking the change strip on the right edge did the same. Both now put the cursor on the change on each side and scroll both sides to the same place. New `CompareView.show_lines`.
+
 ## [2.7.0] - 2026-11-20
 
 ### Added

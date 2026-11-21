@@ -314,7 +314,8 @@ class FakeShell:
                     "GigabitEthernet1.172   172.18.0.15     YES NVRAM  up                    up\n"
                     "GigabitEthernet2       8.0.0.18        YES NVRAM  up                    up\n"
                     "GigabitEthernet4       10.4.4.4        YES NVRAM  administratively down down\n"
-                    "Loopback0              10.18.0.15      YES NVRAM  up                    up\n")
+                    "Loopback0              10.18.0.15      YES NVRAM  up                    up\n"
+                    "Tunnel0                10.18.0.15      YES unset  up                    up\n")
         return self.running
 
 
@@ -345,7 +346,8 @@ class FakePusher:
         return True, "[OK]"
 
 
-RUNNING = ("interface GigabitEthernet1.172\n ip flow monitor NOMAD-MONITOR input\n"
+RUNNING = ("interface GigabitEthernet1\ninterface GigabitEthernet1.172\n ip flow monitor NOMAD-MONITOR input\n"
+           "interface GigabitEthernet2\ninterface GigabitEthernet4\ninterface Loopback0\n"
            "interface GigabitEthernet9\n ip flow monitor OTHER input\n")
 
 
@@ -360,6 +362,25 @@ def test_push_takes_out_the_old_then_sets_up_every_routed_interface():
         removal and "GigabitEthernet9" not in removal  # Another monitor is left alone
     assert second == "set up" and "interface GigabitEthernet2\n ip flow monitor NOMAD-MONITOR input" in setup
     assert "GigabitEthernet4" not in setup and "Loopback0\n ip flow" not in setup
+    assert "Tunnel0" not in setup  # PIM's register tunnel: up with an address, but not in the running config
+
+
+def test_push_uses_the_interfaces_typed_even_with_every_routed_ticked():
+    options = flowconfig.FlowOptions(destinations=["192.168.5.25"], interfaces=["GigabitEthernet2"])
+    thread = FlowPushThread(["10.18.0.15"], options, ["GigabitEthernet2"], True, True, None)
+    pusher = FakePusher(RUNNING)
+    ok, message, _ = thread.one(pusher, "10.18.0.15")
+    assert ok and message.startswith("Set up on Gi2.")
+    setup = pusher.sent[1][1]
+    assert "interface GigabitEthernet2\n" in setup
+    assert "GigabitEthernet1.172\n ip flow" not in setup and "Tunnel0" not in setup
+
+
+def test_every_routed_box_greys_out_when_interfaces_are_typed(config_page):
+    config_page.interfaces_input.setText("")
+    assert config_page.routed_check.isEnabled()
+    config_page.interfaces_input.setText("Gi0/0/1")
+    assert not config_page.routed_check.isEnabled()
 
 
 def test_push_refused_and_take_out():
@@ -374,7 +395,10 @@ def test_push_refused_and_take_out():
 
 def test_routed_interfaces_and_monitored_parsing():
     brief = FakeShell("").run("show ip interface brief")
-    assert flowconfig.routed_interfaces(brief) == ["GigabitEthernet1.172", "GigabitEthernet2"]
+    assert flowconfig.routed_interfaces(brief) == ["GigabitEthernet1.172", "GigabitEthernet2", "Tunnel0"]
+    configured = flowconfig.configured_interfaces(RUNNING)
+    assert "Tunnel0" not in configured and "GigabitEthernet1.172" in configured
+    assert flowconfig.routed_interfaces(brief, configured) == ["GigabitEthernet1.172", "GigabitEthernet2"]
     assert flowconfig.parse_monitored(RUNNING, ["NOMAD-MONITOR"]) == [
         ("GigabitEthernet1.172", "ip flow monitor NOMAD-MONITOR input")]
 

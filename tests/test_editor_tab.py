@@ -115,6 +115,41 @@ def test_compare_copy_arrow_and_close_prompt(page, app, monkeypatch):
     assert page.docs.count() == 0
 
 
+def test_compare_prev_next_keep_sides_lined_up(app):
+    from PyQt5.Qsci import QsciScintilla
+    left, right = [], []
+    for number in range(300):
+        left.append(f"line {number}")
+        right.append(f"line {number}")
+        if number % 37 == 5:
+            right.extend(f"added {number}.{extra}" for extra in range(12))
+        if number % 53 == 9:
+            left.extend(f"removed {number}.{extra}" for extra in range(9))
+    view = CompareView(None, "\n".join(left), "\n".join(right), "Left", "Right", mode=diff.PLAIN)
+    view.resize(900, 400)
+    view.show()
+    app.processEvents()
+
+    def first_lines():
+        return [pane.editor.SendScintilla(QsciScintilla.SCI_GETFIRSTVISIBLELINE) for pane in view.panes()]
+
+    try:
+        tops = set()
+        for step in range(len(view.result.changes) * 2):
+            view.next_change() if step < len(view.result.changes) else view.previous_change()
+            app.processEvents()
+            top_left, top_right = first_lines()
+            assert top_left == top_right, f"change {view.current + 1}: left at {top_left}, right at {top_right}"
+            tops.add(top_left)
+        assert len(tops) > 1  # It really moved
+        view.go_to_fraction(0.8)
+        app.processEvents()
+        top_left, top_right = first_lines()
+        assert top_left == top_right and top_left > 0
+    finally:
+        view.deleteLater()
+
+
 def test_fix_commands_from_compare(page, app):
     view = page.open_compare("hostname R1\ninterface Gi0/1\n description A\n",
                              "hostname R1\ninterface Gi0/1\n description B\n", "Now", "Wanted")

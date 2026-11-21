@@ -266,9 +266,17 @@ def parse_monitored(running, monitor_names):
     return found
 
 
-def routed_interfaces(brief):
+def configured_interfaces(running):
+    """The interface names in show running-config (or its ^interface lines). Interfaces the router makes for itself,
+    such as PIM's register tunnels and Virtual-Access, aren't in it, and refuse being configured."""
+    return {line.split()[1] for line in running.splitlines()
+            if line.startswith("interface ") and len(line.split()) > 1}
+
+
+def routed_interfaces(brief, configured=None):
     """The interfaces with an IPv4 address that aren't administratively down, from show ip interface brief
-    (loopbacks, Null and the like left out: no traffic comes in on them)."""
+    (loopbacks, Null and the like left out: no traffic comes in on them). configured: the names in the running
+    config, when read; any other is one the router made for itself (a PIM register tunnel), so it's left out."""
     found = []
     for line in brief.splitlines():
         parts = line.split()
@@ -280,6 +288,8 @@ def routed_interfaces(brief):
         except ValueError:
             continue
         if SKIPPED_INTERFACES.match(name) or "administratively" in line:
+            continue
+        if configured and name not in configured:
             continue
         found.append(name)
     return found
