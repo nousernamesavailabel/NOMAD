@@ -105,8 +105,9 @@ def test_opening_replaces_the_rule_and_its_old_names(monkeypatch):
 # --------------------------------------------------------------------- The services
 
 def test_services_are_listed_in_install_order_with_their_ports(tmp_path, monkeypatch):
-    assert [entry.key for entry in catalog.SERVICES] == ["tribe", "syslog", "flows", "watcher"]
-    assert {rule.service for rule in firewall.RULES if rule.service} == {"tribe", "syslog", "flows", "watcher"}
+    assert [entry.key for entry in catalog.SERVICES] == ["tribe", "syslog", "flows", "watcher", "dashboard"]
+    assert {rule.service for rule in firewall.RULES if rule.service} == {"tribe", "syslog", "flows", "watcher",
+                                                                         "dashboard"}
     rules = {name for entry in catalog.SERVICES for name in entry.firewall()}
     assert rules == {rule.name for rule in firewall.RULES if rule.service}
     assert catalog.read_config(tmp_path, {"port": 1}) == {"port": 1}  # Not installed yet
@@ -122,6 +123,9 @@ def test_services_are_listed_in_install_order_with_their_ports(tmp_path, monkeyp
     (tmp_path / "config.json").write_text(json.dumps({"port": 1514, "tcp": True}), encoding="utf-8")
     assert catalog.ports_text(syslog) == "UDP and TCP 1514"
     assert catalog.ports_text(catalog.entry("watcher")) == "UDP 514 and 162"
+    from nomad.dashboard import service as dashboard_service
+    monkeypatch.setattr(dashboard_service, "dashboard_dir", lambda: tmp_path / "dashboard")
+    assert catalog.ports_text(catalog.entry("dashboard")) == "TCP 8444"
 
 
 # --------------------------------------------------------------------- The window

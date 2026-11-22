@@ -2,9 +2,11 @@
 one place.
 
 The services (services_catalog.py) can be installed, started, stopped and removed together, or one at a time; Set
-Up opens a service's own dialog, as its Tools menu item does. Install Ticked goes through them in the order they're
-best installed: the Tribe Server and the Map Watcher open their own dialogs (they need choices made), the Syslog and
-Flow Collectors are installed with their usual settings, or the ones they had before.
+Up opens a service's own dialog, as its Tools menu item does. Install or Update Ticked goes through them in the order
+they're best installed: the Tribe Server and the Map Watcher open their own dialogs (they need choices made), the
+Syslog and Flow Collectors are installed with their usual settings, or the ones they had before. The Version column
+says which NOMAD each running service runs (service_versions), and marks those that want updating; ticked, Install
+or Update Ticked updates them too.
 
 The firewall list (firewall.py) shows each rule NOMAD makes, what uses it, the port it should allow and whether it
 does, and opens, fixes or removes rules; the pages' Open Firewall Port buttons and the services make the same ones.
@@ -18,7 +20,7 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QLabel, \
     QMessageBox, QPushButton, QTableWidgetItem, QVBoxLayout
 
-from .. import firewall
+from .. import firewall, service_versions
 from .. import services_catalog as catalog
 from .common import HINT_COLORS, read_only_table, run_in_background, set_hint
 from .syslog_service_dialog import free_syslog_port, give_syslog_port_back
@@ -29,7 +31,7 @@ log = logging.getLogger(__name__)
 STATUS_SECONDS = 5
 NOT_INSTALLED, STOPPED, STARTING, RUNNING, STOPPING = "Not installed", "Stopped", "Starting", "Running", "Stopping"
 INSTALLED = (STOPPED, STARTING, RUNNING, STOPPING)
-SERVICE_COLUMNS = ["Service", "Status", "Ports", "What it does"]
+SERVICE_COLUMNS = ["Service", "Status", "Version", "Ports", "What it does"]
 RULE_COLUMNS = ["Rule", "Used by", "Allows", "State", "Details"]
 STATUS_KINDS = {RUNNING: "success", STOPPED: "warning", STARTING: "info", STOPPING: "info", NOT_INSTALLED: "info"}
 RULE_KINDS = {firewall.OPEN: "success", firewall.NOT_OPEN: "info", firewall.MISSING: "warning",
@@ -107,12 +109,12 @@ class ServicesDialog(QDialog):
             item = QTableWidgetItem(entry.title)
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
-            item.setToolTip("Tick it for Install Ticked or Uninstall Ticked")
+            item.setToolTip("Tick it for Install or Update Ticked, or Uninstall Ticked")
             self.services_table.setItem(row, 0, item)
             for column in range(1, len(SERVICE_COLUMNS)):
                 self.services_table.setItem(row, column, QTableWidgetItem())
-            self.services_table.item(row, 3).setText(entry.purpose)
-            self.services_table.item(row, 3).setToolTip(entry.purpose)
+            self.services_table.item(row, 4).setText(entry.purpose)
+            self.services_table.item(row, 4).setToolTip(entry.purpose)
         self.services_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.services_table.setWordWrap(False)  # One line each (the whole of it in the tooltip), so it fits
         services_layout.addWidget(self.services_table)
@@ -130,9 +132,9 @@ class ServicesDialog(QDialog):
         row_buttons.addStretch()
         services_layout.addLayout(row_buttons)
         bulk_buttons = QHBoxLayout()
-        self.install_ticked_button = accent_button("Install Ticked")
-        self.install_ticked_button.setToolTip("Install the ticked services that aren't installed yet, in the order "
-                                              "they're best installed")
+        self.install_ticked_button = accent_button("Install or Update Ticked")
+        self.install_ticked_button.setToolTip("Install the ticked services that aren't installed yet, and update "
+                                              "those that run an older NOMAD, in the order they're best installed")
         self.uninstall_ticked_button = QPushButton("Uninstall Ticked...")
         self.start_all_button = QPushButton("Start All")
         self.stop_all_button = QPushButton("Stop All")
@@ -185,7 +187,8 @@ class ServicesDialog(QDialog):
         self.done_text = ""
         self.touched = set()  # Keys of the services the running job changes
         self.released_watcher = None
-        self.queue = []  # Install Ticked: the services still to install
+        self.queue = []  # Install or Update Ticked: the services still to install or update
+        self.behind = {}  # Key -> why a running service wants updating
         self.installing = None
         self.problems = []
 
@@ -240,13 +243,34 @@ class ServicesDialog(QDialog):
             status_item = self.services_table.item(row, 1)
             status_item.setText(state)
             status_item.setForeground(QColor(HINT_COLORS[STATUS_KINDS.get(state, "error")]))
+            self.show_version(row, entry, state)
             try:
                 ports = catalog.ports_text(entry, self.found_port)
             except Exception as error:  # Its module couldn't be read
                 ports = f"? ({error})"
-            self.services_table.item(row, 2).setText(ports)
+            self.services_table.item(row, 3).setText(ports)
         self.show_firewall()
         self.update_buttons()
+
+    def show_version(self, row, entry, state):
+        """The NOMAD a running service runs, marked when it wants updating."""
+        self.behind.pop(entry.key, None)
+        text, reason = "", ""
+        try:
+            if state == RUNNING:
+                note = service_versions.read_note(entry.spec().argument)
+                text = service_versions.version_text(entry, state, lambda _argument: note)
+                reason = service_versions.why_behind(note)
+        except Exception:  # Its module couldn't be read: nothing to say
+            text, reason = "", ""
+        item = self.services_table.item(row, 2)
+        if reason:
+            self.behind[entry.key] = reason
+            text = f"{text}: update" if text else "Update"
+        item.setText(text)
+        item.setToolTip(f"It {reason}. Tick it and click Install or Update Ticked, or Set Up and Update Service."
+                        if reason else "The NOMAD it runs" if text else "")
+        item.setForeground(QColor(HINT_COLORS["warning" if reason else "info"]))
 
     def found_port(self, name):
         """The port a rule in Windows Firewall has (for a service whose settings can't be read without
@@ -284,7 +308,7 @@ class ServicesDialog(QDialog):
         self.uninstall_button.setEnabled(idle and state in INSTALLED)
         self.folder_button.setEnabled(entry is not None and folder_exists(entry))
         ticked = self.ticked()
-        self.install_ticked_button.setEnabled(idle and bool(self.in_state(ticked, (NOT_INSTALLED,))))
+        self.install_ticked_button.setEnabled(idle and bool(self.to_install(ticked)))
         self.uninstall_ticked_button.setEnabled(idle and bool(self.in_state(ticked, INSTALLED)))
         self.start_all_button.setEnabled(idle and bool(self.in_state(catalog.SERVICES, (STOPPED,))))
         self.stop_all_button.setEnabled(idle and bool(self.in_state(catalog.SERVICES, (RUNNING,))))
@@ -525,21 +549,30 @@ class ServicesDialog(QDialog):
             self.run("Stopping the services...", Job(catalog.stop, entries), f"Stopped {names(entries)}.",
                      [entry.key for entry in entries])
 
+    def to_install(self, entries):
+        """Those of entries to install (not installed yet) or update (running an older NOMAD), in order."""
+        return [entry for entry in entries
+                if self.states.get(entry.key) == NOT_INSTALLED or entry.key in self.behind]
+
     def install_ticked(self):
-        entries = self.in_state(self.ticked(), (NOT_INSTALLED,))
+        entries = self.to_install(self.ticked())
         if not entries:
             return
         lines = []
         for entry in entries:
-            how = "opens its own window to set it up" if entry.install_quietly is None else \
-                f"with its usual settings ({catalog.ports_text(entry)}); Set Up changes them after"
+            if entry.key in self.behind:
+                how = ("update: opens its own window (click Update Service)" if entry.install_quietly is None else
+                       "update, with the settings it has")
+            else:
+                how = "opens its own window to set it up" if entry.install_quietly is None else \
+                    f"with its usual settings ({catalog.ports_text(entry)}); Set Up changes them after"
             lines.append(f"- {entry.title}: {how}")
-        if QMessageBox.question(self, "Install Services", "Install these services, in this order?\n\n" +
+        if QMessageBox.question(self, "Install Services", "Install or update these services, in this order?\n\n" +
                                 "\n".join(lines)) != QMessageBox.Yes:
             return
         self.queue = list(entries)
         self.problems = []
-        self.busy = "Installing the ticked services..."
+        self.busy = "Installing or updating the ticked services..."
         self.update_buttons()
         self.next_install()
 
@@ -557,7 +590,9 @@ class ServicesDialog(QDialog):
             return
         entry = self.installing = self.queue.pop(0)
         if entry.install_quietly is None:
-            set_hint(self.message_label, f"Setting up the {entry.title} in its own window...", "info")
+            set_hint(self.message_label, f"Setting up the {entry.title} in its own window..." if entry.key not in
+                     self.behind else f"Updating the {entry.title} in its own window (click Update Service)...",
+                     "info")
             getattr(self.window, entry.dialog)()  # Modal: it's closed by the time this carries on
             self.refresh_services()
             if self.states.get(entry.key) == NOT_INSTALLED:

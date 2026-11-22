@@ -33,7 +33,7 @@ from pathlib import Path
 
 from .. import __version__
 from ..system import app_data_dir, log_dir
-from .server import ADMIN, API_LEVEL, KEY_FILE_FORMAT, TEAM, ConflictError, fingerprint, fingerprint_of_file, \
+from .server import ADMIN, API_LEVEL, KEY_FILE_FORMAT, TEAM, VIEWER, ConflictError, fingerprint, fingerprint_of_file, \
     load_config, server_dir
 from .store import TABLES, IpamError, IpamStore, current_user, ip_key, parse_address
 from .assets import ASSET_PENDING_SCHEMA, keep_pending_on_top as keep_asset_pending_on_top
@@ -72,12 +72,16 @@ WLC_API = 13  # And wireless controllers as a kind of asset
 LOCK_API = 14  # And map icons locked in place
 NETWORK_API = 15  # And taking a laptop's whole network
 CONFIG_API = 16  # And the config archive
+VIEWER_API = 17  # And viewer keys (the NOMAD Dashboard), and ports graphed on the dashboard
+MONITOR_API = 18  # And the Map Watcher's monitoring of each map, for every NOMAD
 SERVER_FEATURES = ((2, "instant sync"), (3, "change history"), (4, "loopback subnets"), (5, "Last Seen sweep results"),
                    (6, "tribe maps"), (VLAN_API, "VLANs"), (PLACEMENT_API, "Subnet Placement"),
                    (ROLES_API, "subnet roles"), (MOVE_API, "moving subnets between networks"), (ASSET_API, "assets"),
                    (TARGET_API, "software targets"), (WLC_API, "wireless controllers as assets"),
                    (LOCK_API, "locked map icons"), (NETWORK_API, "sharing a whole network with a map"),
-                   (CONFIG_API, "the config archive and scheduled backups"))
+                   (CONFIG_API, "the config archive and scheduled backups"),
+                   (VIEWER_API, "viewer keys for the NOMAD Dashboard"),
+                   (MONITOR_API, "the Map Watcher's monitoring on every NOMAD's map"))
 
 
 @dataclass
@@ -150,7 +154,8 @@ class TeamKey:
             if data.get("format") != KEY_FILE_FORMAT:
                 raise ValueError
             key = cls(str(data["server_id"]), [str(host) for host in data["hosts"]], int(data["port"]),
-                      str(data["fingerprint"]).lower(), str(data["secret"]))
+                      str(data["fingerprint"]).lower(), str(data["secret"]),
+                      VIEWER if data.get("role") == VIEWER else TEAM)
         except (KeyError, TypeError, ValueError, AttributeError):
             raise TeamKeyError("That isn't a NOMAD tribe key file (or it's from a newer version of NOMAD).") from None
         if not key.hosts or len(key.fingerprint) != 64:
@@ -158,11 +163,20 @@ class TeamKey:
         return key
 
 
-def read_key_file(path):
+VIEWER_KEY_TEXT = ("is a viewer key, for the NOMAD Dashboard (Tools > NOMAD Dashboard Service): it can only read the "
+                   "tribe. To connect NOMAD to the tribe, ask for the tribe key file.")
+
+
+def read_key_file(path, viewer=False):
+    """The tribe key in a key file. A viewer key (for the NOMAD Dashboard, which only reads) is refused unless viewer
+    is True."""
     try:
-        return TeamKey.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+        key = TeamKey.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
     except (OSError, ValueError) as error:
         raise TeamKeyError(f"Couldn't read {Path(path).name}: {error}") from None
+    if key.role == VIEWER and not viewer:
+        raise TeamKeyError(f"{Path(path).name} {VIEWER_KEY_TEXT}")
+    return key
 
 
 def admin_key(directory=None):
@@ -461,6 +475,10 @@ class TeamClient:
 
     def map_secrets(self, map_id):
         return self.request("GET", f"/api/maps/secrets?map_id={int(map_id)}")["secrets"]
+
+    def map_monitoring(self, map_id):
+        """The Map Watcher's monitoring of a map: {"summary", "updated", "by"} ({} if none was sent; server API 18)."""
+        return self.request("GET", f"/api/maps/monitoring?map_id={int(map_id)}")
 
     # ----------------------------------------------------------------- The config archive (server API 16)
 

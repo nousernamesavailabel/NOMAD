@@ -200,6 +200,14 @@ class SyslogQueries:
         return [{"source": source, "first_seen": first, "last_seen": last, "messages": count, "host": host}
                 for source, first, last, count, host in rows]
 
+    def counts(self, start, end=None):
+        """[[source, severity, how many]] received from start to end (epoch seconds): how much each sender said, at
+        each severity, without what it said (the NOMAD Dashboard shows only this)."""
+        end = time.time() + 60 if end is None else float(end)
+        return [list(row) for row in self.query(
+            "SELECT source, severity, count(*) FROM messages WHERE received BETWEEN ? AND ? GROUP BY source, severity "
+            "ORDER BY source, severity", (float(start), end))]
+
     def summary(self):
         count, oldest, newest = self.query("SELECT count(*), min(received), max(received) FROM messages")[0]
         return {"messages": count, "oldest": oldest, "newest": newest, "latest_id": self.latest_id()}

@@ -43,6 +43,7 @@ RULES = [
     Rule("NOMAD Flow Collector", "Flow Collector service", (UDP,), 2055, service="flows"),
     Rule("NOMAD Map Watcher syslog", "Map Watcher service (syslog)", (UDP,), 514, service="watcher"),
     Rule("NOMAD Map Watcher traps", "Map Watcher service (SNMP traps)", (UDP,), 162, service="watcher"),
+    Rule("NOMAD Dashboard", "NOMAD Dashboard service (HTTPS)", (TCP,), 8444, service="dashboard"),
     Rule("NOMAD syslog", "Syslog page", (UDP,), 514, page="syslog_tab"),
     Rule("NOMAD NetFlow", "NetFlow page", (UDP,), 2055, page="flows_tab"),
     Rule("NOMAD TFTP server", "TFTP page", (UDP,), 69, page="tftp_tab"),

@@ -11,7 +11,8 @@ Each service and page can still be set up on its own, as before. This window is 
 | **Tribe Server** | Shares the tribe's IP addresses, VLANs, assets and network maps with NOMAD on every laptop. See [IPAM and the tribe](ipam-and-tribe.md). | One computer that's always on. |
 | **Syslog Collector** | Keeps every syslog message devices send, for everyone using NOMAD on the computer. See [Syslog](syslog.md). | The computer the devices send syslog to. |
 | **Flow Collector** | Keeps the NetFlow and IPFIX routers send, for everyone using NOMAD on the computer. See [NetFlow](netflow.md). | The computer the routers send flows to. |
-| **Map Watcher** | Watches the tribe's maps for new switches, access points and hosts, and runs the scheduled config backups. See [Network map](network-map.md). | A computer that's always on and can reach the switches. It needs a tribe. |
+| **Map Watcher** | Watches the tribe's maps for new switches, access points and hosts, and runs the scheduled config backups. It can also monitor the maps for the dashboard. See [Network map](network-map.md). | A computer that's always on and can reach the switches. It needs a tribe. |
+| **NOMAD Dashboard** | A read-only web site showing the network's state to people without NOMAD. See [NOMAD Dashboard](dashboard.md). | The computer with the Map Watcher and the collectors. It needs a viewer key from the tribe server. |
 
 A laptop usually needs none of them. On a server several people use over Remote Desktop, install the collectors instead of using Start Listening or Collect Here, because only one program can listen on each port.
 
@@ -22,11 +23,11 @@ Installing services and changing firewall rules needs administrator rights. With
 1. Start NOMAD as administrator (**File** > **Restart as Administrator**).
 2. Open **Tools** > **Services & Firewall...**
 3. Tick each service this computer should run.
-4. Click **Install Ticked**. NOMAD lists what it will do and asks you to confirm.
-5. When the **Tribe Server** or **Map Watcher** window opens, set it up there and click **Install Service**, then close that window. NOMAD carries on with the next service.
+4. Click **Install or Update Ticked**. NOMAD lists what it will do and asks you to confirm.
+5. When the **Tribe Server**, **Map Watcher** or **NOMAD Dashboard** window opens, set it up there and click **Install Service**, then close that window. NOMAD carries on with the next service.
 6. Look at the firewall list. If any rule says **Missing** or **Needs fixing**, click **Fix All**.
 
-The services are installed in this order: Tribe Server, Syslog Collector, Flow Collector, Map Watcher. The Map Watcher needs the tribe, so it goes after the Tribe Server. The Syslog Collector goes before the Map Watcher so it has UDP 514 first, and the Map Watcher then reads syslog from it.
+The services are installed in this order: Tribe Server, Syslog Collector, Flow Collector, Map Watcher, NOMAD Dashboard. The Map Watcher needs the tribe, so it goes after the Tribe Server. The dashboard reads all the others, so it goes last. The Syslog Collector goes before the Map Watcher so it has UDP 514 first, and the Map Watcher then reads syslog from it.
 
 The Syslog Collector and Flow Collector are installed with their usual settings, or the settings they had before. To change the port or how long they keep data, select the service and click **Set Up...**
 
@@ -42,6 +43,19 @@ Select a service in the list, then:
 **Start All** and **Stop All** act on every installed service. **Uninstall Ticked...** removes the ticked ones.
 
 The status of each service updates every few seconds.
+
+## Keep the services up to date
+
+The **Version** column shows which NOMAD each running service runs. It says **update** when a service runs an older NOMAD than the one you have open, or was started before its copy of NOMAD changed.
+
+NOMAD also shows a banner across its window when a service on this computer needs updating. To update them:
+
+1. Start NOMAD as administrator.
+2. Open **Tools** > **Services & Firewall...**
+3. Tick the services marked **update**.
+4. Click **Install or Update Ticked**. The Syslog and Flow Collectors are updated with the settings they have. The Tribe Server, Map Watcher and NOMAD Dashboard open their own windows, where you click **Update Service**.
+
+**Dismiss** hides the banner until another service needs updating.
 
 ## Firewall rules
 

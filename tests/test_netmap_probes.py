@@ -333,11 +333,11 @@ def test_box_of_a_device_checked_from_a_router(app):
     assert "Unreachable when crawled" in item.toolTip()
     item.monitor_state = monitor.DeviceStatus(status=UP, rtt=4, via="r1 (vrf MGMT-B)")
     item.update_tip()
-    assert item.detail_lines() == [("10.20.5.11  ·  4 ms", COLORS["muted"]), ("Via r1", COLORS["muted"])]
+    assert item.detail_lines() == [("10.20.5.11 · 4 ms", COLORS["muted"]), ("Via r1", COLORS["muted"])]
     assert item.name_color() == COLORS["text"]
     assert "Checked from r1 (vrf MGMT-B) with an IP SLA ping" in item.toolTip()
     item.monitor_state = monitor.DeviceStatus(status=DOWN, since=1.0, via="r1 (vrf MGMT-B)")
-    assert item.detail_lines()[1][0].startswith("Down for")  # Down still says so, router or not
+    assert item.detail_lines()[1][0].startswith("Down ")  # Down still says so, router or not
     item.monitor_state = None  # Not monitored: back to what the crawl found
     item.update_tip()
     assert item.detail_lines()[1][0] == "Unreachable" and "Checked from" not in item.toolTip()
@@ -355,7 +355,7 @@ def test_box_of_an_unreachable_device_that_pings_now(app):
     assert "Answers ping now" in item.toolTip()
     item.monitor_state = monitor.DeviceStatus(status=DOWN, since=1.0)
     item.update_tip()
-    assert item.detail_lines()[1][0].startswith("Down for") and item.name_color() == COLORS["error"]
+    assert item.detail_lines()[1][0].startswith("Down ") and item.name_color() == COLORS["error"]
     assert "Answers ping now" not in item.toolTip()
 
 

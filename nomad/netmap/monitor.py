@@ -4,10 +4,9 @@ back. A device is down only after missing FAILS_FOR_DOWN polls in a row, so one 
 A device with an IP SLA probe on a router (probes.py) is checked from that router instead: each new result of the
 probe counts as one poll, and while the router can't be read (or the probe isn't running) the device is unknown,
 not down."""
-import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 UP, DOWN, UNKNOWN = "up", "down", "unknown"
@@ -16,7 +15,6 @@ FAILS_FOR_DOWN = 2  # Polls in a row with no answer before a device counts as do
 PING_TRIES = 2  # Pings per poll: one answer is enough
 PING_TIMEOUT_MS = 1000
 WORKERS = 32
-HISTORY_LIMIT = 5000  # Status changes kept with the map
 INTERVALS = [10, 30, 60, 120, 300, 600]  # Seconds between polls on offer
 DEFAULT_INTERVAL = 30
 
@@ -30,6 +28,11 @@ class DeviceStatus:
     checked: float = 0.0  # time.time() of the last poll
     via: str = ""  # Checked from a router: "R5 (vrf MGMT-B)" ("" for a ping from this computer)
     problem: str = ""  # Unknown because it can't be checked: why ("R5 isn't answering SNMP")
+    # How it's shown (monitor_record fills these in; the tracker leaves them be):
+    exact: bool = True  # False: since is only when monitoring first saw it like this ("up for at least...")
+    uptime: dict = field(default_factory=dict)  # "24h"/"7d"/"30d" -> fraction of the time it was up
+    source: str = ""  # Whose monitoring this is: "" (this computer's), or "the Map Watcher on PC1"
+    stale_at: float = 0.0  # The Map Watcher's last round of checks, once it has stopped checking (0.0: it hasn't)
 
 
 @dataclass
@@ -86,7 +89,7 @@ class StatusTracker:
         via = via or {}
         changes = []
         for key, rtt in results.items():
-            state = self.devices.setdefault(key, DeviceStatus(since=now))
+            state = self.devices.setdefault(key, DeviceStatus(since=now, exact=False))
             state.checked, state.via, state.problem = now, via.get(key, ""), ""
             if rtt is not None:
                 state.fails, state.rtt = 0, rtt
@@ -100,7 +103,7 @@ class StatusTracker:
             if new != state.status:
                 lasted = now - state.since if state.status != UNKNOWN else None
                 changes.append(Change(key, new, now, lasted, rtt, state.via))
-                state.status, state.since = new, now
+                state.status, state.since, state.exact = new, now, lasted is not None
         return changes
 
     def cannot_check(self, problems, via=None):
@@ -110,13 +113,13 @@ class StatusTracker:
         via = via or {}
         changes = []
         for key, problem in problems.items():
-            state = self.devices.setdefault(key, DeviceStatus(since=now))
+            state = self.devices.setdefault(key, DeviceStatus(since=now, exact=False))
             state.checked, state.via, state.fails, state.rtt = now, via.get(key, ""), 0, None
             changed = state.problem != problem
             state.problem = problem
             if state.status != UNKNOWN:
                 changes.append(Change(key, UNKNOWN, now, now - state.since, None, state.via, problem))
-                state.status, state.since = UNKNOWN, now
+                state.status, state.since, state.exact = UNKNOWN, now, True
             elif changed:
                 changes.append(Change(key, UNKNOWN, now, None, None, state.via, problem))
         return changes
@@ -160,8 +163,3 @@ def change_text(change, label, address):
     if change.via:
         details.append(f"pinged from {change.via}")
     return text + (f" ({', '.join(details)})" if details else "")
-
-
-def history_entry(change, label, text):
-    return [datetime.datetime.fromtimestamp(change.when).isoformat(timespec="seconds"), change.key, label,
-            change.status, text]

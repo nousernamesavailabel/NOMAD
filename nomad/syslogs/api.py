@@ -30,6 +30,8 @@ class SyslogApi(FlowApi):
             return self.queries.senders()
         if path == "/v1/summary":
             return self.queries.summary()
+        if path == "/v1/counts":
+            return self.queries.counts(number("start", 0.0), number("end"))
         raise KeyError(path)
 
 
@@ -63,3 +65,7 @@ class SyslogServiceSource(ServiceSource):
 
     def summary(self):
         return self.get("/v1/summary")
+
+    def counts(self, start, end=None):
+        """[[source, severity, how many]] from start to end (store.SyslogQueries.counts)."""
+        return self.get("/v1/counts", start=start, end=end)

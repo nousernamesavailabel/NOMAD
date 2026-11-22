@@ -677,7 +677,7 @@ class ProbeDialog(QDialog):
         monitor_ = self.page.monitor
         for row in range(self.probe_table.rowCount()):
             key = self.probe_table.item(row, 0).data(Qt.UserRole + 1)
-            state = monitor_.status(key) if key else None
+            state = monitor_.own_status(key) if key else None
             if state is None:
                 text = "" if key else "Not used"
                 if key and not monitor_.running:

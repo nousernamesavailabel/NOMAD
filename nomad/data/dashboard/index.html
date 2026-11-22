@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>NOMAD Dashboard</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#overview"><img src="/static/icon.svg" alt="" width="26" height="26"><span>NOMAD Dashboard</span></a>
+  <nav id="nav" aria-label="Pages">
+    <a href="#overview" data-page="overview">Overview</a>
+    <a href="#sites" data-page="sites">Sites</a>
+    <a href="#map" data-page="map">Map</a>
+    <a href="#devices" data-page="devices">Devices</a>
+    <a href="#events" data-page="events">Events</a>
+    <a href="#traffic" data-page="traffic">Traffic</a>
+    <a href="#vpns" data-page="vpns">VPNs</a>
+    <a href="#ipam" data-page="ipam">IPAM</a>
+    <a href="#hosts" data-page="hosts">Hosts</a>
+    <a href="#trends" data-page="trends">Trends</a>
+  </nav>
+  <div class="top-right">
+    <span id="sources" class="sources" aria-label="Where the data comes from"></span>
+    <span id="updated" class="muted small"></span>
+    <button id="print" class="plain" title="Print, or save as PDF">Print</button>
+    <span id="who" class="muted small"></span>
+    <button id="sign-out" class="plain">Sign Out</button>
+  </div>
+</header>
+<main id="main" tabindex="-1"><p class="muted">Loading...</p></main>
+<footer class="print-footer" id="print-footer"></footer>
+<script src="/static/map.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

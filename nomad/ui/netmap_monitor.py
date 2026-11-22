@@ -1,6 +1,11 @@
 """Monitoring the Network Map's devices: ping them every so often on a background thread, and log when one goes down
 or comes back. Runs while NOMAD is open, whichever page is showing.
 
+What it finds goes in the map's monitoring record on this computer (monitor_record.LocalRecord): each device's status,
+its changes and the gaps while nothing was monitoring, so it picks up where it left off when NOMAD starts again, and
+knows each device's uptime. A map the Map Watcher service monitors shows the Watcher's monitoring while this isn't on
+(set_watcher): it's always on, so its record is the fuller one.
+
 Devices with an IP SLA probe on one of the map's routers (netmap/probes.py) are checked from that router instead: the
 routers are looked over for NOMAD's probes when monitoring starts, every DISCOVER_EVERY seconds after, and when asked
 (after a probe is added), and each poll reads the probes' latest results over SNMP."""
@@ -11,7 +16,7 @@ from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, \
     QPushButton, QVBoxLayout, QWidget
 
-from ..netmap import monitor, probes
+from ..netmap import monitor, monitor_record, probes
 from ..netmap.monitor import DOWN, UNKNOWN, UP
 from ..snmp import SnmpClient
 from .common import release_thread
@@ -50,7 +55,6 @@ class NetworkMonitor(QObject):
     """Owns the polling timer, each device's status and the Monitor tab."""
     statuses_changed = pyqtSignal()  # After every poll, to redraw the dots and response times
     polled = pyqtSignal()  # After each poll's results are in (the map then reads its links' counters)
-    history_added = pyqtSignal(list)  # [history entries] for the map to keep
     probes_changed = pyqtSignal()  # After a look over the routers for probes
 
     def __init__(self, parent=None, pinger=monitor.ping):
@@ -73,6 +77,10 @@ class NetworkMonitor(QObject):
         self.probes = {}  # Device key -> its probes.Probe
         self.last_results = {}  # Device key -> (router, entry, time of the probe result used last)
         self.no_access = set()  # Routers with probes the last poll couldn't ask (no community or user for them)
+        self.record = None  # The map's monitor_record.LocalRecord on this computer
+        self.shown = {}  # Key -> DeviceStatus as shown (since from the record, uptimes), after each poll
+        self.watcher = {}  # Key -> DeviceStatus as the Map Watcher has it (see set_watcher)
+        self.watcher_source = ""
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_now)
 
@@ -139,28 +147,74 @@ class NetworkMonitor(QObject):
         probe = self.probes.get(key)
         return probe.where(self.labels.get(probe.router, probe.router)) if probe is not None else ""
 
-    def load_history(self, entries):
-        """Show a map's saved status changes in the log (from when it was last watched)."""
+    def set_record(self, record, old_log=()):
+        """Keep the map's monitoring in this record (a LocalRecord, or None), and show its changes in the log. The
+        map's status log from before (old_log) goes into the record the first time."""
+        if record is self.record:
+            return
+        if self.record is not None:
+            self.record.close()
+        self.record = record
+        self.tracker.devices = {}
+        self.shown = {}
         self.lines = []
         self.log_view.clear()
-        for when, _key, _label, _status, text in entries[-LOG_LINES:]:
-            try:
-                stamp = datetime.datetime.fromisoformat(when).strftime("%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                stamp = when
-            self.add_line(f"{stamp}  {text}")
+        if record is None:
+            return
+        record.import_log(list(old_log))
+        for row in record.recent_changes(0, LOG_LINES):
+            self.log(row["text"], row["at"])
+        if self.running:
+            self.pick_up()
+
+    def pick_up(self):
+        """Carry on from the record: the statuses saved last, and the time since its last check noted as a gap."""
+        if self.record is None:
+            return
+        monitor_record.restore(self.tracker, self.record.saved_statuses(0))
+        self.tracker.forget_others(set(self.targets))
+        gap = self.record.note_restart(time.time(), self.interval)
+        if gap is not None:
+            self.log(f"Not monitored for {monitor.duration_text(gap[1] - gap[0])} (left out of the uptime)")
+        self.work_out_shown()
+
+    def work_out_shown(self):
+        if self.record is None:
+            self.shown = {}
+            return
+        self.shown = self.record.view(0, {key: state for key, state in self.tracker.devices.items()
+                                          if key in self.targets})
+
+    def set_watcher(self, states, source=""):
+        """The Map Watcher's monitoring of this map ({key: DeviceStatus}, {} for none): what the map shows of the
+        devices it monitors, so NOMAD and the NOMAD Dashboard show the same."""
+        self.watcher, self.watcher_source = dict(states or {}), source
+        self.statuses_changed.emit()
+        self.update_summary()
 
     def status(self, key):
-        """The DeviceStatus of a watched device, or None if it isn't being watched."""
+        """The DeviceStatus of a monitored device as shown (the Map Watcher's when it monitors the device, as the
+        NOMAD Dashboard has it; else this computer's while it monitors), or None if neither monitors it."""
+        watcher = self.watcher.get(key)
+        return watcher if watcher is not None else self.own_status(key)
+
+    def own_status(self, key):
+        """This computer's monitoring of a device (its DeviceStatus while Monitor is on), or None."""
         if key not in self.targets or not (self.running or key in self.tracker.devices):
             return None
-        return self.tracker.get(key)
+        return self.shown.get(key) or self.tracker.get(key)
+
+    def watcher_status(self, key):
+        """The Map Watcher's DeviceStatus of a device, or None."""
+        return self.watcher.get(key)
 
     def status_text(self, key):
         """For the Devices table's Status column (plain, so it filters well)."""
         state = self.status(key)
         if state is None:
             return ""
+        if state.stale_at:
+            return f"{monitor.STATUS_NAMES[state.status]} ({monitor_record.not_checked_text(state).lower()})"
         if state.status == UNKNOWN and state.problem:
             return "Can't check"
         return monitor.STATUS_NAMES[state.status] + (f" (from {state.via})" if state.via else "")
@@ -227,6 +281,7 @@ class NetworkMonitor(QObject):
         self.timer.start(self.interval * 1000)
         self.log(f"Monitoring {len(self.targets)} device{'' if len(self.targets) == 1 else 's'} every "
                  f"{monitor.duration_text(self.interval)}")
+        self.pick_up()
         self.discover()
         self.poll_now()
         self.update_summary()
@@ -235,7 +290,8 @@ class NetworkMonitor(QObject):
         if self.running:
             self.timer.stop()
             self.log("Stopped monitoring")
-        self.tracker.devices = {}  # Stale once nobody's checking
+        self.tracker.devices = {}  # Stale once nobody's checking (the record has them for next time)
+        self.shown = {}
         self.last_results = {}
         self.update_summary()
         self.statuses_changed.emit()
@@ -307,19 +363,39 @@ class NetworkMonitor(QObject):
                 results[key] = reading.rtt if reading.ok else None
         changes = self.tracker.update(results, via) + self.tracker.cannot_check(problems, via)
         self.last_poll = time.time()
-        history = []
+        logged = []
         for change in changes:
             if change.status == UP and change.lasted is None:
                 continue  # Answered the first poll: nothing's happened to it
             label = self.labels.get(change.key, change.key)
             text = monitor.change_text(change, label, self.targets.get(change.key, ""))
             self.log(text, change.when)
-            history.append(monitor.history_entry(change, label, text))
-        if history:
-            self.history_added.emit(history)
+            logged.append((change, label, text))
+        self.keep(logged)
         self.update_summary()
         self.statuses_changed.emit()
         self.polled.emit()
+
+    def keep(self, logged):
+        """A poll's changes [(Change, label, text)] and the statuses after it, into the map's record."""
+        if self.record is None:
+            return
+        try:
+            record = self.record
+            record.add_changes(0, logged)
+            network_map = self.network_map
+            devices = network_map.devices if network_map is not None else {}
+            record.write_statuses(0, [(key, self.labels.get(key, key), address, devices[key].kind,
+                                       self.tracker.get(key)) for key, address in self.targets.items()
+                                      if key in devices and key in self.tracker.devices])
+            record.fill_in(0, self.labels, {key: state for key, state in self.tracker.devices.items()
+                                            if key in self.targets})
+            record.checked(self.last_poll or time.time())
+            record.prune(monitor_record.LocalRecord.KEEP_SECONDS)
+            self.work_out_shown()
+        except Exception:  # A record that can't be written (disk full, locked) mustn't stop the monitoring
+            import logging
+            logging.getLogger(__name__).exception("Couldn't keep the monitoring record")
 
     def shutdown(self):
         self.timer.stop()
@@ -352,8 +428,20 @@ class NetworkMonitor(QObject):
             parts.append(f"{counts[CANT]} can't check")
         return " · ".join(parts)
 
+    def watcher_stopped_text(self):
+        """" It hasn't checked since 14:02: is the service running?" when the Map Watcher stopped, else ""."""
+        stopped = max((state.stale_at for state in self.watcher.values()), default=0.0)
+        if not stopped:
+            return ""
+        return (f" It hasn't checked since {monitor_record.clock_text(stopped)}: is the Map Watcher service "
+                "running? The devices are grayed, as they were then.")
+
     def update_summary(self):
-        if not self.running:
+        if not self.running and self.watcher:
+            text = (f"Showing the monitoring of {self.watcher_source or 'the Map Watcher'}."
+                    f"{self.watcher_stopped_text()} Tick Monitor to ping the devices from this computer too, and log "
+                    "when one goes down or comes back.")
+        elif not self.running:
             text = ("Not monitoring. Tick Monitor to ping the devices on the map every so often and log when one "
                     "goes down or comes back.")
         else:
@@ -364,6 +452,10 @@ class NetworkMonitor(QObject):
             text = (f"Monitoring {len(self.targets)} devices every {monitor.duration_text(self.interval)}: "
                     f"{self.summary()}{checked}. A device is down after missing {monitor.FAILS_FOR_DOWN} checks "
                     f"in a row.{routers}")
+            if self.watcher:
+                text += (f" The map shows {self.watcher_source or 'the Map Watcher'}'s monitoring of the devices it "
+                         "monitors, the same as the NOMAD Dashboard. The details pane shows this computer's too."
+                         f"{self.watcher_stopped_text()}")
         self.summary_label.setText(text)
 
     def log(self, text, when=None):

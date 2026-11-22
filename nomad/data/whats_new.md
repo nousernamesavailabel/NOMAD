@@ -4,6 +4,24 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-11-21
+
+- **New:** the **NOMAD Dashboard**, a read-only web site of the network's state for people without NOMAD. Install it with **Tools > NOMAD Dashboard Service...** on the computer with the Map Watcher and the collectors, and give each person a login. It shows devices up and down, events, traffic, VPNs, IPAM, hosts per subnet, the tribe maps and trends, updates itself, and has a kiosk mode for wall screens. It uses NOMAD's colors. Its map shows each device's uptime, and clicking one shows the same details as NOMAD's map. The map can hide the details or go full screen. See the NOMAD Dashboard guide.
+- **New:** the Map Watcher can monitor its maps for the dashboard (ping, IP SLA, link traffic and tunnels) and sweep their IPAM subnets on a schedule. Tick **Monitor the watched maps** in its window.
+- **New:** **Save Viewer Key File...** in **Tools > Tribe Management** saves a key that can only read the tribe, for the dashboard. Update the tribe server first.
+- **New:** the Network Map's Monitor remembers. Each device's box shows how long it has been up or down and its uptime over the last 24 hours, and the details pane shows its uptime over 24 hours, 7 days and 30 days. Closing NOMAD no longer resets anything, and the time it was closed doesn't count against the uptime.
+- **New:** on a map the Map Watcher monitors, NOMAD shows the Watcher's statuses and uptime, the same as the NOMAD Dashboard, even with Monitor off. It works for anyone on the Watcher's computer, administrator or not, and through the tribe on other computers. Update the tribe server for that.
+- **New:** the Map Watcher can monitor maps that aren't shared with the tribe. Add them in its window under **Maps on This Computer**.
+- **Fixed:** the dashboard's "Up for" times no longer start over when the Map Watcher restarts, and time the Watcher wasn't running doesn't count against a device's uptime.
+- **Fixed:** NOMAD and the dashboard now show the same up and down times and uptime for the same device. Both say how long the same way too, for example "1 d 6 h".
+- **New:** if the Map Watcher stops, NOMAD and the dashboard both keep showing what it last knew, grayed, with "Not checked since 14:02".
+- **New:** each device can have its own login for scheduled backups: **Device Logins...** on the Editor's **Backups** tab, or in the Map Watcher's window. Both use the same choices.
+- **Fixed:** the Map Watcher's window remembers the backups' login, so updating the service no longer asks for it again.
+- **Fixed:** **Run scheduled config backups on this computer** stays ticked when NOMAD starts with the master password locked. Backups start as soon as you unlock it.
+- **New:** a banner tells you when a NOMAD service on this computer needs updating. **Tools > Services & Firewall** shows each service's version, and **Install or Update Ticked** updates them.
+- **New:** untick **Show Details** on the Network Map's bar to hide the details pane and give the map the whole width.
+- **New:** right-click a switch or router on a tribe map > **Tools > Graph on Dashboard...** to graph more of its ports on the dashboard.
+
 ## [2.7.1] - 2026-11-20
 
 - **Fixed:** NetFlow Config sent over SSH sets up only the interfaces you typed. Before, the **every interface with an IPv4 address** box (ticked by default) won, and a router's own PIM tunnel could refuse the setup. The box now applies only when no interfaces are typed, it skips interfaces the router made for itself, and it's in the **Over SSH** box under **Routers**, where you can see it.

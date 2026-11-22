@@ -94,6 +94,10 @@ def start_as_admin_wanted():
 
 def main():
     """Main entry point for the application."""
+    service = next((argument for argument in sys.argv[1:] if argument.endswith("-service")), None)
+    if service is not None:  # Started by Windows as one of NOMAD's services: note which NOMAD it runs
+        from nomad.service_versions import note_started
+        note_started(service)
     if "--ipam-service" in sys.argv:  # Started by Windows as the NOMAD IPAM Server service
         from nomad.ipam.service import run_service_dispatcher
         run_service_dispatcher()
@@ -120,6 +124,14 @@ def main():
         return
     if "--syslog-collector" in sys.argv:  # The Syslog Collector in this console, for trying it out or troubleshooting
         from nomad.syslogs.service import run_in_foreground
+        run_in_foreground()
+        return
+    if "--dashboard-service" in sys.argv:  # Started by Windows as the NOMAD Dashboard service
+        from nomad.dashboard.service import run_service_dispatcher
+        run_service_dispatcher()
+        return
+    if "--dashboard" in sys.argv:  # The NOMAD Dashboard in this console, for trying it out or troubleshooting
+        from nomad.dashboard.service import run_in_foreground
         run_in_foreground()
         return
     if "--ipam-server" in sys.argv:  # The IPAM server in this console, for trying it out or troubleshooting

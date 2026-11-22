@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>NOMAD Dashboard</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-page">
+<main class="login-card">
+  <div class="brand brand-large"><img src="/static/icon.svg" alt="" width="36" height="36"><span>NOMAD Dashboard</span></div>
+  <p class="muted">Sign in to see the state of the network.</p>
+  <form id="login-form" autocomplete="on">
+    <label for="user">Login name</label>
+    <input id="user" name="user" autocomplete="username" autofocus required maxlength="64">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+    <button type="submit" id="sign-in">Sign In</button>
+    <p id="login-message" class="message" role="alert"></p>
+  </form>
+  <p class="muted small">Read only. Logins are set up in NOMAD: Tools &gt; NOMAD Dashboard Service.</p>
+</main>
+<script src="/static/login.js"></script>
+</body>
+</html>

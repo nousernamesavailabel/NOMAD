@@ -308,6 +308,12 @@ class NetworkMap:
     ipam_network: str = ""
     locked: list = field(default_factory=list)  # Device keys locked in place on the physical view, sorted
     l3_locked: list = field(default_factory=list)  # Node keys locked in place on the logical view, sorted
+    # Ports whose traffic the Map Watcher keeps for the NOMAD Dashboard's graphs, besides the ports at the ends of
+    # links: device key -> [port (short name)]
+    graphed: dict = field(default_factory=dict)
+    # What this map's monitoring record goes by (monitor_record), made the first time it's monitored, and carried to
+    # the map made when it's mapped again; "" until then. A tribe map's goes by the tribe's map ID instead.
+    record_id: str = ""
 
     def add_link(self, link):
         """Add a link, merging it with the same link seen from the other end (or by the other protocol)."""
@@ -447,6 +453,7 @@ class NetworkMap:
             self.l3_positions.pop(key, None)
         self.locked = [key for key in self.locked if key not in keys]
         self.l3_locked = [key for key in self.l3_locked if key not in keys]
+        self.graphed = {key: ports for key, ports in self.graphed.items() if key not in keys}
         self.links = [link for link in self.links if link.a not in keys and link.b not in keys]
         self.hosts = [host for host in self.hosts if host.device not in keys]
         self.news = {ref: item for ref, item in self.news.items() if ref.partition(":")[2] not in keys
@@ -751,7 +758,7 @@ class NetworkMap:
         if data.get("format", 1) > FORMAT_VERSION:
             raise ValueError("This map was saved by a newer version of NOMAD.")
         network_map = cls(**{name: data[name] for name in ("seeds", "started", "finished", "stopped", "root",
-                                                          "ipam_network") if name in data})
+                                                          "ipam_network", "record_id") if name in data})
         network_map.devices = {item["key"]: _build(Device, item) for item in data["devices"]}
         network_map.links = [_build(Link, item) for item in data.get("links", [])]
         network_map.hosts = [_build(Host, item) for item in data.get("hosts", [])]
@@ -767,6 +774,8 @@ class NetworkMap:
         network_map.deleted = {key: [value[0], list(value[1])] for key, value in data.get("deleted", {}).items()}
         network_map.news = {ref: dict(value) for ref, value in data.get("news", {}).items()}
         network_map.host_seen = dict(data.get("host_seen", {}))
+        network_map.graphed = {key: [str(port) for port in ports] for key, ports in data.get("graphed", {}).items()
+                               if key in network_map.devices and isinstance(ports, list)}
         network_map.prune_groups()
         return network_map
 

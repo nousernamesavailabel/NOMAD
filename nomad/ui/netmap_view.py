@@ -14,7 +14,8 @@ from PyQt5.QtWidgets import QApplication, QGraphicsItem, QGraphicsLineItem, QGra
 from ..netmap.l3 import HOP, STAR, SUBNET
 from ..netmap.overlays import DASH, DOT, TUNNEL_COLORS, Mark
 from ..netmap.layout import GROUP_PAD, GROUP_TITLE, NODE_HEIGHT, NODE_WIDTH
-from ..netmap.monitor import DOWN, UNKNOWN, UP, duration_text
+from ..netmap.monitor import DOWN, UNKNOWN, UP
+from ..netmap.monitor_record import not_checked_text, percent_text, short_duration, uptime_text
 from ..netmap.vlans import ACCESS, NATIVE, ONE_END, TAGGED
 from ..netmap.model import AP, AP_DOWN, BUILDING, FIREWALL, GROUP_KINDS, KIND_NAMES, NO_SNMP, ROOM, ROUTER, \
     SERVER, SHARED_PORT_HOSTS, SITE, SNMP, SWITCH, UNREACHABLE, WLC
@@ -287,6 +288,12 @@ class DeviceItem(NodeItem):
                        + (f" (AP group {device.ap_group})" if device.ap_group else ""))
         if state is not None and state.via:
             tip.append(probe_text(state.via))
+        if state is not None and state.uptime:
+            tip.append(f"Uptime: {uptime_text(state.uptime)}")
+        if state is not None and state.source:
+            tip.append(f"As {state.source} has it")
+        if state is not None and not state.exact and state.status in (UP, DOWN):
+            tip.append("+: monitoring started again after it last changed, so it's been like this at least that long")
         if self.pings_now:
             tip.append("Answers ping now (it didn't when crawled): right-click > Check SNMP Again to note it")
         if self.host_count:
@@ -372,20 +379,38 @@ class DeviceItem(NodeItem):
             return COLORS["error"]
         return COLORS["text"]
 
+    def lasted_text(self, word):
+        """"Up 3 d · 99.98%": how long it's been up or down ("+": at least), and its uptime over 24 hours."""
+        state = self.monitor_state
+        parts = [f"{word} {short_duration(time.time() - state.since)}{'' if state.exact else '+'}"
+                 if state.since else word]
+        if state.uptime.get("24h") is not None:
+            parts.append(percent_text(state.uptime["24h"]))
+        return " · ".join(parts)
+
     def detail_lines(self):
         """The two lines under its name, each (text, color): its address (and time to answer while it's up), then
-        down or can't check while monitored, the router checking it, how the crawl found it, or its platform."""
+        while monitored how long it's been down or up with its uptime over 24 hours (or why it can't be checked, or
+        the router checking it), else how the crawl found it, or its platform."""
         device, state = self.device, self.monitor_state
         address = device.mgmt_ip if device.mgmt_ip != device.label else ""
-        if state is not None and state.status == UP and state.rtt is not None:
-            address = f"{address}  ·  {'<1' if state.rtt < 1 else state.rtt} ms".strip(" ·")
+        if state is not None and state.status == UP and state.rtt is not None and not state.stale_at:
+            address = f"{address} · {'<1' if state.rtt < 1 else state.rtt} ms".strip(" ·")
         lines = [(address, COLORS["muted"])]
-        if state is not None and state.status == DOWN:
-            lines.append((f"Down for {duration_text(time.time() - state.since)}", COLORS["error"]))
+        if state is not None and state.stale_at:  # The Map Watcher stopped: grayed, as it was then
+            lines.append((not_checked_text(state), COLORS["muted"]))
+        elif state is not None and state.status == DOWN:
+            lines.append((self.lasted_text("Down"), COLORS["error"]))
         elif state is not None and state.problem:
             lines.append((f"Can't check: {state.problem}", COLORS["warning"]))
         elif state is not None and state.via:  # Just the router: the box hasn't room for its VRF (the tooltip has)
-            lines.append((f"Via {via_router(state.via)}", COLORS["muted"]))
+            uptime = state.uptime.get("24h")
+            lines.append((f"Via {via_router(state.via)}" + (f" · {percent_text(uptime)}" if uptime is not None
+                                                             else ""), COLORS["muted"]))
+        elif state is not None and state.status == UP and not self.pings_now:
+            lines.append((self.lasted_text("Up"), COLORS["muted"]))
+        elif state is not None and state.status == UNKNOWN:
+            lines.append(("Being checked", COLORS["muted"]))
         elif self.pings_now:
             lines.append((SHORT_SOURCE_NAMES[NO_SNMP], COLORS["warning"]))
         elif device.source in (NO_SNMP, UNREACHABLE):
@@ -406,7 +431,7 @@ class DeviceItem(NodeItem):
         self.draw_highlight(painter, self.rect, 7)
         outline = QColor(COLORS["error"]) if device.source == UNREACHABLE or self.ap_down else color
         if state is not None:  # Monitored: up/down outranks the device type, which the tag still names
-            outline = QColor(STATUS_COLORS[state.status])
+            outline = QColor(STATUS_COLORS[UNKNOWN if state.stale_at else state.status])
         marked = self.mark is not None
         if marked:  # An overlay's color outranks both (the status dot still says up or down)
             outline = mark_color(self.mark.color)
@@ -483,9 +508,10 @@ class DeviceItem(NodeItem):
     def draw_status_dot(self, painter, state):
         """Monitoring: green when it answers ping, red when it's down, an empty ring until it's been checked."""
         center = QPointF(self.rect.right() - 10, self.rect.top() + 10)
-        color = QColor(STATUS_COLORS[state.status])
+        status = UNKNOWN if state.stale_at else state.status  # A Map Watcher that stopped: an empty gray ring
+        color = QColor(STATUS_COLORS[status])
         painter.setPen(QPen(color, 1.5))
-        painter.setBrush(color if state.status != UNKNOWN else Qt.NoBrush)
+        painter.setBrush(color if status != UNKNOWN else Qt.NoBrush)
         painter.drawEllipse(center, 5.5, 5.5)
         painter.setBrush(Qt.NoBrush)
 

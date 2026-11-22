@@ -21,9 +21,10 @@ from ..ipam.client import ADMIN, current_key, is_tribe_server
 from ..ipam.map_compare import DEVICE as DEVICE_ADDRESS, compare_map
 from ..ipam.reconcile import MAC_DIFFERS, NOT_RECORDED
 from ..ipam.store import IpamError
-from ..netmap import diff, export, hardware, l3, monitor, overlays, shared, store, tunnels, watch
+from ..netmap import diff, export, hardware, l3, monitor, monitor_record, overlays, shared, store, tunnels, watch
 from ..netmap import vlan_path
 from ..netmap import vlans as vlan_info
+from ..netmap.details import device_details, hardware_blocks, subnet_details, vlan_blocks, vlan_port_text
 from ..netmap.crawl import MAX_WORKERS, WORKERS, CrawlSettings, Crawler, apply_inventory, apply_vlans, \
     check_device, communities_for, credentials_from_json, credentials_to_json, ordered_credentials, parse_overrides, \
     read_inventory_of, read_vlans_of
@@ -33,14 +34,14 @@ from ..netmap.layout import BOTTOM, CENTER, GROUP_PAD, GROUP_TITLE, HORIZONTAL, 
     spacing_of
 from ..netmap.placement import places as subnet_places
 from ..netmap.tribe import SECRETS
-from ..netmap.model import AP_DOWN, AP_UP, BUILDING, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIND_NAMES, \
+from ..netmap.model import BUILDING, FIREWALL, GROUP_KINDS, KIND_NAMES, \
     NETWORK_KINDS, NO_SNMP, PARENT_KIND, ROUTER, SNMP, SWITCH, UNCHECKED, UNREACHABLE, WLC, Group, Link, NetworkMap, \
-    display_name, port_key, short_port
+    display_name, port_key
 from ..snmp import V2C
 from ..snmpv3 import is_v3
 from ..terminal.credentials import CredentialError, protect, unprotect
 from .common import OneLineLabel, SortableTableItem, StoppableThread, add_submenu, drop_empty_submenus, \
-    format_size, read_only_table, release_thread, set_hint
+    read_only_table, release_thread, run_in_background, set_hint
 from .export_progress import error_text, run_export
 from .host_menu import FIND_PORT, HostActions
 from .map_ipam_dialog import RecordDialog
@@ -52,7 +53,7 @@ from .netmap_monitor import NetworkMonitor
 from .netmap_probes import ProbeDialog
 from .netmap_progress import CrawlProgress
 from .netmap_dialogs import CommunitiesDialog, CompareDialog, DeletedDevicesDialog, DeviceDialog, GroupDialog, \
-    HostDialog, LinkDialog, MapChoiceDialog, ScopeDialog, shown_value
+    HostDialog, LinkDialog, MapChoiceDialog, ScopeDialog
 from .netmap_tribe import TribeSync
 from .netmap_view import GROUP_BOX, DrawingState, MapView
 from .netmap_vlans import VlanPanel, domain_text
@@ -67,16 +68,16 @@ log = logging.getLogger(__name__)
 MAP_FILTER = f"Network maps (*{store.EXTENSION})"
 KIND_WEIGHTS = {FIREWALL: 3, ROUTER: 2, SWITCH: 1, WLC: 1}  # Breaks ties when choosing the top device
 SAVE_DELAY_MS = 1000
+WATCHER_REFRESH_MS = 60000  # How often the Map Watcher's monitoring of the map open is read again
 UNDO_LIMIT = 100  # Layout changes Undo can go back through
-ROUTES_SHOWN = 50
 DEFAULTS = {"max_hops": 6, "max_devices": 500, "timeout": 2000}
 ALIGNMENTS = [("Align Left", LEFT), ("Align Center", CENTER), ("Align Right", RIGHT), None, ("Align Top", TOP),
               ("Align Middle", MIDDLE), ("Align Bottom", BOTTOM)]
 GROUP_LINKS_SHOWN = 20
 VLANS_IN_MENU = 60  # A device's Highlight VLAN menu lists this many
 OVERLAY_ITEMS = 60  # The Overlay menu lists this many VLANs, VRFs or subnets
-VLANS_LISTED = 40  # A device's details name this many of its VLANs
 CHECK_WORKERS = 8  # Devices added by hand asked over SNMP at once
+DETAILS_WIDTH = 260  # The details pane beside the map, at first and when Show Details opens it again
 OPEN_MAP, FILE_MAP, TRIBE_MAP, NEW_MAP = "open", "file", "tribe", "new"  # Where Add Device to Map puts one
 
 
@@ -207,7 +208,11 @@ class NetworkMapTab(QWidget):
         self.tribe_seen = None  # Its items as last loaded or saved here: saves send only what changed from them
         self.tribe = TribeSync(self, key_loader=self.tribe_key)
         self.watcher = MapWatcher(self)
-        self.history_map = None  # The map whose monitoring history the Monitor log is showing
+        self.record_shown = None  # The name of the monitoring record the Monitor is keeping (monitor_record)
+        self.watcher_wanted = None  # The record name the Map Watcher's monitoring is being fetched for
+        self.watcher_timer = QTimer(self)
+        self.watcher_timer.setInterval(WATCHER_REFRESH_MS)
+        self.watcher_timer.timeout.connect(self.refresh_watcher)
         self.host_actions = HostActions(window, self)
         self.check_threads = []  # Asking devices added by hand over SNMP
         self.checking = set()  # Keys of the devices being asked
@@ -374,6 +379,10 @@ class NetworkMapTab(QWidget):
         self.hosts_check = QCheckBox("Show Hosts")
         self.hosts_check.setToolTip("Show every switch's hosts, a box per port with each host's VLAN. Or double-click "
                                     "one switch to show just its hosts.")
+        self.details_check = QCheckBox("Show Details")
+        self.details_check.setChecked(True)
+        self.details_check.setToolTip("Show the details pane beside the map, about what's selected. Untick it to give "
+                                      "the map the room.")
         self.undo_button = QPushButton("Undo")
         self.undo_button.setToolTip("Put devices back where they were before the last move, re-arrange or "
                                     "alignment, or the last change to the sites, buildings and rooms (Ctrl+Z).")
@@ -458,7 +467,9 @@ class NetworkMapTab(QWidget):
         self.splitter.addWidget(self.details)
         self.splitter.setStretchFactor(0, 4)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([900, 260])
+        self.splitter.setSizes([900, DETAILS_WIDTH])
+        self.details_check.toggled.connect(self.show_details_pane)
+        self.splitter.splitterMoved.connect(self.on_splitter_moved)
         self.vlan_bar = QWidget()  # While a VLAN is highlighted: which, and how to stop
         vlan_row = QHBoxLayout(self.vlan_bar)
         vlan_row.setContentsMargins(0, 0, 0, 0)
@@ -512,7 +523,6 @@ class NetworkMapTab(QWidget):
         self.monitor.statuses_changed.connect(self.show_statuses)
         self.monitor.polled.connect(self.counters.poll_now)
         self.counters.updated.connect(self.on_counters_updated)
-        self.monitor.history_added.connect(self.keep_history)
         self.monitor.probes_button.clicked.connect(self.show_probes)
         for view in (self.view, self.l3_view):
             view.selection_changed.connect(self.show_details)
@@ -575,8 +585,8 @@ class NetworkMapTab(QWidget):
                         self.compare_button, self.ipam_network_button, self.ipam_record_button, self.tribe_button,
                         self.key_button]
         watching = [self.monitor_check, self.interval_combo, self.monitor_label, self.watch_check, self.watch_label]
-        view_tools = [self.overlay_button, self.tunnels_check, self.hosts_check, self.undo_button, self.redo_button, self.fit_button,
-                      self.arrange_button]
+        view_tools = [self.overlay_button, self.tunnels_check, self.hosts_check, self.details_check, self.undo_button,
+                      self.redo_button, self.fit_button, self.arrange_button]
         if self.compact_top:
             unused = file_buttons
             row(self.map_button, self.crawl_button, 12, *watching, self.status_slack, 12, self.find_input, *view_tools)
@@ -628,6 +638,19 @@ class NetworkMapTab(QWidget):
         for label in (monitor_label, watch_label):
             label.set_one_line(True, widths.get(label) or share[label])
         self.status_slack.setFixedWidth(budget - sum(widths.values()))  # Only monitoring: what its news don't use
+
+    def show_details_pane(self, shown):
+        """Show Details: the pane beside the map, or the map the whole width."""
+        self.details.setVisible(shown)
+        sizes = self.splitter.sizes()
+        if shown and sizes[1] == 0:  # Dragged shut: open it to its usual width
+            total = sum(sizes)
+            self.splitter.setSizes([max(total - DETAILS_WIDTH, 1), DETAILS_WIDTH])
+
+    def on_splitter_moved(self, *_):
+        """Dragging the details pane shut unticks Show Details, as if it had been unticked."""
+        if self.details_check.isChecked() and self.splitter.sizes()[1] == 0:
+            self.details_check.setChecked(False)
 
     def set_compact_top(self, compact):
         self.compact_top = compact
@@ -752,6 +775,7 @@ class NetworkMapTab(QWidget):
         settings.setValue("netmap/watch_trigger_delay", timers["trigger_delay"])
         settings.setValue("netmap/watch_listen", self.watcher.listen_check.isChecked())
         settings.setValue("netmap/splitter", self.splitter.saveState())
+        settings.setValue("netmap/details_shown", self.details_check.isChecked())
         settings.setValue("netmap/arrange_style", self.arrange_style)
         settings.setValue("netmap/arrange_spacing", self.arrange_spacing)
         settings.setValue("netmap/keep_groups", self.keep_groups)
@@ -785,6 +809,8 @@ class NetworkMapTab(QWidget):
         splitter = settings.value("netmap/splitter")
         if splitter is not None:
             self.splitter.restoreState(splitter)
+        self.details_check.setChecked(settings.value("netmap/details_shown", True, bool))
+        self.show_details_pane(self.details_check.isChecked())  # The splitter's state may have it otherwise
         self.reopen(settings.value("netmap/last_map", "", str))
         interval = settings.value("netmap/monitor_interval", monitor.DEFAULT_INTERVAL, int)
         if interval in monitor.INTERVALS:
@@ -1040,7 +1066,7 @@ class NetworkMapTab(QWidget):
         for check in (self.watch_check, self.monitor_check):  # Watching lets go of the tribe map before it's closed
             check.setChecked(False)
         self.tribe_map_id, self.tribe_seen = None, None
-        self.network_map, self.map_path, self.history_map, self.unopened = None, None, None, ""
+        self.network_map, self.map_path, self.unopened = None, None, ""
         self.watched_identity = None
         self.undo_stack, self.redo_stack, self.layout_now = [], [], None
         self.view.clear_map()
@@ -1052,7 +1078,10 @@ class NetworkMapTab(QWidget):
         self.vlan_panel.set_map(None)
         self.apply_vlan_focus()
         self.monitor.set_map(NetworkMap())
-        self.monitor.load_history([])
+        self.record_shown = None
+        self.monitor.set_record(None)
+        self.monitor.set_watcher({})
+        self.watcher_timer.stop()
         self.show_details(None)
         self.update_tribe_label()
         self.update_watch_label()
@@ -1188,6 +1217,8 @@ class NetworkMapTab(QWidget):
             network_map.locked, network_map.l3_locked = list(self.network_map.locked), list(self.network_map.l3_locked)
             folded, links_left_out = network_map.carry_manual(self.network_map)
             network_map.locked = [key for key in network_map.locked if key in network_map.devices]
+            network_map.graphed = {key: list(ports) for key, ports in self.network_map.graphed.items()
+                                   if key in network_map.devices}
         if self.live_positions:  # Where devices were drawn (and dragged) while it crawled
             network_map.positions = {key: position for key, position in self.live_positions.items()
                                      if key in network_map.devices}
@@ -1205,9 +1236,8 @@ class NetworkMapTab(QWidget):
             dropped = network_map.carry_manual_hosts(self.network_map)
             network_map.carry_groups(self.network_map, folded)  # Sites and buildings, with the devices still there
             network_map.status_log = self.network_map.status_log  # The same network's monitoring history
+            network_map.record_id = self.network_map.record_id  # (kept in this record now)
             network_map.ipam_network = self.network_map.ipam_network  # And the same IPAM network
-            if self.history_map is self.network_map:
-                self.history_map = network_map  # So the Monitor log isn't reloaded
         self.live_map = None
         path = None
         try:
@@ -1265,9 +1295,7 @@ class NetworkMapTab(QWidget):
         network_map.l3_positions = l3_positions
         self.l3_view.set_graph(self.l3_nodes, l3_links, l3_positions, network_map.l3_locked)
         self.monitor.set_map(network_map)
-        if network_map is not self.history_map:
-            self.history_map = network_map
-            self.monitor.load_history(network_map.status_log)
+        self.use_record(network_map)
         self.show_statuses()
         self.fill_tables()
         self.vlan_panel.set_map(network_map)
@@ -1548,6 +1576,33 @@ class NetworkMapTab(QWidget):
         maps = self.tribe.maps if self.tribe_map_id is not None else None
         if maps is not None and maps.too_old_for_locks:
             message +=" The tribe server is too old to share locks: they stay on this computer until it's updated."
+        set_hint(self.status_label, message, "success")
+
+    def graph_on_dashboard(self, key):
+        """Choose the device's ports whose traffic the Map Watcher keeps for the NOMAD Dashboard, and save."""
+        from .graph_ports_dialog import GraphPortsDialog
+        network_map = self.network_map
+        if network_map is None or key not in network_map.devices or self.worker is not None:
+            return
+        dialog = GraphPortsDialog(self, network_map, key)
+        if dialog.exec_() != QDialog.Accepted or self.network_map is not network_map:
+            return
+        chosen = dialog.chosen()
+        if chosen:
+            network_map.graphed[key] = chosen
+        else:
+            network_map.graphed.pop(key, None)
+        try:
+            self.write_map(network_map, self.map_path)
+        except OSError as error:
+            set_hint(self.status_label, f"Couldn't save the map: {error}", "error")
+            return
+        label = network_map.devices[key].label
+        message = (f"The Map Watcher keeps the traffic of {count_text(len(chosen), 'port')} of {label} for the "
+                   "dashboard, besides its links." if chosen else f"Only {label}'s links are graphed now.")
+        maps = self.tribe.maps
+        if maps is not None and maps.server_api and not maps.sends_graphed:
+            message += " The tribe server is too old to share this: it stays on this computer until it's updated."
         set_hint(self.status_label, message, "success")
 
     def selection_to_lock(self, view):
@@ -2669,8 +2724,10 @@ class NetworkMapTab(QWidget):
         elif selection[0] == "group":
             self.set_details(group_html(network_map, selection[1], self.monitor.status), selection)
         elif selection[0] == "device":
-            self.set_details(device_html(network_map, selection[1], self.monitor.status(selection[1]),
-                                         self.counters.live), selection)
+            key = selection[1]
+            own = self.monitor.own_status(key) if self.monitor.watcher_status(key) is not None else None
+            self.set_details(device_html(network_map, key, self.monitor.status(key), self.counters.live, own),
+                             selection)
         elif selection[0] == "node":
             node = self.l3_nodes.get(selection[1])
             if node is not None:
@@ -2836,6 +2893,11 @@ class NetworkMapTab(QWidget):
                           and action.text() == "Tools"), menu)
             actions[tools.addAction(label)] = lambda: self.show_probes(
                 [item for item in keys if item in self.network_map.devices])
+        if (self.tribe_map_id is not None and self.worker is None and key in self.network_map.devices
+                and device.source == SNMP and device.kind in NETWORK_KINDS and device.mgmt_ip):
+            tools = next((action.menu() for action in menu.actions() if action.menu() is not None
+                          and action.text() == "Tools"), menu)
+            actions[tools.addAction("Graph on Dashboard...")] = lambda: self.graph_on_dashboard(key)
         news = self.news_of_devices(keys)
         if news and self.worker is None:
             actions[menu.addAction("Mark as Seen")] = lambda: self.mark_seen(news)
@@ -3991,19 +4053,78 @@ class NetworkMapTab(QWidget):
         monitoring from here has answering ping: ask them again, once each, so the map says what's so now."""
         stale = []
         for key, device in self.network_map.devices.items():
-            state = self.monitor.status(key)
+            state = self.monitor.own_status(key)
             if (device.source == UNREACHABLE and device.mgmt_ip and state is not None and state.status == monitor.UP
                     and not state.via and (key, device.mgmt_ip) not in self.rechecked):
                 self.rechecked.add((key, device.mgmt_ip))
                 stale.append(key)
         self.check_devices(stale)
 
-    def keep_history(self, entries):
-        """Status changes go into the map's history, saved with it."""
-        if self.network_map is None:
+    # ----------------------------------------------------------------- The monitoring record, and the Map Watcher's
+
+    def record_name(self, network_map):
+        """What the map's monitoring record goes by: the tribe's map ID for a tribe map, else its own record ID
+        (made the first time, and saved with it)."""
+        if self.tribe_map_id is not None:
+            maps = self.tribe.maps
+            return monitor_record.record_name(server_id=maps.server_id if maps is not None else "",
+                                              map_id=self.tribe_map_id)
+        from ..netmap.watch_local import ensure_record_id
+        record_id, made = ensure_record_id(network_map)
+        if made and self.map_path is not None:
+            self.save_timer.start()
+        return monitor_record.record_name(record_id=record_id)
+
+    def use_record(self, network_map):
+        """Keep the map's monitoring in its record on this computer (the same record for the map mapped again),
+        and show the Map Watcher's monitoring of it when it has some."""
+        name = self.record_name(network_map)
+        if name != self.record_shown:
+            self.record_shown = name
+            try:
+                record = monitor_record.LocalRecord(monitor_record.records_dir() / f"{name}.db")
+            except Exception as error:  # Can't be opened: monitoring still works, it just isn't kept
+                log.warning("Couldn't open the map's monitoring record: %s", error)
+                record = None
+            self.monitor.set_record(record, network_map.status_log)
+            self.monitor.set_watcher({})
+            self.refresh_watcher()
+        if not self.watcher_timer.isActive():
+            self.watcher_timer.start()
+
+    def refresh_watcher(self):
+        """The Map Watcher's monitoring of the map open: from this computer when the Watcher runs here, else from
+        the tribe for a tribe map (in the background)."""
+        name = self.record_shown
+        if name is None or self.network_map is None:
             return
-        self.network_map.status_log = (self.network_map.status_log + entries)[-monitor.HISTORY_LIMIT:]
-        self.save_timer.start()
+        summary = monitor_record.read_shared(name)
+        states = monitor_record.from_summary(summary)
+        maps = self.tribe.maps if self.tribe_map_id is not None else None
+        if states or maps is None:
+            self.monitor.set_watcher(states, (summary or {}).get("source", "") if states else "")
+            return
+        if self.watcher_wanted == name:
+            return  # Still being fetched
+        self.watcher_wanted = name
+        map_id = self.tribe_map_id
+        run_in_background(lambda: (name, maps.fetch_monitoring(map_id)), self.on_watcher_fetched,
+                          self.on_watcher_fetch_failed)
+
+    def on_watcher_fetched(self, result):
+        name, summary = result
+        self.watcher_wanted = None
+        if name == self.record_shown:
+            states = monitor_record.from_summary(summary)
+            self.monitor.set_watcher(states, (summary or {}).get("source", "") if states else "")
+
+    def on_watcher_fetch_failed(self, _error):
+        """Offline, or a tribe server before API 18: the copy fetched last, while it's fresh enough."""
+        self.watcher_wanted = None
+        maps = self.tribe.maps if self.tribe_map_id is not None else None
+        summary = maps.kept_monitoring(self.tribe_map_id) if maps is not None else None
+        states = monitor_record.from_summary(summary)
+        self.monitor.set_watcher(states, (summary or {}).get("source", "") if states else "")
 
     # ----------------------------------------------------------------- Comparing
 
@@ -4414,8 +4535,6 @@ class NetworkMapTab(QWidget):
         if shared.flatten(newer) == shared.flatten(self.network_map):
             return  # Only this computer's own changes coming back
         newer.status_log = self.network_map.status_log  # Monitoring history is this computer's own
-        if self.history_map is self.network_map:
-            self.history_map = newer
         self.watched_identity = (self.tribe_map_id, "None", newer.started)
         self.network_map = newer
         self.apply_tribe_settings(settings, {})
@@ -4583,195 +4702,73 @@ def fill_table(table, rows, ip_columns=(), keys=None):
     table.setSortingEnabled(True)
 
 
-def wireless_rows(network_map, key):
-    """[(label, value)] for a device's details: an access point's controller, AP group and status, or a wireless
-    controller's access points and Wi-Fi clients."""
-    device = network_map.devices[key]
-    rows = []
-    if device.ap_status:
-        controller = network_map.devices.get(device.controller)
-        rows += [("Access point", f"{'Up' if device.ap_status == AP_UP else 'Down'}, as its controller says"),
-                 ("Controller", controller.label if controller is not None else device.controller),
-                 ("AP group", device.ap_group)]
-    aps = network_map.access_points_of(key)
-    if aps:
-        down = sum(1 for other in aps if network_map.devices[other].ap_status == AP_DOWN)
-        clients = sum(1 for host in network_map.hosts if host.controller == key)
-        rows += [("Access points", f"{len(aps)}" + (f" ({down} down)" if down else "")),
-                 ("Wi-Fi clients", str(clients))]
-    return rows
-
-
-def disk_rows(device):
-    """[(label, value)] for a device's details: how full each of a pfSense firewall's disks was when last read."""
-    rows = []
-    for disk in device.disks:
-        label = "Disk" if len(device.disks) == 1 else f"Disk {disk['name']}"
-        percent = 100 * disk["used"] / disk["total"] if disk["total"] else 0
-        rows.append((label, f"{format_size(disk['used'])} of {format_size(disk['total'])} used ({percent:.1f}%), "
-                            f"{format_size(disk['free'])} free, read {device.disks_read[:16].replace('T', ' ')}"))
-    return rows
-
-
-def device_html(network_map, key, state=None, live=None):
-    """state: the device's monitor.DeviceStatus while it's monitored; live: the tunnels as monitoring last read
-    them."""
-    device = network_map.devices.get(key)
-    if device is None:
+def details_html(details):
+    """A device's details (netmap.details.device_details) as the details pane's HTML."""
+    if details is None:
         return ""
     escape = html.escape
-    parts = [f"<h3>{escape(device.label)}</h3>",
-             f"<p>{escape(KIND_NAMES.get(device.kind, device.kind))}"
-             + (f" &middot; {escape(device.platform)}" if device.platform else "") + "</p><table>"]
-    rows = [("Status", monitor_status_text(state)), ("Management IP", device.mgmt_ip),
-            ("Group", network_map.device_group_label(key)), ("Found by", device.found_by),
-            ("Hops from start", "" if device.manual else str(device.hops)),
-            ("Addresses", ", ".join(device.addresses)), ("Problem", device.error), ("Note", device.note),
-            ("Corrected", "; ".join(f"{CORRECTED_NAMES[attribute]} (the crawl found {shown_value(attribute, found)})"
-                                    for attribute, (found, _) in device.corrected.items()))]
-    rows[1:1] = disk_rows(device) + wireless_rows(network_map, key)
-    for label, value in rows:
-        if value:
-            parts.append(f"<tr><td><b>{escape(label)}</b>&nbsp;</td><td>{escape(value)}</td></tr>")
-    parts.append("</table>")
-    links = network_map.links_of(key)
-    if links:
-        parts.append("<h4>Links</h4><table>")
-        for link in sorted(links, key=lambda link: link.port_on(key)):
-            other = network_map.devices[link.other(key)]
-            port = vlan_port_text(vlan_info.port_info(device, link.port_on(key)))
-            parts.append(f"<tr><td>{escape(link.port_on(key))}&nbsp;</td><td>&rarr; {escape(other.label)} "
-                         f"{escape(link.port_on(other.key))}" + (f" &middot; {escape(port)}" if port else "")
-                         + "</td></tr>")
-        parts.append("</table>")
-    if device.tunnels:
-        found = [tunnel for tunnel in tunnels.find(network_map, live) if key in (tunnel.a, tunnel.b)]
-        parts.append(f"<h4>Tunnels ({len(device.tunnels)})</h4><table>")
-        for port, end in device.tunnels.items():
-            ends = f"{end.get('local') or '?'} to {end.get('remote') or 'any (multipoint)'}"
-            ends += " over IPsec" if end.get("ipsec") else ""
-            parts.append(f"<tr><td>{escape(port)}&nbsp;</td><td>{escape(ends)}</td></tr>")
-            for tunnel in found:
-                mine, other, other_port = (tunnel.a_port, tunnel.b, tunnel.b_port) if tunnel.a == key else \
-                    (tunnel.b_port, tunnel.a, tunnel.a_port)
-                if mine == port:
-                    far = f"{network_map.devices[other].label} {other_port}".strip()
-                    parts.append(f"<tr><td></td><td>&rarr; {escape(far)}: "
-                                 f"{escape(tunnels.STATE_TEXT[tunnel.state])}</td></tr>")
-        parts.append("</table>")
-    parts.append(device_hardware_html(device))
-    parts.append(device_vlans_html(device))
-    ports = network_map.hosts_by_port(key)
-    if ports:
-        count = sum(len(hosts) for hosts in ports.values())
-        parts.append(f"<h4>Hosts ({count})</h4><table>")
-        for port, hosts in ports.items():
-            what = ", ".join(host.name or host.ip or host.mac for host in hosts) if len(hosts) <= 3 \
-                else f"{len(hosts)} hosts"
-            parts.append(f"<tr><td>{escape(port)}&nbsp;</td><td>{escape(what)}</td></tr>")
-        parts.append("</table>")
-    if device.interfaces_l3:
-        parts.append("<h4>IP Interfaces</h4><table>")
-        for address, prefix, port in device.interfaces_l3:
-            parts.append(f"<tr><td>{escape(short_port(port))}&nbsp;</td><td>{escape(address)}/{prefix}</td></tr>")
-        parts.append("</table>")
-    routes = [route for route in device.routes if route[1]]  # Connected ones are the interfaces above
-    if routes:
-        parts.append(f"<h4>Routes ({len(routes)}{'+' if device.routes_truncated else ''})</h4><table>")
-        for destination, next_hop, port, protocol in routes[:ROUTES_SHOWN]:
-            parts.append(f"<tr><td>{escape(destination)}&nbsp;</td><td>via {escape(next_hop)} "
-                         f"({escape(protocol)})</td></tr>")
-        parts.append("</table>")
-        if len(routes) > ROUTES_SHOWN:
-            parts.append(f"<p>...and {len(routes) - ROUTES_SHOWN} more.</p>")
-    if device.sys_descr:
-        parts.append(f"<h4>Description</h4><p>{escape(device.sys_descr).replace(chr(10), '<br>')}</p>")
-    if device.manual:
-        parts.append("<p>Added by hand: right-click it to edit or delete it, or to draw a link from it. It's kept "
-                     "when you map again, until the crawl finds it.</p>")
+    parts = [f"<h3>{escape(details['title'])}</h3>"]
+    for section in details["sections"]:
+        if section["title"]:
+            parts.append(f"<h4>{escape(section['title'])}</h4>")
+        parts.append(blocks_html(section["blocks"]))
     return "".join(parts)
+
+
+def blocks_html(blocks):
+    escape = html.escape
+    parts = []
+    for block in blocks:
+        if "p" in block:
+            parts.append(f"<p>{escape(block['p']).replace(chr(10), '<br>')}</p>")
+        elif "label" in block:
+            parts.append(f"<p><b>{escape(block['label'])}</b></p>")
+        else:
+            parts.append("<table>")
+            for left, right in block["rows"]:
+                left = f"<b>{escape(left)}</b>" if block["bold"] else escape(left)
+                parts.append(f"<tr><td>{left}&nbsp;</td><td>{escape(right)}</td></tr>")
+            parts.append("</table>")
+    return "".join(parts)
+
+
+def device_html(network_map, key, state=None, live=None, own=None):
+    """state: the device's monitor.DeviceStatus while it's monitored (the Map Watcher's when it monitors it, else this
+    computer's); live: the tunnels as monitoring last read them; own: this computer's DeviceStatus too, while it
+    monitors a device the Map Watcher shows."""
+    return details_html(device_details(network_map, key, monitor_status_text(state), monitor_rows(state, own),
+                                       live=live))
+
+
+def monitor_rows(state, own=None, now=None):
+    """The details pane's rows on monitoring, after Status: who monitors it (when it's the Map Watcher), its uptime,
+    when it was last checked, and this computer's own status and uptime when it monitors the device too."""
+    now = time.time() if now is None else now
+    rows = []
+    if state is not None:
+        if state.source:
+            rows.append(("Monitored by", state.source[0].upper() + state.source[1:]))
+        if state.uptime:
+            rows.append(("Uptime", monitor_record.uptime_text(state.uptime)))
+        if state.checked:
+            rows.append(("Last checked", f"{monitor.duration_text(now - state.checked)} ago"))
+    if own is not None:
+        rows.append(("This computer", monitor_status_text(own)))
+        if own.uptime:
+            rows.append(("Uptime (this computer)", monitor_record.uptime_text(own.uptime)))
+    return rows
 
 
 def device_hardware_html(device):
     """Its chassis (each stack member's), model, serial number and software, and its parts, as last read."""
-    escape = html.escape
-    members = hardware.chassis(device.parts)
-    others = [part for part in device.parts if part.get("class") != hardware.CHASSIS]
-    if not members and not device.software and not device.serial and not device.mac:
-        return ""
-    parts = ["<h4>Hardware</h4><table>"]
-    if device.software:
-        parts.append(f"<tr><td><b>Software</b>&nbsp;</td><td>{escape(device.software)}</td></tr>")
-    for part in members:
-        name = part.get("name") if len(members) > 1 else "Chassis"
-        mac = part.get("mac", "")
-        mac = f"MAC {mac}" + (" (its management interface's)" if part.get("mac_source") == hardware.MANAGEMENT
-                              else "") if mac else ""
-        what = ", ".join(item for item in (part.get("model"), part.get("serial") or "no serial number", mac) if item)
-        parts.append(f"<tr><td><b>{escape(name or 'Chassis')}</b>&nbsp;</td><td>{escape(what)}</td></tr>")
-    if not members and device.serial:
-        parts.append(f"<tr><td><b>Serial</b>&nbsp;</td><td>{escape(device.serial)} (from a neighbor's CDP)</td></tr>")
-    if device.mac and not any(part.get("mac") for part in members):
-        name, said = "MAC", ""
-        if len(members) > 1:
-            name, said = "Stack MAC", " (the active member's, or one set by hand)"
-        elif not device.inventory_read:
-            said = " (from its neighbors' LLDP)"
-        parts.append(f"<tr><td><b>{name}</b>&nbsp;</td><td>{escape(device.mac)}{escape(said)}</td></tr>")
-    if others:
-        counts = {}
-        for part in others:
-            counts[part["class"]] = counts.get(part["class"], 0) + 1
-        listed = ", ".join(f"{count} {name}{'s' if count != 1 else ''}" for name, count in counts.items())
-        parts.append(f"<tr><td><b>Parts</b>&nbsp;</td><td>{escape(listed)} (on the Assets page)</td></tr>")
-    parts.append("</table>")
-    return "".join(parts)
-
-
-def vlan_port_text(info):
-    """A port's VLANs in a few words: "trunk, native 1, VLANs 1-10,20" or "access VLAN 10, voice 20"."""
-    if not info:
-        return ""
-    if info.get("mode") == vlan_info.TRUNK:
-        allowed = info.get("allowed", "")
-        return f"trunk, native {info.get('native', 1)}, " + (f"VLANs {allowed}" if allowed != "1-4094" else "all VLANs")
-    text = f"access VLAN {info['vlan']}" if info.get("vlan") else ""
-    if info.get("voice"):
-        text += f"{', ' if text else ''}voice VLAN {info['voice']}"
-    return text
+    blocks = hardware_blocks(device)
+    return f"<h4>Hardware</h4>{blocks_html(blocks)}" if blocks else ""
 
 
 def device_vlans_html(device):
     """A switch's VLANs, its VTP domain, and which ports are in which VLAN."""
-    escape = html.escape
-    names = vlan_info.vlan_names(device)
-    if not names and not device.port_vlans:
-        return ""
-    vtp = f"VTP domain {device.vtp_domain}" if device.vtp_domain else ""
-    if device.vtp_mode:
-        vtp = f"{vtp} ({device.vtp_mode})" if vtp else f"VTP {device.vtp_mode}"
-    parts = [f"<h4>VLANs ({len(names)})</h4>", f"<p>{escape(vtp)}</p>" if vtp else ""]
-    if names:
-        listed = [f"{vlan} {name}".strip() for vlan, name in sorted(names.items())]
-        more = f" ...and {len(listed) - VLANS_LISTED} more" if len(listed) > VLANS_LISTED else ""
-        parts.append(f"<p>{escape(', '.join(listed[:VLANS_LISTED]))}{more}</p>")
-    trunks = [(port, info) for port, info in device.port_vlans.items() if info.get("mode") == vlan_info.TRUNK]
-    if trunks:
-        parts.append("<table>")
-        for port, info in trunks:
-            parts.append(f"<tr><td>{escape(port)}&nbsp;</td><td>{escape(vlan_port_text(info))}</td></tr>")
-        parts.append("</table>")
-    by_vlan = {}
-    for port, info in device.port_vlans.items():
-        if info.get("mode") != vlan_info.TRUNK and info.get("vlan"):
-            by_vlan.setdefault(info["vlan"], []).append(port)
-    if by_vlan:
-        parts.append("<p><b>Access ports</b></p><table>")
-        for vlan, ports in sorted(by_vlan.items()):
-            listed = ", ".join(ports[:8]) + (f" and {len(ports) - 8} more" if len(ports) > 8 else "")
-            parts.append(f"<tr><td>VLAN {vlan}&nbsp;</td><td>{escape(listed)}</td></tr>")
-        parts.append("</table>")
-    return "".join(parts)
+    blocks = vlan_blocks(device)
+    return f"<h4>{html.escape(blocks[0])}</h4>{blocks_html(blocks[1:])}" if blocks else ""
 
 
 def folded_text(folded):
@@ -4857,37 +4854,12 @@ def group_html(network_map, key, status_of=lambda key: None):
 
 
 def monitor_status_text(state):
-    if state is None:
-        return ""
-    via = f", pinged from {state.via} (IP SLA)" if state.via else ""
-    if state.status == monitor.UNKNOWN:
-        return f"Can't check: {state.problem}" if state.problem else "Being checked" + via
-    since = datetime.datetime.fromtimestamp(state.since).strftime("%H:%M:%S")
-    if state.status == monitor.DOWN:
-        return f"Down for {monitor.duration_text(time.time() - state.since)} (since {since}){via}"
-    rtt = f", {'<1' if state.rtt < 1 else state.rtt} ms" if state.rtt is not None else ""
-    return f"Up{rtt} (since {since}){via}"
+    """The details pane's Status, the same as the NOMAD Dashboard's (monitor_record.status_text)."""
+    return monitor_record.status_text(state)
 
 
 def subnet_html(network_map, subnet):
-    escape = html.escape
-    members, hosts = l3.subnet_details(network_map, subnet)
-    parts = [f"<h3>{escape(subnet)}</h3><h4>Devices with an address in it</h4><table>"]
-    for label, port, address in members:
-        parts.append(f"<tr><td>{escape(label)}&nbsp;</td><td>{escape(port)} {escape(address)}</td></tr>")
-    parts.append("</table>")
-    routed = [(device.label, route) for device in network_map.devices.values() for route in device.routes
-              if route[1] and route[0] == subnet]
-    for label, (destination, next_hop, port, protocol) in routed[:ROUTES_SHOWN]:
-        parts.append(f"<p>{escape(label)} routes it via {escape(next_hop)} ({escape(protocol)})</p>")
-    if hosts:
-        parts.append(f"<h4>Hosts on the map ({len(hosts)})</h4><table>")
-        for host in hosts[:ROUTES_SHOWN]:
-            device = network_map.devices.get(host.device)
-            parts.append(f"<tr><td>{escape(host.ip)}&nbsp;</td><td>{escape(host.name or host.mac)} on "
-                         f"{escape(device.label if device else host.device)} {escape(host.port)}</td></tr>")
-        parts.append("</table>")
-    return "".join(parts)
+    return details_html(subnet_details(network_map, subnet))
 
 
 def node_html(network_map, node):

@@ -456,13 +456,21 @@ class BackupsPanel(QWidget):
                                   "With a tribe, every computer that has this on shares the work, device by device; "
                                   "a device one can't reach goes to another.")
         layout.addWidget(self.run_check)
-        explain = QLabel("Backups log in with each device's saved SSH session, else the login below (it needs a saved "
-                         "password: nobody's there to type one). The Map Watcher service can run them too "
-                         "(Tools > Map Watcher Service).")
+        explain = QLabel("Backups log in with a device's own login (Device Logins...), else its saved SSH session, "
+                         "else the login below (it needs a saved password: nobody's there to type one). The Map "
+                         "Watcher service can run them too (Tools > Map Watcher Service), with the same device logins.")
         explain.setWordWrap(True)
         explain.setStyleSheet(f"color: {COLORS['muted']};")
         layout.addWidget(explain)
         layout.addWidget(login_row)
+        device_row = QHBoxLayout()
+        self.device_logins_note = QLabel()
+        self.device_logins_note.setWordWrap(True)
+        self.device_logins_button = QPushButton("Device Logins...")
+        self.device_logins_button.setToolTip("Choose a saved credential for the devices that need a different login")
+        device_row.addWidget(self.device_logins_note, 1)
+        device_row.addWidget(self.device_logins_button)
+        layout.addLayout(device_row)
         form = QFormLayout()
         interval_row = QHBoxLayout()
         self.interval = QSpinBox()

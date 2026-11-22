@@ -28,6 +28,9 @@ can, unlike add_network: the network comes with what's in it, when a map of it i
 Assets (API 11; see assets.py): set_asset, set_assets (several at once) and delete_asset.
 Software targets (API 12; see targets.py): set_target and delete_target.
 
+A viewer key (API 17) is a third secret, for the NOMAD Dashboard: it reads, and nothing else. The server answers it
+only the GETs in VIEWER_GETS, which leave out the maps' community strings and the configs' texts.
+
 A server moved to another computer (see migrate.py) answers every request with HTTP 410 and {"hosts", "port"}: the
 new server's address, which laptops switch to by themselves.
 
@@ -38,6 +41,8 @@ Tribe maps (network maps shared by everyone; see nomad/netmap/shared.py), kept i
     POST /api/maps/rename             {"map_id", "name"}
     POST /api/maps/delete             {"map_id"}
     GET  /api/maps/secrets?map_id=N   its community strings; POST /api/maps/secrets {"map_id", "secrets"}
+    GET  /api/maps/monitoring?map_id=N  the Map Watcher's monitoring of it (API 18): {"summary", "updated", "by"}
+    POST /api/maps/monitoring         {"map_id", "summary"}: the Map Watcher's latest (not a change anyone waits for)
     POST /api/maps/lease              {"map_id", "holder", "kind", "release", "take"}: who's watching it for new
                                       devices (so two computers don't both poll the network)
     /api/wait also takes maps_since, and answers when a map changes.
@@ -99,19 +104,26 @@ KEY_FILE_FORMAT = 1
 MAX_REQUEST_BYTES = 64 * 1024 * 1024  # An import of every page of a large workbook fits easily
 BACKUP_KEEP_DAYS = 14
 BACKUP_CHECK_SECONDS = 3600
-TEAM, ADMIN = "team", "admin"
+TEAM, ADMIN, VIEWER = "team", "admin", "viewer"
+# What a viewer key may ask (all reading): never a map's credentials (/api/maps/secrets) or a config's text
+# (/api/configs/version), and nothing that changes anything
+VIEWER_GETS = frozenset({"/api/status", "/api/wait", "/api/changes", "/api/log", "/api/sightings",
+                         "/api/maps/changes", "/api/maps/monitoring", "/api/configs/changes", "/api/configs/results",
+                         "/api/configs/runners"})
 ADMIN_ONLY_ACTIONS = {"add_network", "delete_network"}
 WHOLE_NETWORK_ACTIONS = {"take_network"}  # Their reply carries every row made, however many
 EDIT_REPLY, WHOLE_REPLY = 5000, 10 ** 9
 CERTIFICATE_YEARS = 20
 MAX_WAIT_SECONDS = 55
+VIEWER_RECHECK_SECONDS = 5
 STOP_WAIT_SECONDS = 10  # How long stop() waits for the listener to close
 HANDSHAKE_SECONDS = 15  # A connection that hasn't finished its TLS handshake by then is dropped
 IDLE_SECONDS = MAX_WAIT_SECONDS + 30  # A connection that sends nothing for this long is closed (past /api/wait's)
-API_LEVEL = 16  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
+API_LEVEL = 18  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
 # 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks, 11 assets,
 # 12 software targets, 13 wireless controller assets, 14 map icons locked in place, 15 taking a laptop's whole network,
-# 16 the config archive.
+# 16 the config archive, 17 viewer keys (the NOMAD Dashboard) and ports graphed on the dashboard (a map section),
+# 18 the Map Watcher's monitoring of each map (/api/maps/monitoring), for every NOMAD to show.
 # Clients cope with servers below this, and recommend updating them (add each new level to client.SERVER_FEATURES)
 
 
@@ -241,6 +253,35 @@ def write_team_key(path, config, directory=None):
     Path(path).write_text(json.dumps(team_key(config, directory), indent=2), encoding="utf-8")
 
 
+def ensure_viewer_secret(directory=None):
+    """The server's config, with a viewer secret made the first time one's asked for."""
+    config = load_config(directory)
+    if not config.get("viewer_secret"):
+        config["viewer_secret"] = secrets.token_urlsafe(32)
+        save_config(config, directory)
+    return config
+
+
+def viewer_key(config, directory=None):
+    """The contents of a viewer key file: a tribe key that can only read (for the NOMAD Dashboard)."""
+    return dict(team_key(config, directory), secret=config["viewer_secret"], role=VIEWER)
+
+
+def write_viewer_key(path, directory=None):
+    """Save a viewer key file (making the viewer secret the first time). The running server picks it up within a few
+    seconds (it reads its config again when a key it doesn't know is used)."""
+    config = ensure_viewer_secret(directory)
+    Path(path).write_text(json.dumps(viewer_key(config, directory), indent=2), encoding="utf-8")
+
+
+def change_viewer_secret(directory=None):
+    """A new viewer secret: dashboards with the old viewer key stop reading until they get the new one."""
+    config = load_config(directory)
+    config["viewer_secret"] = secrets.token_urlsafe(32)
+    save_config(config, directory)
+    return config
+
+
 def change_team_secret(directory=None):
     """A new tribe secret: every laptop is locked out until it gets the new tribe key file."""
     config = load_config(directory)
@@ -278,6 +319,7 @@ class IpamServer:
         self.configs = ConfigStore(self.directory / "configs.db")
         self.latest_configs = self.configs.revision()
         self.scope_revision = None  # The map revision the backups' devices were last taken from
+        self.viewer_checked = 0.0  # When the config was last read again for a new viewer secret
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(self.directory / "cert.pem", self.directory / "key.pem")
@@ -358,8 +400,24 @@ class IpamServer:
             return ADMIN
         if secret and hmac.compare_digest(secret, self.config["team_secret"]):
             return TEAM
+        viewer = self.viewer_secret(secret)
+        if secret and viewer and hmac.compare_digest(secret, viewer):
+            return VIEWER
         raise RequestError(401, "This tribe key isn't accepted. The tribe key may have been changed: ask for the "
                                 "new tribe key file.")
+
+    def viewer_secret(self, offered=""):
+        """The viewer secret. A key the server doesn't know may be a viewer key saved (or changed) since it started:
+        its config is read again for it, at most every few seconds."""
+        current = self.config.get("viewer_secret") or ""
+        if offered and offered != current and time.monotonic() - self.viewer_checked > VIEWER_RECHECK_SECONDS:
+            self.viewer_checked = time.monotonic()
+            try:
+                current = load_config(self.directory).get("viewer_secret") or ""
+            except (OSError, ValueError):
+                return current
+            self.config["viewer_secret"] = current
+        return current
 
     def moved_reply(self):
         """What a moved server answers every request with: where the tribe server is now (see migrate.py)."""
@@ -468,6 +526,9 @@ class IpamServer:
                                         _clean(request.get("kind", "gui")), time.time(),
                                         release=bool(request.get("release")), take=bool(request.get("take")))
                 return {"lease": lease}  # Not a change anyone waits for
+            elif action == "monitoring":
+                self.maps.set_monitoring(request["map_id"], request.get("summary"), user, time.time())
+                return {}  # Nor is this: NOMAD asks for it while the map is open
             else:
                 raise RequestError(404, "No such request.")
         if action != "push" or request.get("changes"):
@@ -478,6 +539,10 @@ class IpamServer:
     def map_secrets(self, map_id):
         with self.maps.lock:
             return {"secrets": self.maps.secrets(map_id)}
+
+    def map_monitoring(self, map_id):
+        with self.maps.lock:
+            return self.maps.monitoring(map_id)
 
     # ----------------------------------------------------------------- The config archive
 
@@ -943,6 +1008,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if app.config.get("moved"):
                 return self._reply(410, app.moved_reply())
             url = urlparse(self.path)
+            if role == VIEWER and (method != "GET" or url.path not in VIEWER_GETS):
+                raise RequestError(403, "This is a viewer key: it can only read the tribe's maps and IP addresses.")
             if method == "GET" and url.path == "/api/status":
                 return self._reply(200, app.status(role))
             if method == "GET" and url.path == "/api/wait":
@@ -956,6 +1023,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                                                  int(configs_since[0]) if configs_since else None))
             if method == "GET" and url.path == "/api/maps/changes":
                 return self._reply(200, app.map_changes(int(parse_qs(url.query).get("since", ["0"])[0])))
+            if method == "GET" and url.path == "/api/maps/monitoring":
+                return self._reply(200, app.map_monitoring(int(parse_qs(url.query)["map_id"][0])))
             if method == "GET" and url.path == "/api/maps/secrets":
                 return self._reply(200, app.map_secrets(int(parse_qs(url.query)["map_id"][0])))
             if method == "POST" and url.path.startswith("/api/maps/"):

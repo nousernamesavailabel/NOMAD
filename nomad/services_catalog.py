@@ -1,4 +1,4 @@
-"""NOMAD's four Windows services in one list, for Tools > Services & Firewall (ui/services_dialog.py).
+"""NOMAD's five Windows services in one list, for Tools > Services & Firewall (ui/services_dialog.py).
 
 Each service keeps its own module and setup dialog; this only says, for each one, how to tell its state, which
 firewall rules it opens on which ports, where its folder is, how to start, stop and remove it, and whether it can
@@ -6,7 +6,7 @@ be installed without questions (with its usual settings, or the ones it was inst
 
 They're listed in the order they're best installed: the Tribe Server first (the Map Watcher needs a tribe), the
 Syslog Collector before the Map Watcher (so it has UDP 514 when the Map Watcher starts, and the Map Watcher reads
-syslog from it), and the Map Watcher last.
+syslog from it), then the Map Watcher, and the NOMAD Dashboard last (it reads all of them).
 """
 import json
 from dataclasses import dataclass
@@ -111,6 +111,18 @@ def _watcher_firewall():
     return {rule: (port, (UDP,)) for rule, port in _watcher().FIREWALL_RULES.items()}
 
 
+# --------------------------------------------------------------------- NOMAD Dashboard
+
+def _dashboard():
+    return _module("dashboard.service")
+
+
+def _dashboard_firewall():
+    module = _dashboard()
+    config = read_config(module.dashboard_dir(), module.default_config())
+    return {module.FIREWALL_RULE: (config["port"] if config else None, (TCP,))}
+
+
 SERVICES = [
     ServiceEntry("tribe", "Tribe Server",
                  "Shares the tribe's IP addresses and network maps with NOMAD on every laptop. Install it on one "
@@ -129,6 +141,11 @@ SERVICES = [
                  "open. Needs a tribe.",
                  lambda: _watcher().spec(), lambda: _watcher().watcher_dir(), _watcher_firewall,
                  lambda: _watcher().uninstall(), dialog="show_map_watcher"),
+    ServiceEntry("dashboard", "NOMAD Dashboard",
+                 "A read-only web site showing the network's state to people without NOMAD. Install it on the "
+                 "computer with the Map Watcher and the collectors.",
+                 lambda: _dashboard().spec(), lambda: _dashboard().dashboard_dir(), _dashboard_firewall,
+                 lambda: _dashboard().uninstall(), dialog="show_dashboard_service"),
 ]
 
 

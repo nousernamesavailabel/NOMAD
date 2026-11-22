@@ -6,6 +6,15 @@ of the tribe's maps, and claims the watching of the maps chosen for it from the 
 left open somewhere. What it finds is added to the tribe map, so everyone sees it, tagged NEW. Switches can send it
 syslog and SNMP traps so a switch is read the moment something's plugged in.
 
+It also monitors the maps it watches for the NOMAD Dashboard (watch_monitor.py): it pings their devices (or reads
+their IP SLA probes), reads the traffic on their links and graphed ports, and sweeps their IPAM subnets on a schedule,
+keeping what it finds in status.db in its folder. Each map's monitoring (statuses and uptime, nothing secret) is
+shared for NOMAD's own map: in %ProgramData%\\NOMAD\\monitoring for anyone on this computer, and through the tribe
+(API 18) for everyone else.
+
+It can monitor maps on this computer that aren't shared with the tribe too (watch_local.py), and then runs without a
+tribe at all if it has no tribe maps.
+
 It can also run the tribe's scheduled config backups (nomad/configs/runner.py): devices due are handed to it first,
 and it logs in with the one login chosen for it (copied into its config, its password encrypted for this computer:
 the service has no saved sessions of its own).
@@ -27,7 +36,7 @@ from ..snmp import TRAP_PORT
 from ..syslog import SYSLOG_PORT, SyslogReceiver
 from ..syslogs.feed import SyslogListener
 from ..syslogs.service import DISPLAY_NAME as SYSLOG_SERVICE_NAME
-from . import triggers, watch
+from . import monitor_record, triggers, watch, watch_local, watch_monitor
 from .crawl import credentials_from_json, ordered_credentials
 
 log = logging.getLogger(__name__)
@@ -43,6 +52,8 @@ STEP_SECONDS = 2
 SERVICE_USER = "Map Watcher service"
 BACKUP_SECONDS = 30
 SYSLOG_CHECK_SECONDS = 60  # Checking whether the Syslog Collector service has been installed or removed here
+MONITORING_SEND_SECONDS = 60  # A map's monitoring goes to the tribe at most this often
+MONITORING_RETRY_SECONDS = 3600  # After a tribe server too old to take it
 
 
 def watcher_dir():
@@ -62,29 +73,57 @@ def save_config(config, directory=None):
     temporary.replace(directory / "config.json")
 
 
-def make_config(key, map_ids, listen=True, timers=None, protect=None, backups=None):
-    """The service's config from a tribe key (its secret encrypted for this computer). timers: {name: seconds}, as
-    watch.TIMERS has them. backups: None (no scheduled config backups), or {"username", "password", "enable",
-    "label", "trust_new"} with the passwords as typed (they're encrypted here)."""
+def make_config(key, map_ids, listen=True, timers=None, protect=None, backups=None, monitoring=None, local_maps=None):
+    """The service's config from a tribe key (its secret encrypted for this computer; None for a watcher of local
+    maps only, with no tribe). local_maps: the config's watch_local entries, kept. timers: {name: seconds}, as
+    watch.TIMERS has them. monitoring: watch_monitor.MONITOR_DEFAULTS' settings (the defaults for any left out).
+    backups: None (no scheduled config backups), or {"username", "password", "enable", "label", "trust_new",
+    "credential_id", "devices": {device id: credential id}, "logins": {credential id: {"username", "password",
+    "label"}}} with the passwords as typed (they're encrypted here); or {"keep": the config's backups as they are,
+    "enable", "trust_new"} when the logins haven't changed (nothing to read from the master password)."""
     if protect is None:  # For this computer: the service runs as another account
         from ..terminal.credentials import protect as dpapi
 
         def protect(text):
             return dpapi(text, machine=True)
-    config = {"server_id": key.server_id, "hosts": list(key.hosts), "port": key.port, "fingerprint": key.fingerprint,
-              "secret": protect(key.secret), "maps": [int(map_id) for map_id in map_ids], "listen": bool(listen),
-              **watch.timer_values(timers)}
-    if backups:
-        config["backups"] = {"username": backups["username"], "label": backups.get("label", ""),
-                             "password": protect(backups["password"]) if backups.get("password") else "",
-                             "enable": protect(backups["enable"]) if backups.get("enable") else "",
-                             "trust_new": bool(backups.get("trust_new", True))}
+    config = {"maps": [int(map_id) for map_id in map_ids] if key is not None else [], "listen": bool(listen),
+              **watch.timer_values(timers), "monitor": watch_monitor.monitor_settings({"monitor": monitoring})}
+    if key is not None:
+        config.update(server_id=key.server_id, hosts=list(key.hosts), port=key.port, fingerprint=key.fingerprint,
+                      secret=protect(key.secret))
+    if local_maps:
+        config["local_maps"] = [dict(entry) for entry in local_maps]
+    if backups and key is not None:
+        config["backups"] = protect_backups(backups, protect)
     return config
+
+
+def protect_backups(backups, protect):
+    """The config's backups from make_config's backups (its passwords encrypted with protect)."""
+    if "keep" in backups:
+        kept = dict(backups["keep"])
+        kept["enable"] = protect(backups["enable"]) if backups.get("enable") else ""
+        kept["trust_new"] = bool(backups.get("trust_new", kept.get("trust_new", True)))
+        return kept
+    logins = {credential_id: {"username": login["username"], "label": login.get("label", ""),
+                              "password": protect(login["password"]) if login.get("password") else ""}
+              for credential_id, login in (backups.get("logins") or {}).items()}
+    return {"username": backups["username"], "label": backups.get("label", ""),
+            "password": protect(backups["password"]) if backups.get("password") else "",
+            "enable": protect(backups["enable"]) if backups.get("enable") else "",
+            "trust_new": bool(backups.get("trust_new", True)), "credential_id": backups.get("credential_id", ""),
+            "devices": {device: credential_id for device, credential_id in (backups.get("devices") or {}).items()
+                        if credential_id in logins},
+            "logins": logins}
 
 
 def config_timers(config):
     """The watch timers in a config (an older one has only the two intervals; the rest are the defaults)."""
     return watch.timer_values({name: config[name] for name in watch.TIMERS if name in config})
+
+
+def has_tribe(config):
+    return bool(config.get("secret") and config.get("server_id"))
 
 
 def key_from_config(config, unprotect=None):
@@ -137,6 +176,14 @@ class WatchEngine:
         self.stop_event = threading.Event()
         self.by = f"{socket.gethostname()} ({DISPLAY_NAME})"
         self.backups = backups  # A configs.runner.BackupRunner, when it runs the tribe's config backups
+        self.monitoring = None  # A watch_monitor.MonitorRunner, when it monitors the maps for the NOMAD Dashboard
+        self.sweeps = None  # A watch_monitor.SweepRunner, when it sweeps their IPAM subnets
+        self.server_id = ""  # The tribe's (for naming the monitoring shared on this computer)
+        self.shared_dir = None  # Where it's shared (None: monitor_record.shared_dir())
+        self.summaries = {}  # Tribe map ID -> its monitoring summary not sent yet
+        self.summaries_lock = threading.Lock()
+        self.next_summaries = 0.0
+        self.monitoring_refused_until = 0.0
 
     # ----------------------------------------------------------------- Listening
 
@@ -216,6 +263,9 @@ class WatchEngine:
         if self.backups is not None and now >= self.next_backup:
             self.next_backup = now + BACKUP_SECONDS
             self.back_up()
+        if self.summaries and now >= self.next_summaries and now >= self.monitoring_refused_until:
+            self.next_summaries = now + MONITORING_SEND_SECONDS
+            self.send_summaries()
         due = self.queue.due()
         for watched in self.watched.values():
             if self.stop_event.is_set():
@@ -233,6 +283,38 @@ class WatchEngine:
                     log.info("Couldn't back up %s: %s", done.name, done.note)
         except Exception as error:  # Offline, or an old server: try again next time
             log.info("Config backups: %s", error)
+
+    def share_summary(self, map_id, summary):
+        """A map's monitoring summary (from the monitoring's thread): written for anyone on this computer at once,
+        and sent to the tribe on the next step for a tribe map."""
+        tribe = map_id >= 0
+        if tribe:
+            name = monitor_record.record_name(server_id=self.server_id, map_id=map_id)
+        else:
+            info = self.maps.map_info(map_id) or {}
+            name = monitor_record.record_name(record_id=info.get("record_id", ""))
+        try:
+            monitor_record.write_shared(name, summary, self.shared_dir)
+        except OSError as error:
+            log.info("Couldn't share the monitoring on this computer: %s", error)
+        if tribe:
+            with self.summaries_lock:
+                self.summaries[map_id] = summary
+
+    def send_summaries(self):
+        from ..ipam.client import OldServerError
+        with self.summaries_lock:
+            summaries, self.summaries = self.summaries, {}
+        for map_id, summary in summaries.items():
+            try:
+                self.maps.send_monitoring(map_id, summary)
+            except OldServerError:  # A server before API 18: try again in an hour (it may be updated by then)
+                log.info("The tribe server is too old to share the monitoring with every NOMAD (update it)")
+                self.monitoring_refused_until = self.clock() + MONITORING_RETRY_SECONDS
+                return
+            except Exception as error:  # Offline: the next one goes when it's back
+                log.info("Couldn't send the monitoring of %s: %s", self.map_name(map_id), error)
+                return
 
     def sync(self):
         try:
@@ -271,7 +353,7 @@ class WatchEngine:
 
     def options(self, map_id, settings):
         secrets = self.maps.secrets(map_id)
-        if not secrets:
+        if not secrets and map_id >= 0:
             try:
                 secrets = self.maps.fetch_secrets(map_id)
             except Exception as error:
@@ -349,7 +431,10 @@ class WatchEngine:
 
     def run(self):
         self.start_listening()
-        log.info("%s watching %s", DISPLAY_NAME, ", ".join(str(map_id) for map_id in self.watched) or "no maps")
+        log.info("%s watching %s", DISPLAY_NAME, ", ".join(str(map_id) for map_id in self.watched) or "no tribe maps")
+        for runner in (self.monitoring, self.sweeps):
+            if runner is not None:
+                runner.start()
         try:
             while not self.stop_event.is_set():
                 try:
@@ -359,6 +444,9 @@ class WatchEngine:
                 self.stop_event.wait(STEP_SECONDS)
         finally:
             self.stop_listening()
+            for runner in (self.monitoring, self.sweeps):
+                if runner is not None:
+                    runner.stop()
             for map_id in self.watched:
                 try:
                     self.maps.lease(map_id, self.holder, kind="service", release=True)
@@ -392,6 +480,12 @@ def make_engine(directory=None):
     from .tribe import TribeMaps
     directory = Path(directory or watcher_dir())
     config = load_config(directory)
+    local = watch_local.LocalMaps(directory, config)
+    if not has_tribe(config):  # Only maps on this computer: no tribe to sync with
+        engine = WatchEngine(watch_local.CombinedMaps(None, local), [], f"{socket.gethostname()}-service",
+                             timers=config_timers(config), listen=False)
+        add_monitoring(engine, config, None, None, directory, local)
+        return engine
     key = key_from_config(config)
     moved = _moved_server_key(key)
     if moved is not None:  # Installed on the tribe server with its admin key, and the server has moved away since
@@ -408,9 +502,43 @@ def make_engine(directory=None):
     client = TeamClient(key, user=SERVICE_USER, on_moved=remember_moved)
     maps = TribeMaps(key.server_id, client, directory / "maps.db",
                      protect=lambda text: protect(text, machine=True), unprotect=unprotect)
-    return WatchEngine(maps, config.get("maps", []), f"{socket.gethostname()}-service",
-                       timers=config_timers(config), listen=config.get("listen", True),
-                       backups=backup_runner(config, client, directory))
+    engine = WatchEngine(watch_local.CombinedMaps(maps, local), config.get("maps", []),
+                         f"{socket.gethostname()}-service", timers=config_timers(config),
+                         listen=config.get("listen", True), backups=backup_runner(config, client, directory))
+    engine.server_id = key.server_id
+    add_monitoring(engine, config, key, client, directory, local)
+    return engine
+
+
+def add_monitoring(engine, config, key, client, directory, local=None):
+    """Give the engine its monitoring and scheduled sweeps for the NOMAD Dashboard (and NOMAD's maps), unless they're
+    turned off. The maps on this computer (local) are monitored too, but not swept: they have no tribe IPAM."""
+    settings = watch_monitor.monitor_settings(config)
+    local_ids = local.ids() if local is not None else []
+    monitored = settings["enabled"] and (engine.watched or local_ids)
+    names = set()
+    if monitored:
+        names = {monitor_record.record_name(server_id=engine.server_id, map_id=map_id) for map_id in engine.watched}
+        names |= {monitor_record.record_name(record_id=(local.map_info(map_id) or {}).get("record_id", ""))
+                  for map_id in local_ids}
+    try:
+        monitor_record.remove_shared_except(names, engine.shared_dir)
+    except OSError:
+        pass
+    if not monitored:
+        return
+    from ..dashboard.history import HISTORY_FILE
+    from ..dashboard.service import dashboard_dir
+    store = watch_monitor.MonitorStore(Path(directory) / watch_monitor.STATUS_FILE)
+    engine.monitoring = watch_monitor.MonitorRunner(engine.maps, list(engine.watched) + local_ids, store,
+                                                    engine.options, settings, on_summary=engine.share_summary,
+                                                    source=f"the Map Watcher on {socket.gethostname()}",
+                                                    older_history=dashboard_dir() / HISTORY_FILE)
+    if settings["sweep_hours"] > 0 and key is not None and engine.watched:
+        from ..ipam.client import TeamStore
+        engine.sweeps = watch_monitor.SweepRunner(
+            engine.maps, list(engine.watched), settings=settings, store=store,
+            team_factory=lambda: TeamStore(key, Path(directory) / "ipam-copy.db", client))
 
 
 def backup_runner(config, client, directory, unprotect=None):
@@ -419,6 +547,7 @@ def backup_runner(config, client, directory, unprotect=None):
     if not settings or not settings.get("username"):
         return None
     from ..configs import archive, runner
+    from ..configs.logins import DeviceLogins
     from ..configs.tribe import TribeConfigs
     from ..terminal.hostkeys import KnownHosts
     from ..terminal.sessions import Session
@@ -432,10 +561,27 @@ def backup_runner(config, client, directory, unprotect=None):
     known_hosts = KnownHosts(str(Path(directory) / "known_hosts"))
     computer = socket.gethostname()
 
+    own = service_device_logins(settings)
+
     def make_pusher():
-        logins = macssh.SshLogins([], fallback, None, label)
+        logins = DeviceLogins(macssh.SshLogins([], fallback, None, label), own)
         return configpush.Pusher(logins, None, known_hosts, bool(settings.get("trust_new", True)), enable)
     return runner.BackupRunner(configs, make_pusher, f"{computer}-service", computer, SERVICE_USER, archive.SERVICE)
+
+
+def service_device_logins(settings):
+    """own(device id) -> (Session, label) or None, from the config's backups' device logins (the Device Logins
+    the Editor's Backups tab sets, copied in by the Map Watcher's window)."""
+    from ..terminal.sessions import Session
+    devices, logins = settings.get("devices") or {}, settings.get("logins") or {}
+
+    def own(device_id):
+        login = logins.get(devices.get(device_id, ""))
+        if not login or not login.get("username"):
+            return None
+        session = Session("", username=login["username"], saved_password=login.get("password", ""))
+        return session, login.get("label") or f"user {login['username']}"
+    return own
 
 
 def log_to_file(directory=None):
@@ -503,11 +649,19 @@ def run_service_dispatcher():
     servicemanager.StartServiceCtrlDispatcher()
 
 
-def install(config):
-    """Install (or update) and start the service with this config (needs administrator rights)."""
+def install(config, copies=()):
+    """Install (or update) and start the service with this config (needs administrator rights). copies: maps on this
+    computer to copy in for it to monitor ([(NetworkMap, name, path, SNMP credentials JSON)], see watch_local); copies
+    of maps no longer in the config go."""
     from ..ipam import service
+    from ..terminal.credentials import protect
     directory = watcher_dir()
     service.secure_service_folder(directory)
+    service.secure_shared_folder(monitor_record.shared_dir())
+    for network_map, name, path, secrets in copies:
+        watch_local.add(config, directory, network_map, name, path, secrets,
+                        lambda text: protect(text, machine=True))
+    watch_local.remove_others(config, directory)
     save_config(config, directory)
     service.register(spec())
     for rule, port in FIREWALL_RULES.items():

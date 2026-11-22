@@ -175,11 +175,12 @@ def _copy_exe(source, target):
 
 def shared_exe_specs():
     """The services that run the same copy of NOMAD.exe in Program Files: the IPAM server, the Map Watcher, the
-    Flow Collector and the Syslog Collector."""
+    Flow Collector, the Syslog Collector and the NOMAD Dashboard."""
+    from ..dashboard.service import spec as dashboard_spec
     from ..flows.service import spec as flows_spec
     from ..netmap.watch_service import spec as watcher_spec
     from ..syslogs.service import spec as syslog_spec
-    return [IPAM, watcher_spec(), flows_spec(), syslog_spec()]
+    return [IPAM, watcher_spec(), flows_spec(), syslog_spec(), dashboard_spec()]
 
 
 def secure_folder(directory, grants=FOLDER_GRANTS, owner=ADMINISTRATORS_SID):
@@ -215,6 +216,17 @@ def secure_service_folder(directory):
     _run(["icacls", str(parent), "/inheritance:r", "/grant:r", *PARENT_GRANTS, "/C", "/Q"])
     _remove_others(parent, PARENT_GRANTS)
     secure_folder(directory)
+
+
+SHARED_GRANTS = FOLDER_GRANTS + [f"*{USERS_SID}:(OI)(CI)RX"]
+
+
+def secure_shared_folder(directory):
+    """A NOMAD service's folder that everyone on this computer may read (nothing secret goes in it: the Map
+    Watcher's monitoring for NOMAD's maps), which only Administrators, SYSTEM and the service may change."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    secure_folder(directory, SHARED_GRANTS)
 
 
 def _granted_sids(grants):
@@ -288,6 +300,11 @@ def register(spec):
     fails. Returns the command line. The other NOMAD service running the same exe is stopped while it's replaced,
     and started again after."""
     import win32service
+    from ..service_versions import versions_dir
+    try:  # Where each service notes which NOMAD it runs, for NOMAD to read (service_versions)
+        secure_shared_folder(versions_dir())
+    except Exception as error:  # Only the version notes go without it
+        log.warning("Couldn't make the folder for the services' versions: %s", error)
     others = []
     if getattr(sys, "frozen", False):
         others = [other for other in shared_exe_specs() if other.name != spec.name and status(other) in (

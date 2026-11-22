@@ -213,6 +213,7 @@ For more on each page, see [All pages](docs/pages.md).
 | [Syslog](docs/syslog.md) | Receiving syslog, the Syslog Collector service, searching what it kept |
 | [NetFlow](docs/netflow.md) | Collecting flows, setting routers up, top talkers |
 | [Editor](docs/editor.md) | Editing and comparing configs, the config archive, backups, standards |
+| [NOMAD Dashboard](docs/dashboard.md) | A read-only web site of the network's state for people without NOMAD |
 | [Keyboard guide](docs/keyboard-shortcuts.md) | Every shortcut |
 | [Development](docs/development.md) | Running from source, building, releasing |
 

@@ -5,6 +5,7 @@ nomad/ipam/migrate.py). The tribe shares both IPAM networks and network maps."""
 import logging
 import os
 
+from PyQt5 import sip
 from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, \
     QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout
 
@@ -91,8 +92,16 @@ class TribeDialog(QDialog):
         self.change_key_button = QPushButton("Change Tribe Key...")
         self.change_key_button.setToolTip("Lock out every copy of the current tribe key file, for example after a "
                                           "laptop is lost. Laptops then need the new file.")
+        self.viewer_key_button = QPushButton("Save Viewer Key File...")
+        self.viewer_key_button.setToolTip("A key that can only read the tribe, for the NOMAD Dashboard service "
+                                          "(Tools > NOMAD Dashboard Service). It can't change anything, and never "
+                                          "gets the maps' SNMP credentials or the configs' texts.")
+        self.change_viewer_button = QPushButton("Change Viewer Key...")
+        self.change_viewer_button.setToolTip("Lock out every copy of the current viewer key. Dashboards then need the "
+                                             "new file.")
         self.open_folder_button = QPushButton("Open Data Folder")
-        for button in (self.save_key_button, self.change_key_button, self.open_folder_button):
+        for button in (self.save_key_button, self.change_key_button, self.viewer_key_button, self.change_viewer_button,
+                       self.open_folder_button):
             key_row.addWidget(button)
         key_row.addStretch()
         server_layout.addLayout(key_row)
@@ -129,6 +138,8 @@ class TribeDialog(QDialog):
         self.uninstall_button.clicked.connect(self.uninstall)
         self.save_key_button.clicked.connect(self.save_key)
         self.change_key_button.clicked.connect(self.change_key)
+        self.viewer_key_button.clicked.connect(self.save_viewer_key)
+        self.change_viewer_button.clicked.connect(self.change_viewer_key)
         self.open_folder_button.clicked.connect(lambda: os.startfile(server_dir()))
         self.move_out_button.clicked.connect(self.move_out)
         self.move_in_button.clicked.connect(self.move_in)
@@ -163,7 +174,8 @@ class TribeDialog(QDialog):
         self.start_button.setEnabled(idle and state == service.STOPPED)
         self.stop_button.setEnabled(idle and state == service.RUNNING)
         self.uninstall_button.setEnabled(idle and state != service.NOT_INSTALLED)
-        for button in (self.save_key_button, self.change_key_button, self.open_folder_button, self.move_out_button):
+        for button in (self.save_key_button, self.change_key_button, self.viewer_key_button,
+                       self.change_viewer_button, self.open_folder_button, self.move_out_button):
             button.setEnabled(idle and configured)
         self.move_in_button.setEnabled(idle)
         self.undo_move_button.setVisible(bool(moved_to))
@@ -211,6 +223,11 @@ class TribeDialog(QDialog):
         self.refresh()
 
         def succeeded(result):
+            if sip.isdeleted(self.message_label):  # The window was closed while it worked: NOMAD still hears of it
+                log.info("Tribe server: %s", done)
+                if on_done:
+                    on_done(result)
+                return
             self.busy = False
             set_hint(self.message_label, done, "success")
             self.refresh()
@@ -218,8 +235,10 @@ class TribeDialog(QDialog):
                 on_done(result)
 
         def failed(error):
-            self.busy = False
             log.warning("Tribe server: %s failed: %s", message, error)
+            if sip.isdeleted(self.message_label):
+                return
+            self.busy = False
             set_hint(self.message_label, str(error), "error")
             self.refresh()
 
@@ -263,6 +282,40 @@ class TribeDialog(QDialog):
         set_hint(self.message_label, f"Saved {path}. Give it to the tribe (a USB stick or a file share only the "
                                      "tribe can read): anyone with it can change the tribe's IPAM and maps.",
                  "success")
+
+    def save_viewer_key(self):
+        from ..ipam.server import write_viewer_key
+        path, _ = QFileDialog.getSaveFileName(self, "Save Viewer Key File", f"NOMAD tribe viewer{KEY_FILE_SUFFIX}",
+                                              f"NOMAD tribe key (*{KEY_FILE_SUFFIX})")
+        if not path:
+            return
+        try:
+            write_viewer_key(path)
+        except (OSError, ValueError, KeyError) as error:
+            log.warning("Couldn't save the viewer key file: %s", error)
+            reason = getattr(error, "strerror", "") or error
+            set_hint(self.message_label, f"Couldn't save the viewer key file: {reason}", "error")
+            return
+        set_hint(self.message_label, f"Saved {path}. Choose it in Tools > NOMAD Dashboard Service on the dashboard's "
+                                     "computer. It can only read the tribe.", "success")
+
+    def change_viewer_key(self):
+        from ..ipam.server import change_viewer_secret
+        if QMessageBox.question(self, "Change the Viewer Key",
+                                "Make a new viewer key? Every NOMAD Dashboard stops reading the tribe until it's "
+                                "given the new viewer key file.") != QMessageBox.Yes:
+            return
+        try:
+            change_viewer_secret()
+        except (OSError, ValueError) as error:
+            set_hint(self.message_label, f"Couldn't change it: {getattr(error, 'strerror', '') or error}", "error")
+            return
+        if service.status() == service.RUNNING:
+            self.run("Restarting the service with the new viewer key...", lambda: (service.stop(), service.start()),
+                     "Viewer key changed. Save the new viewer key file for the dashboards.")
+        else:
+            set_hint(self.message_label, "Viewer key changed. Save the new viewer key file for the dashboards.",
+                     "success")
 
     def move_out(self):
         dialog = MoveOutDialog(self, service.configured_port() or self.port_input.value())

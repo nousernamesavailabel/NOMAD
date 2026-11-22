@@ -459,6 +459,74 @@ def test_backups_at_start_with_the_master_password_locked_wait_without_a_dialog(
     settings = QSettings(str(page.window.session_store.path) + ".ini", QSettings.IniFormat)
     settings.setValue("editor/run_backups", True)
     page.restore_settings(settings)
-    assert not page.backups_panel.run_check.isChecked() and 'href="unlock"' in page.backups_panel.status.text()
+    # The box stays ticked, waiting, with the link to unlock now
+    assert page.backups_panel.run_check.isChecked() and page.backup_thread is None
+    assert 'href="unlock"' in page.backups_panel.status.text() and "Waiting" in page.backups_panel.status.text()
+    assert page.unlock_timer.isActive()
     page.save_settings(settings)
     assert settings.value("editor/run_backups", False, bool)  # Still on for next time
+
+
+def test_waiting_backups_start_once_the_master_password_is_unlocked(page, monkeypatch):
+    from PyQt5.QtCore import QSettings
+    page.update_local_scope()
+    store = page.window.session_store
+    unlocked = []
+    monkeypatch.setattr(type(store.vault), "enabled", property(lambda self: True))
+    monkeypatch.setattr(type(store.vault), "unlocked", property(lambda self: bool(unlocked)))
+    monkeypatch.setattr(editor_tab, "BackupThread", FakeBackupThread)
+    settings = QSettings(str(store.path) + ".ini", QSettings.IniFormat)
+    settings.setValue("editor/run_backups", True)
+    page.restore_settings(settings)
+    page.check_unlocked()
+    assert page.backup_thread is None  # Still locked
+    unlocked.append(1)  # Unlocked somewhere else (the Terminal)
+    page.check_unlocked()
+    assert page.backup_thread is not None and not page.unlock_timer.isActive()
+    assert "Running" in page.backups_panel.status.text()
+
+
+def test_a_device_with_its_own_login_uses_it(page, monkeypatch):
+    from nomad.configs import logins as backup_logins
+    from nomad.terminal.sessions import Credential, Session
+    store = page.window.session_store
+    own = Credential("Branch", username="branch", saved_password="secret-b")
+    usual = Credential("Usual", username="usual", saved_password="secret-u")
+    store.credentials.items = [own, usual]
+    backup_logins.save({"10.0.0.1": own.id})
+    page.show_device_logins_count()
+    assert page.backups_panel.device_logins_note.text().startswith("1 device")
+    fallback = store.credentials.apply(Session("", credential_id=usual.id))
+    from nomad.ui.ssh_push import SavedLogins
+    login, secret = page.with_device_logins((SavedLogins(store, fallback, None, "credential Usual"), "en"))
+    session, label = login.login_for("10.0.0.1", ["R1"])
+    assert (session.username, session.host, label) == ("branch", "10.0.0.1", "credential Branch")
+    session, label = login.login_for("10.0.0.2", ["R2"])
+    assert (session.username, label) == ("usual", "credential Usual")
+    assert secret == "en"
+    # Pull Config uses it too, with nothing asked for the usual login
+    monkeypatch.setattr(editor_tab, "ensure_unlocked", lambda *args: True)
+    monkeypatch.setattr(page.login_row, "logins", lambda *args: pytest.fail("asked for the usual login"))
+    login, _ = page.pull_logins({"id": "10.0.0.1", "address": "10.0.0.1", "names": []})
+    assert login.login_for("10.0.0.1")[1] == "credential Branch"
+
+
+def test_device_logins_dialog(app, tmp_path):
+    from nomad.terminal.sessions import Credential, SessionStore
+    from nomad.ui.backup_logins_dialog import USUAL, DeviceLoginsDialog
+    store = SessionStore(str(tmp_path / "sessions.json"))
+    good = Credential("Branch", username="branch", saved_password="x")
+    asked = Credential("Asked", username="asked")  # No saved password: backups can't use it
+    store.credentials.items = [good, asked]
+    devices = [{"id": "10.0.0.1", "name": "R1", "address": "10.0.0.1", "failures": [{"reason": "Login failed"}]},
+               {"id": "10.0.0.2", "name": "R2", "address": "10.0.0.2", "failures": []}]
+    dialog = DeviceLoginsDialog(None, store, devices, {"gone": good.id}, select=["10.0.0.2"])
+    assert [dialog.combo.itemText(index) for index in range(dialog.combo.count())] == [USUAL, "Branch  (branch)"]
+    assert dialog.selected_ids() == ["10.0.0.2"] and dialog.table.item(0, 3).text() == "Login failed"
+    dialog.combo.setCurrentIndex(1)
+    dialog.use_for_selected()
+    assert dialog.table.item(1, 2).text() == "Branch"
+    assert dialog.chosen() == {"gone": good.id, "10.0.0.2": good.id}  # A device not listed now is kept
+    dialog.filter.setText("R1")
+    assert dialog.table.isRowHidden(1) and not dialog.table.isRowHidden(0)
+    dialog.deleteLater()

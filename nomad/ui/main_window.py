@@ -127,6 +127,7 @@ class MainWindow(QMainWindow):
         log.info("%s started (administrator: %s)", APP_NAME, self.admin)
         self.refresh()
         self.tribe_banner.check()
+        self.service_banner.start()
 
     # ----------------------------------------------------------------- UI setup
 
@@ -158,6 +159,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.admin_banner)
         self.tribe_banner = TribeUpdateBanner(self.tribe_key, central)
         layout.addWidget(self.tribe_banner)
+        from .service_banner import ServiceUpdateBanner
+        self.service_banner = ServiceUpdateBanner(self.admin, central)
+        self.service_banner.open_services.connect(self.show_services)
+        layout.addWidget(self.service_banner)
 
         # App-wide adapter picker used by the Interfaces, MTU, Ping, Sweep and other pages
         self.picker_bar = QWidget(central)
@@ -405,6 +410,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("&Map Watcher Service...", self.show_map_watcher)
         tools_menu.addAction("F&low Collector Service...", self.show_flow_collector)
         tools_menu.addAction("S&yslog Collector Service...", self.show_syslog_collector)
+        tools_menu.addAction("NOMAD &Dashboard Service...", self.show_dashboard_service)
         tools_menu.addSeparator()
         tools_menu.addAction("Add &PuTTY to PATH", self.sweep_tab.add_putty_to_path)
         tools_menu.addAction("Default &Browser Settings...", self.open_default_apps)
@@ -537,6 +543,7 @@ class MainWindow(QMainWindow):
 
         timed("saving settings", self.save_settings)
         timed("the tribe banner", self.tribe_banner.stop)
+        timed("the services banner", self.service_banner.stop)
         for window in list(self.navigator.popped.values()):  # Their pages back first, to shut down with the rest
             window.closing_app = True
             timed(f"the popped-out {window.title} window", window.close)
@@ -580,6 +587,7 @@ class MainWindow(QMainWindow):
         self.picker_bar.setVisible(not on)
         self.admin_banner.setVisible(not on and not self.admin)
         self.tribe_banner.set_focused(on)
+        self.service_banner.set_focused(on)
         self.statusBar().setVisible(not on)
         self.central_layout.setContentsMargins(*((0, 0, 0, 0) if on else self.normal_margins))
         for page in (self.terminal_tab, self.scp_tab):
@@ -794,6 +802,7 @@ class MainWindow(QMainWindow):
     def show_services(self):
         from .services_dialog import ServicesDialog  # Loads pywin32 only when it's needed
         ServicesDialog(self).exec_()
+        self.service_banner.check()  # It may have updated some
 
     def show_syslog_collector(self):
         from .syslog_service_dialog import SyslogCollectorDialog  # Loads pywin32 only when it's needed
@@ -808,6 +817,10 @@ class MainWindow(QMainWindow):
     def show_map_watcher(self):
         from .watch_service_dialog import MapWatcherDialog  # Loads pywin32 only when it's needed
         MapWatcherDialog(self).exec_()
+
+    def show_dashboard_service(self):
+        from .dashboard_dialog import DashboardDialog  # Loads pywin32 only when it's needed
+        DashboardDialog(self).exec_()
 
     def show_start_as_admin(self, on):
         self.start_as_admin_action.setChecked(on)

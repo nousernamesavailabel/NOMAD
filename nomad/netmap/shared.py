@@ -21,8 +21,10 @@ DEVICE, LINK, HOST, GROUP, GROUP_OF, POSITION, L3_POSITION, DELETED, TRACE, NEWS
     "host_seen", "meta")
 LOCKED, L3_LOCKED = "locked", "l3_locked"
 LOCK_SECTIONS = (LOCKED, L3_LOCKED)  # Servers below client.LOCK_API refuse these: they wait here until it's updated
+GRAPHED = "graphed"  # A port graphed on the NOMAD Dashboard: "<device key>|<port key>" -> its port name
+GRAPHED_SECTIONS = (GRAPHED,)  # Servers below client.VIEWER_API refuse these
 SECTIONS = (DEVICE, LINK, HOST, GROUP, GROUP_OF, POSITION, L3_POSITION, DELETED, TRACE, NEWS, HOST_SEEN, META,
-            LOCKED, L3_LOCKED)
+            LOCKED, L3_LOCKED, GRAPHED)
 # The meta items: the map's own fields, how to crawl it (not secret), and the IPAM network it's of (an item of its
 # own, so setting it doesn't touch the others)
 MAP_META, SETTINGS, IPAM = "map", "settings", "ipam"
@@ -42,6 +44,10 @@ def link_id(link):
 
 def host_id(host):
     return host.mac or f"{host.device}|{port_key(host.port)}|{host.ip}"
+
+
+def graphed_id(device, port):
+    return f"{device}|{port_key(port)}"
 
 
 def _plain(value):
@@ -78,6 +84,8 @@ def flatten(network_map, settings=None):
     items.update({(TRACE, trace.target): asdict(trace) for trace in network_map.traces})
     items.update({(NEWS, ref): dict(value) for ref, value in network_map.news.items()})
     items.update({(HOST_SEEN, mac): day for mac, day in network_map.host_seen.items()})
+    items.update({(GRAPHED, graphed_id(key, port)): port for key, ports in network_map.graphed.items()
+                  for port in ports})
     items[(META, MAP_META)] = {"seeds": list(network_map.seeds), "started": network_map.started,
                                "finished": network_map.finished, "stopped": network_map.stopped,
                                "root": network_map.root}
@@ -117,6 +125,12 @@ def build(items):
     network_map.traces = [_build(Trace, data) for _, data in sorted(sections[TRACE].items())]
     network_map.news = {ref: dict(value) for ref, value in sections[NEWS].items()}
     network_map.host_seen = dict(sections[HOST_SEEN])
+    graphed = {}
+    for key, port in sorted(sections[GRAPHED].items()):
+        device = key.rsplit("|", 1)[0]
+        if device in devices and isinstance(port, str) and port not in graphed.get(device, []):
+            graphed.setdefault(device, []).append(port)
+    network_map.graphed = graphed
     if network_map.root not in devices:
         network_map.root = ""
     network_map.prune_groups()
@@ -133,7 +147,7 @@ def diff(base, current):
     changes = [{"section": section, "key": key, "data": data} for (section, key), data in current.items()
                if base.get((section, key)) != data]
     changes += [{"section": section, "key": key, "data": None} for (section, key) in base
-                if (section, key) not in current]
+                if (section, key) not in current and section in SECTIONS]  # Not parts a newer NOMAD added
     return changes
 
 
@@ -173,6 +187,8 @@ CREATE TABLE IF NOT EXISTS secrets (map_id INTEGER PRIMARY KEY, data TEXT NOT NU
 CREATE TABLE IF NOT EXISTS leases (map_id INTEGER PRIMARY KEY, holder TEXT NOT NULL, computer TEXT, kind TEXT,
                                    expires REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS monitoring (map_id INTEGER PRIMARY KEY, data TEXT NOT NULL, updated REAL NOT NULL,
+                                       updated_by TEXT);
 """
 
 
@@ -249,6 +265,7 @@ class MapStore:
             self.db.execute("DELETE FROM items WHERE map_id = ?", (int(map_id),))
             self.db.execute("DELETE FROM secrets WHERE map_id = ?", (int(map_id),))
             self.db.execute("DELETE FROM leases WHERE map_id = ?", (int(map_id),))
+            self.db.execute("DELETE FROM monitoring WHERE map_id = ?", (int(map_id),))
         return revision
 
     def push(self, map_id, changes, user):
@@ -345,6 +362,25 @@ class MapStore:
                                 "VALUES (:map_id, :holder, :computer, :kind, :expires)", current)
             return {"holder": current["holder"], "computer": current["computer"], "kind": current["kind"],
                     "expires": current["expires"], "yours": current["holder"] == holder}
+
+    # ----------------------------------------------------------------- The Map Watcher's monitoring (API 18)
+
+    def set_monitoring(self, map_id, summary, user, now):
+        """Keep the Map Watcher's latest monitoring summary of a map (monitor_record's), for every NOMAD to show."""
+        if not isinstance(summary, dict):
+            raise ValueError("The monitoring summary isn't valid.")
+        with self.db:
+            self._map(map_id)
+            self.db.execute("INSERT OR REPLACE INTO monitoring (map_id, data, updated, updated_by) VALUES (?, ?, ?, ?)",
+                            (int(map_id), json.dumps(summary), float(now), user))
+
+    def monitoring(self, map_id):
+        """{"summary", "updated", "by"} of a map, or {} when nothing has sent one."""
+        self._map(map_id)
+        row = self.db.execute("SELECT * FROM monitoring WHERE map_id = ?", (int(map_id),)).fetchone()
+        if row is None:
+            return {}
+        return {"summary": json.loads(row["data"]), "updated": row["updated"], "by": row["updated_by"] or ""}
 
     def leases(self, now):
         rows = self.db.execute("SELECT * FROM leases WHERE expires > ?", (now,))

@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDialog, QD
 
 from ..netmap import diff
 from ..netmap.crawl import MAX_WORKERS, WORKERS, parse_networks
+from ..netmap.details import shown_value
 from ..netmap.model import AP, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIND_NAMES, PARENT_KIND, ROUTER, SERVER, \
     SITE, SWITCH, UNCHECKED, UNKNOWN, WLC, Device, Host, Link, normalize_name, port_sort_key, short_port
 from ..oui import format_mac, vendor
@@ -530,13 +531,6 @@ def port_combo(network_map, key, text=""):
     combo.setEditText(text)
     combo.lineEdit().setPlaceholderText("Such as Gi1/0/24 (optional)")
     return combo
-
-
-def shown_value(attribute, value):
-    """How a value the crawl found reads: a kind's name, or "nothing"."""
-    if attribute == "kind":
-        return KIND_NAMES.get(value, value)
-    return value or "nothing"
 
 
 class DeviceDialog(QDialog):

@@ -20,7 +20,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from ..ipam.client import LOCK_API
+from ..ipam.client import LOCK_API, VIEWER_API
 from ..system import log_dir
 from . import shared
 
@@ -38,11 +38,12 @@ CREATE TABLE IF NOT EXISTS secrets (map_id INTEGER PRIMARY KEY, data TEXT NOT NU
 CREATE TABLE IF NOT EXISTS stale_secrets (map_id INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS collapsed (map_id INTEGER PRIMARY KEY, groups TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS monitoring (map_id INTEGER PRIMARY KEY, data TEXT NOT NULL);
 """
 
 
 SECRETS = ("secrets", "")  # Among the items sync() says changed on a map: its credentials did
-TABLES = ("maps", "base", "pending", "secrets", "stale_secrets", "collapsed")  # Emptied when the copy starts again
+TABLES = ("maps", "base", "pending", "secrets", "stale_secrets", "collapsed", "monitoring")  # Emptied when the copy starts again
 
 
 def copy_path():
@@ -50,10 +51,12 @@ def copy_path():
 
 
 class TribeMaps:
-    def __init__(self, server_id, client, path=None, protect=None, unprotect=None):
+    def __init__(self, server_id, client, path=None, protect=None, unprotect=None, with_secrets=True):
         """client: a TeamClient (or anything with its map methods). protect/unprotect: how community strings are
-        kept in the copy (DPAPI for this Windows account in NOMAD, for this computer in the service)."""
+        kept in the copy (DPAPI for this Windows account in NOMAD, for this computer in the service). with_secrets:
+        False for a copy that never fetches them (the NOMAD Dashboard's, whose viewer key may not)."""
         self.server_id, self.client = server_id, client
+        self.with_secrets = with_secrets
         self.path = Path(path or copy_path())
         self.db = sqlite3.connect(str(self.path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -209,9 +212,15 @@ class TribeMaps:
         if api:
             self._set_meta("server_api", api)
 
+    @property
+    def sends_graphed(self):
+        """Whether the server is known to keep ports graphed on the NOMAD Dashboard (held here until it is)."""
+        return self.server_api >= VIEWER_API
+
     def held_sections(self):
         """The sections the server can't take yet (it refuses a whole push with one of them in it)."""
-        return () if self.sends_locks else shared.LOCK_SECTIONS
+        return ((() if self.sends_locks else shared.LOCK_SECTIONS)
+                + (() if self.sends_graphed else shared.GRAPHED_SECTIONS))
 
     def pending_count(self, map_id=None):
         """How many changes are waiting to be sent (a change to a map's credentials counts as one)."""
@@ -366,6 +375,10 @@ class TribeMaps:
         worker thread). Returns the ids of the maps whose credentials are now different here."""
         with self.lock:
             stale = [row["map_id"] for row in self.db.execute("SELECT map_id FROM stale_secrets")]
+        if not self.with_secrets:
+            with self._transaction():
+                self.db.execute("DELETE FROM stale_secrets")
+            return []
         changed = []
         for map_id in stale:
             before = self.secrets(map_id)
@@ -471,6 +484,33 @@ class TribeMaps:
         for map_id in self.refresh_secrets():
             touched.setdefault(map_id, set()).add(SECRETS)
         return touched
+
+    # ----------------------------------------------------------------- The Map Watcher's monitoring (server API 18)
+
+    def send_monitoring(self, map_id, summary):
+        """Send the Map Watcher's latest monitoring summary of a map (monitor_record's) to the server."""
+        self.client.map_request("monitoring", map_id=int(map_id), summary=summary)
+
+    def fetch_monitoring(self, map_id):
+        """The Map Watcher's latest summary of a map from the server, kept here too so it shows offline (until it's
+        too old: see monitor_record.from_summary). Raises when the server can't be reached or is older than API 18."""
+        reply = self.client.map_monitoring(map_id)
+        summary = reply.get("summary") if isinstance(reply, dict) else None
+        with self.lock, self.db:
+            if summary:
+                self.db.execute("INSERT OR REPLACE INTO monitoring VALUES (?, ?)", (int(map_id), json.dumps(summary)))
+            else:
+                self.db.execute("DELETE FROM monitoring WHERE map_id = ?", (int(map_id),))
+        return summary
+
+    def kept_monitoring(self, map_id):
+        """The summary fetch_monitoring got last, or None."""
+        with self.lock:
+            row = self.db.execute("SELECT data FROM monitoring WHERE map_id = ?", (int(map_id),)).fetchone()
+        try:
+            return json.loads(row[0]) if row else None
+        except ValueError:
+            return None
 
     # ----------------------------------------------------------------- Watching
 

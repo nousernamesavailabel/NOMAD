@@ -449,6 +449,18 @@ class FlowQueries:
                     break
         return found
 
+    def addresses(self, start, end=None):
+        """[[address, when last seen]] of every address in the raw flows (as source or destination) ending between
+        start and end: who's been on the network lately (for the NOMAD Dashboard's hosts per subnet)."""
+        end = time.time() + 60 if end is None else float(end)
+        seen = {}
+        for address, last in self.rows("SELECT src, MAX(end) FROM flows WHERE end BETWEEN ? AND ? GROUP BY src "
+                                       "UNION ALL SELECT dst, MAX(end) FROM flows WHERE end BETWEEN ? AND ? GROUP BY "
+                                       "dst", (float(start), end, float(start), end)):
+            if address and (address not in seen or last > seen[address]):
+                seen[address] = last
+        return [[address, last] for address, last in sorted(seen.items())]
+
     def summary(self):
         """{raw_flows, oldest_raw, oldest_minute}"""
         count, oldest = self.rows("SELECT COUNT(*), MIN(end) FROM flows")[0]

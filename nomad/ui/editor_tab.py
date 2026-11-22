@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import QComboBox, QFileDialog, QHBoxLayout, QInputDialog, Q
     QPushButton, QShortcut, QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget
 
 from ..configs import apply, archive, checks, diff, fix, pull, scope, standards, text as config_text
+from ..configs import logins as backup_logins
 from ..configs.archive import ArchiveError
 from ..configs.local import LocalConfigs
 from ..ipam.client import IpamError, OldServerError
@@ -34,6 +35,7 @@ OPEN_LIMIT = 50 * 1024 * 1024
 FILE_FILTER = "Configurations and text (*.cfg *.conf *.txt *.log *.xml);;All files (*)"
 LOCAL_FILE = "configs.db"
 SCOPE_SECONDS = 60
+UNLOCK_CHECK_MS = 5000
 STANDARD_TEMPLATE = r"""! STANDARD: New standard
 ! applies-to: kind=switch
 !
@@ -82,7 +84,7 @@ class EditorTab(QWidget):
         self.configs = None
         self.sync_thread = self.backup_thread = None
         self.quiet_start = False  # Starting backups on its own (not the box ticked): no master password dialog
-        self.backups_waiting = False  # Ticked at start but the master password was locked: kept for next time
+        self.backups_waiting = False  # Ticked, but the master password is locked: they start once it's unlocked
         self.archive_note = ""
         self.jobs = {}
         self.job_ids = itertools.count(1)
@@ -92,6 +94,9 @@ class EditorTab(QWidget):
         self.init_ui()
         self.scope_timer = QTimer(self)
         self.scope_timer.timeout.connect(self.update_local_scope)
+        self.unlock_timer = QTimer(self)  # While backups wait for the master password: unlocked anywhere starts them
+        self.unlock_timer.setInterval(UNLOCK_CHECK_MS)
+        self.unlock_timer.timeout.connect(self.check_unlocked)
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setSingleShot(True)
         self.refresh_timer.timeout.connect(self.refresh_views)
@@ -198,6 +203,8 @@ class EditorTab(QWidget):
         self.backups_panel.interval_applied.connect(self.apply_interval)
         self.backups_panel.refresh_button.clicked.connect(self.refresh_runners)
         self.backups_panel.due_all_button.clicked.connect(self.back_up_everything_now)
+        self.backups_panel.device_logins_button.clicked.connect(self.device_logins_clicked)
+        self.show_device_logins_count()
         self.side.currentChanged.connect(self.side_changed)
         self.runners_timer = QTimer(self)
         self.runners_timer.timeout.connect(self.refresh_runners_if_shown)
@@ -817,6 +824,8 @@ class EditorTab(QWidget):
         if len(devices) > 1:
             actions[menu.addAction(f"Back Up These {len(devices)} Now (Scheduled)")] = \
                 lambda: self.back_up_now(list(devices))
+            actions[menu.addAction(f"Log In to These {len(devices)} With...")] = \
+                lambda: self.edit_device_logins(list(devices))
         if len(devices) == 1:
             device_id = devices[0]
             device = self.device_row(device_id) or {}
@@ -833,6 +842,7 @@ class EditorTab(QWidget):
             action.setCheckable(True)
             action.setChecked(excluded)
             actions[action] = lambda: self.set_excluded(device_id, not excluded)
+            actions[menu.addAction("Log In With...")] = lambda: self.edit_device_logins([device_id])
         if not menu.actions():
             return
         chosen = menu.exec_(position)
@@ -1065,12 +1075,23 @@ class EditorTab(QWidget):
             other, title, path, _ = self.side_of(current)
             self.pull(target, mode="with", other=(other, title, path))
 
+    def pull_logins(self, target):
+        """Logins for pulling from a device: its own (Device Logins...) when it has one, else as usual; None if
+        cancelled."""
+        store = self.login_row.sessions
+        if self.own_login(target["id"]) is None:
+            return self.login_row.logins(self.status_label, [(target["address"], list(target.get("names") or ()))])
+        if not ensure_unlocked(self, store, "The Editor logs in to devices with saved passwords."):
+            return None
+        from .ssh_push import SavedLogins
+        return backup_logins.DeviceLogins(SavedLogins(store), self.own_login), self.login_row.enable_input.text()
+
     def pull(self, target, mode="open", other=None):
         """Read a device's configuration over SSH into the archive, then: open it (open), compare it with the copy
         before (last), with its startup-config (startup), or with a text (with: a standard is checked instead)."""
         if self.configs is None:
             return
-        logins = self.login_row.logins(self.status_label, [(target["address"], list(target.get("names") or ()))])
+        logins = self.pull_logins(target)
         if logins is None:
             return
         make = self.login_row.pusher_maker(logins)
@@ -1324,6 +1345,7 @@ class EditorTab(QWidget):
         if not on:
             if not keep_setting:
                 self.backups_waiting = False
+                self.unlock_timer.stop()
                 self.backups_panel.status.setText("Not running on this computer.")
             return
         if self.configs is None:
@@ -1332,9 +1354,16 @@ class EditorTab(QWidget):
         if logins is None and not self.quiet_start and self.unlock_for_backups():
             logins = self.login_row.quiet_logins()
         if logins is None:
-            # Master password still locked: the link asks for it. Started on its own (NOMAD starting), the setting is
-            # kept for next time; ticked by hand and Cancelled, it isn't newly kept
-            self.backups_waiting = self.quiet_start or self.backups_waiting
+            if self.quiet_start or self.backups_waiting:
+                # Started on its own (NOMAD starting) with the master password locked: the box stays ticked, and
+                # they start as soon as it's unlocked (here, or for the Terminal...)
+                self.backups_waiting = True
+                self.unlock_timer.start()
+                set_hint(self.backups_panel.status, "Waiting for the master password: backups start as soon as "
+                                                    "it's unlocked. <a href=\"unlock\">Unlock and Start Backups..."
+                                                    "</a>", "warning")
+                return
+            # Ticked by hand and the master password Cancelled: left off
             set_hint(self.backups_panel.status, "Backups need the master password unlocked on this computer. "
                                                 "<a href=\"unlock\">Unlock and Start Backups...</a>", "error")
             self.backups_panel.run_check.blockSignals(True)
@@ -1342,7 +1371,8 @@ class EditorTab(QWidget):
             self.backups_panel.run_check.blockSignals(False)
             return
         self.backups_waiting = False
-        make = self.login_row.pusher_maker(logins)
+        self.unlock_timer.stop()
+        make = self.login_row.pusher_maker(self.with_device_logins(logins))
         from ..configs import runner
         thread_ref = {}
 
@@ -1379,7 +1409,72 @@ class EditorTab(QWidget):
                                             "password must be unlocked on this computer.")
 
     def backups_link(self, _link):
-        self.backups_panel.run_check.setChecked(True)  # Asks for the master password, then starts them
+        if self.backups_panel.run_check.isChecked():  # Waiting for the master password
+            if self.unlock_for_backups():
+                self.set_backups_running(True)
+        else:
+            self.backups_panel.run_check.setChecked(True)  # Asks for the master password, then starts them
+
+    def check_unlocked(self):
+        """Backups waiting for the master password: start them once it's unlocked."""
+        store = self.login_row.sessions
+        if not self.backups_waiting or not self.backups_panel.run_check.isChecked():
+            self.unlock_timer.stop()
+        elif store is not None and (not store.vault.enabled or store.vault.unlocked):
+            self.restart_backups_quietly()
+
+    # ----------------------------------------------------------------- Each device's own login
+
+    def device_logins(self):
+        return backup_logins.load()
+
+    def own_login(self, device_id):
+        """(Session, label) for a device given its own login (Device Logins...), or None. Looked up at each login,
+        so a credential changed since is used."""
+        store = self.login_row.sessions
+        credential_id = self.device_logins().get(device_id)
+        credential = store.credentials.get(credential_id) if store is not None and credential_id else None
+        if credential is None:
+            return None
+        from ..terminal.sessions import Session
+        return store.credentials.apply(Session("", credential_id=credential.id)), f"credential {credential.name}"
+
+    def with_device_logins(self, logins):
+        """logins (LoginRow's (logins, enable)) using each device's own login first."""
+        login, secret = logins
+        if not self.device_logins():
+            return logins
+        return backup_logins.DeviceLogins(login, self.own_login), secret
+
+    def edit_device_logins(self, device_ids=None, parent=None):
+        """Device Logins...: the login scheduled backups (and Pull Config) use for each device. parent: the window
+        it's opened from (the Map Watcher's)."""
+        store = self.login_row.sessions
+        if store is None or self.configs is None:
+            return
+        with self.configs.lock:
+            devices = self.configs.store.devices()
+        from .backup_logins_dialog import DeviceLoginsDialog
+        dialog = DeviceLoginsDialog(parent or self, store, devices, self.device_logins(), device_ids)
+        if dialog.exec_() != DeviceLoginsDialog.Accepted:
+            return
+        try:
+            backup_logins.save(dialog.chosen())
+        except OSError as error:
+            self.status(f"Couldn't save the device logins: {error}", "error")
+            return
+        self.show_device_logins_count()
+        if self.backup_thread is not None:
+            self.set_backups_running(True)  # Uses them from the next round
+
+    def device_logins_clicked(self):
+        self.edit_device_logins()
+
+    def show_device_logins_count(self):
+        count = len(self.device_logins())
+        self.backups_panel.device_logins_note.setText(
+            f"{count} device{'s' if count != 1 else ''} with {'its' if count == 1 else 'their'} own login." if count
+            else "No device has its own login.")
 
     def backups_done(self, done):
         good = sum(1 for item in done if item.ok)
@@ -1580,6 +1675,7 @@ class EditorTab(QWidget):
             self.restart_backups_quietly()
 
     def shutdown(self):
+        self.unlock_timer.stop()
         self.stop_archive()
 
 

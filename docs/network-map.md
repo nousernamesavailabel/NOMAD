@@ -150,6 +150,7 @@ One row of buttons:
 - **Map** holds New Map, Open, Recent, Save As, Export, Compare, Monitor from a Router, the tribe's maps and the **Key**.
 - **Crawl** shows where to start from, to map again or crawl from another switch. It shows anyway while there's no map or a crawl is running.
 - The status line keeps to one line. Hover over it to read all of it.
+- Untick **Show Details** to hide the details pane on the right and give the map the whole width. You can also drag the pane shut.
 
 For two rows with the start row always showing, choose **View** > **Network Map Top Bar** > **Classic**.
 
@@ -305,11 +306,26 @@ On a tribe map, locks are shared with everyone, which needs the tribe server upd
 
 Tick **Monitor** and choose how often (every 10 s to 10 min) to ping every device on the map.
 
-- Up: a green dot and the response time.
-- Down: a red tint and how long it's been down. A device counts as down after missing two checks in a row, so one lost ping doesn't make it flap.
+- Up: a green dot and the response time. The box says how long it has been up and its uptime over the last 24 hours, for example "Up 3 d · 99.98%".
+- Down: a red tint and how long it has been down. A device counts as down after missing two checks in a row, so one lost ping doesn't make it flap.
+- A "+" after the time means it has been that way at least that long. Monitoring started after the device last changed, so it can't say when that was.
+- The details pane shows the uptime over 24 hours, 7 days and 30 days, and when the device was last checked.
 - The Devices tab gets a Status column to filter on.
-- The **Monitor** tab logs each device going down or coming back. The history is saved with the map.
+- The **Monitor** tab logs each device going down or coming back.
 - Monitoring carries on while you use other pages, and starts again with NOMAD if it was on, even after Windows restarts.
+
+NOMAD keeps each map's monitoring on this computer for a year. When it starts again, it picks up where it left off. A device that was up is still up since the same time. A device that changed while NOMAD was closed is logged once. The time NOMAD was closed doesn't count against anyone's uptime.
+
+### The Map Watcher's monitoring
+
+If the Map Watcher service monitors the map, NOMAD shows the Watcher's statuses and uptime, even with Monitor off. These are the same numbers the NOMAD Dashboard shows. The Watcher is always on, so its uptime is the fuller one. The details pane says **Monitored by** and names the Watcher's computer.
+
+- On the Watcher's own computer, NOMAD reads it directly. You don't need to run NOMAD as administrator.
+- On other computers, a tribe map's monitoring comes through the tribe server. The tribe server must be updated to this version.
+
+With Monitor on as well, the boxes still show the Map Watcher's monitoring for the devices it monitors. The details pane shows this computer's status and uptime underneath, under **This computer**.
+
+If the Map Watcher stops checking for ten minutes or more, the devices are grayed and say "Not checked since" and the time it last checked. The dashboard shows them the same way. Check that the Map Watcher service is running.
 
 ### Devices this computer can't reach
 
@@ -406,6 +422,16 @@ Watching runs where the switches can be reached, and the tribe server may not be
 The service takes over from NOMAD left open elsewhere, listens for the switches' syslog and traps (opening UDP 514 and 162 in Windows Firewall) and adds what it finds to the tribe maps. If the Syslog Collector service runs on the same computer, the Map Watcher reads syslog from it instead of listening on UDP 514.
 
 You can also install it from **Tools** > **Services & Firewall...** (see [Services and firewall](services.md)).
+
+### Maps that aren't shared with the tribe
+
+The Map Watcher can also monitor maps saved on its computer. It doesn't need a tribe key for these.
+
+1. Open the map on the Network Map page.
+2. In **Tools** > **Map Watcher Service...**, under **Maps on This Computer**, click **Add the Map Open**, or **Add a Map File...** to pick one.
+3. Give it a name and click **Install Service** (or **Update Service**).
+
+The Watcher keeps a copy of the map, with the SNMP credentials set on the Network Map page. When the map changes, click **Copy Again**, then **Update Service**. The Watcher monitors these maps, but it doesn't watch them for new devices. NOMAD on that computer and the dashboard both show its monitoring of them.
 
 Its settings and log are in `%ProgramData%\NOMAD\watcher`. To try it in a console, run `NOMAD.exe --map-watcher`.
 

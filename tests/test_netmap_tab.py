@@ -682,17 +682,23 @@ def test_monitoring_the_map(tab, crawled):
     assert tab.monitor_label.text() == "4 up · 1 down"
     assert "rtr1.corp.example (10.0.0.254) is down" in "\n".join(tab.monitor.lines)
     assert not any("is up" in line for line in tab.monitor.lines)  # First answers aren't news
-    assert tab.network_map.status_log[-1][1:4] == ["rtr1", "rtr1.corp.example", DOWN]
+    kept = tab.monitor.record.recent_changes(0)  # In the map's record on this computer
+    assert [(row["key"], row["label"], row["status"]) for row in kept] == [("rtr1", "rtr1.corp.example", DOWN)]
+    tab.flush_save()  # The record ID made for it is saved with the map
+    assert tab.network_map.record_id and store.load(tab.map_path).record_id == tab.network_map.record_id
 
     answers["10.0.0.254"] = 9
     poll()
     assert "is up again, after being down" in tab.monitor.lines[-1]
-    assert "Up, 9 ms" in netmap_tab.device_html(crawled, "rtr1", tab.monitor.status("rtr1"))
+    html_text = netmap_tab.device_html(crawled, "rtr1", tab.monitor.status("rtr1"))
+    assert "Up for" in html_text and "9 ms" in html_text and "Uptime" in html_text
+    assert tab.view.items_by_key["rtr1"].detail_lines()[1][0].startswith("Up ")
 
     tab.monitor_check.setChecked(False)
     assert tab.view.items_by_key["core"].monitor_state is None and tab.monitor_label.text() == ""
-    tab.save_positions()
-    assert len(store.load(tab.map_path).status_log) == 2  # Down and up again, kept with the map
+    assert len(tab.monitor.record.recent_changes(0)) == 2  # Down and up again, kept for next time
+    tab.monitor_check.setChecked(True)  # Picks up where it left off: core has been up since before
+    assert tab.monitor.status("core").status == UP and tab.monitor.status("rtr1").status == UP
 
 
 def test_monitoring_resumes_at_startup(tab, crawled, tmp_path):
@@ -1025,3 +1031,180 @@ def test_wireless_controller_and_access_points(tab):
     tab.show_overlay(overlays.WIRELESS)
     assert len(tab.view.tunnel_items) == 3  # A dashed line from each AP to its controller
     assert "3 access points" in tab.vlan_label.text()
+
+
+def test_show_details_hides_the_pane_and_is_remembered(tab, tmp_path):
+    tab.resize(1200, 700)
+    tab.show()
+    try:
+        assert tab.details_check.isChecked() and tab.details.isVisibleTo(tab)
+        tab.details_check.setChecked(False)
+        assert not tab.details.isVisibleTo(tab)
+        settings = QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat)
+        tab.save_settings(settings)
+        tab.details_check.setChecked(True)
+        assert tab.details.isVisibleTo(tab) and tab.splitter.sizes()[1] > 0
+        # Dragged shut: Show Details unticks, and ticking it opens the pane to its usual width
+        tab.splitter.setSizes([sum(tab.splitter.sizes()), 0])
+        tab.on_splitter_moved()
+        assert not tab.details_check.isChecked() and not tab.details.isVisibleTo(tab)
+        tab.details_check.setChecked(True)
+        assert tab.details.isVisibleTo(tab) and tab.splitter.sizes()[1] > 0
+        other = netmap_tab.NetworkMapTab(Window())
+        try:
+            other.restore_settings(settings)
+            assert not other.details_check.isChecked() and not other.details.isVisibleTo(other)
+        finally:
+            other.shutdown()
+    finally:
+        tab.hide()
+
+
+def test_the_map_shows_the_map_watchers_monitoring_from_this_computer(tab, crawled):
+    import time as time_module
+    from nomad.netmap import monitor_record
+    from nomad.netmap.monitor import DOWN
+    tab.on_crawled(crawled)
+    name = tab.record_shown
+    assert name == f"map-{tab.network_map.record_id}"
+    now = time_module.time()
+    monitor_record.write_shared(name, {
+        "version": 1, "source": "the Map Watcher on PC1", "updated": now, "interval": 60,
+        "devices": {"rtr1": {"status": DOWN, "since": now - 7200, "exact": False, "rtt": None, "checked": now - 5,
+                             "via": "", "problem": "", "uptime": {"24h": 0.9, "7d": 0.95}}}})
+    tab.refresh_watcher()
+    state = tab.monitor.status("rtr1")  # Monitor isn't ticked: the Watcher's
+    assert state.status == DOWN and state.source == "the Map Watcher on PC1"
+    item = tab.view.items_by_key["rtr1"]
+    assert item.detail_lines()[1][0] == "Down 2 h+ · 90%"
+    html_text = netmap_tab.device_html(tab.network_map, "rtr1", state)
+    assert "Down for at least 2 h" in html_text and "The Map Watcher on PC1" in html_text
+    assert "90% (24 h) · 95% (7 days)" in html_text
+    assert tab.monitor.status("core") is None  # Not one the Watcher has
+    assert "Showing the monitoring of the Map Watcher on PC1" in tab.monitor.summary_label.text()
+    # This computer monitors it too: the map still shows the Watcher's (as the dashboard does), the pane both
+    from nomad.netmap.monitor import UP, DeviceStatus
+    tab.monitor.tracker.devices["rtr1"] = DeviceStatus(UP, 2, now - 60)
+    assert tab.monitor.status("rtr1").source == "the Map Watcher on PC1"
+    assert tab.monitor.own_status("rtr1").status == UP
+    html_text = netmap_tab.device_html(tab.network_map, "rtr1", tab.monitor.status("rtr1"), None,
+                                       tab.monitor.own_status("rtr1"))
+    assert "This computer" in html_text and "Up for 1 min" in html_text and "Down for at least 2 h" in html_text
+    tab.monitor.tracker.devices.clear()
+    # The Watcher stops: still shown, grayed, as it was then (as the dashboard shows it)
+    monitor_record.write_shared(name, {
+        "version": 1, "source": "the Map Watcher on PC1", "updated": now - 3600, "interval": 60,
+        "devices": {"rtr1": {"status": DOWN, "since": now - 7200, "exact": False, "rtt": None, "checked": now - 3600,
+                             "via": "", "problem": "", "uptime": {"24h": 0.9}}}})
+    tab.refresh_watcher()
+    assert tab.monitor.status("rtr1").stale_at == now - 3600
+    assert item.detail_lines()[1][0].startswith("Not checked since ")
+    assert "It hasn't checked since" in tab.monitor.summary_label.text()
+    assert tab.monitor.status_text("rtr1").startswith("Down (not checked since ")
+
+
+def test_the_map_watcher_dialog_takes_a_map_on_this_computer(tab, crawled, monkeypatch, tmp_path):
+    import time
+    from nomad.netmap import watch_service
+    from nomad.terminal.sessions import SessionStore
+    from nomad.ui import watch_service_dialog
+
+    class Main(QWidget):
+        admin = True
+
+    main = Main()
+    main.session_store = SessionStore(str(tmp_path / "sessions.json"))
+    main.netmap_tab = tab
+    tab.on_crawled(crawled)
+    monkeypatch.setattr(watch_service, "status", lambda: "Not installed")
+    monkeypatch.setattr(watch_service_dialog.QInputDialog, "getText", lambda *args, **kwargs: ("Lab", True))
+    installed = {}
+    monkeypatch.setattr(watch_service, "install", lambda config, copies=(): installed.update(config=config,
+                                                                                           copies=copies))
+    dialog = watch_service_dialog.MapWatcherDialog(main)
+    assert dialog.maps_list.count() == 0 and not dialog.install_button.isEnabled()  # No tribe here
+    dialog.add_open_button.click()
+    assert dialog.local_list.count() == 1 and dialog.install_button.isEnabled()
+    dialog.install()
+    for _ in range(250):  # It installs in the background (done once it says so)
+        app = QApplication.instance()
+        app.processEvents()
+        if installed and not dialog.busy:
+            break
+        time.sleep(0.02)
+    config = installed["config"]
+    assert not watch_service.has_tribe(config) and config["maps"] == []
+    [(network_map, name, path, secrets)] = installed["copies"]
+    assert network_map.record_id == tab.network_map.record_id and name == "Lab" and "communities" in secrets
+    dialog.deleteLater()
+    main.deleteLater()
+
+
+def test_the_map_watcher_dialog_remembers_the_backup_login(tab, monkeypatch, tmp_path):
+    from nomad.configs import logins as backup_logins
+    from nomad.netmap import watch_service
+    from nomad.terminal import credentials
+    from nomad.terminal.sessions import Credential, SessionStore
+    from nomad.ui import watch_service_dialog
+
+    class Main(QWidget):
+        admin = True
+
+    main = Main()
+    main.session_store = store = SessionStore(str(tmp_path / "sessions.json"))
+    main.netmap_tab = tab
+    netops = Credential("NetOps", username="netops", saved_password="p1")
+    branch = Credential("Branch", username="branch", saved_password="p2")
+    store.credentials.items = [netops, branch]
+    monkeypatch.setattr(watch_service, "status", lambda: "Not installed")
+    monkeypatch.setattr(credentials, "unprotect", lambda text: text.strip("<>"))
+    # Installed before the credential was noted: found by its name, and the enable password read back
+    watch_service.save_config({"maps": [], "backups": {"username": "netops", "label": "credential NetOps",
+                                                       "password": "<p1>", "enable": "<en>"}})
+    dialog = watch_service_dialog.MapWatcherDialog(main)
+    assert dialog.backup_login.credential_id() == netops.id and dialog.backup_enable.text() == "en"
+    assert dialog.backups_check.isChecked() and dialog.device_logins_label.text() == "No device has its own login."
+    # With the same logins as the service has and the master password locked, an update keeps them, asking nothing
+    backup_logins.save({"10.0.0.5": branch.id})
+    dialog.show_device_logins()
+    assert dialog.device_logins_label.text().startswith("1 device with its own login")
+    watch_service.save_config({"maps": [], "backups": {
+        "username": "netops", "label": "credential NetOps", "password": "<p1>", "enable": "<en>",
+        "credential_id": netops.id, "devices": {"10.0.0.5": branch.id},
+        "logins": {branch.id: {"username": "branch", "password": "<p2>", "label": "credential Branch"}}}})
+    monkeypatch.setattr(type(store.vault), "enabled", property(lambda self: True))
+    monkeypatch.setattr(type(store.vault), "unlocked", property(lambda self: False))
+    settings = dialog.backup_login_settings()
+    assert settings["keep"]["logins"][branch.id]["password"] == "<p2>" and settings["enable"] == "en"
+    # A device given another login since: its password is read (the master password is asked for)
+    backup_logins.save({"10.0.0.5": netops.id})
+    asked = []
+    monkeypatch.setattr("nomad.ui.vault_dialog.ensure_unlocked", lambda *args: asked.append(1) or False)
+    assert dialog.backup_login_settings() is None and asked == [1]
+    dialog.deleteLater()
+    main.deleteLater()
+
+
+def test_closing_the_map_watcher_window_while_it_installs(tab, monkeypatch, tmp_path):
+    import threading
+    from PyQt5 import sip
+    from PyQt5.QtCore import QThreadPool
+    from nomad.netmap import watch_service
+    from nomad.terminal.sessions import SessionStore
+    from nomad.ui import watch_service_dialog
+
+    class Main(QWidget):
+        admin = True
+
+    main = Main()
+    main.session_store = SessionStore(str(tmp_path / "sessions.json"))
+    main.netmap_tab = tab
+    monkeypatch.setattr(watch_service, "status", lambda: "Not installed")
+    dialog = watch_service_dialog.MapWatcherDialog(main)
+    go = threading.Event()
+    dialog.run("Installing...", lambda: go.wait(5), "Done.")
+    sip.delete(dialog)  # Closed before it finishes
+    go.set()
+    QThreadPool.globalInstance().waitForDone(5000)
+    QApplication.instance().processEvents()  # Its "done" finds no window, and nothing breaks
+    main.deleteLater()

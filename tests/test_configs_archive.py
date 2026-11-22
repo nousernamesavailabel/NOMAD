@@ -331,7 +331,8 @@ def test_service_config_carries_the_backup_login(tmp_path):
                                        backups={"username": "netops", "password": "pw", "enable": "en",
                                                 "label": "credential NetOps"})
     assert config["backups"] == {"username": "netops", "label": "credential NetOps", "password": "<pw>",
-                                 "enable": "<en>", "trust_new": True}
+                                 "enable": "<en>", "trust_new": True, "credential_id": "", "devices": {},
+                                 "logins": {}}
     made = watch_service.backup_runner(config, client=None, directory=tmp_path, unprotect=lambda text: text[1:-1])
     assert made.kind == archive.SERVICE and made.holder.endswith("-service")
     pusher = made.pusher_factory()
@@ -339,6 +340,29 @@ def test_service_config_carries_the_backup_login(tmp_path):
     assert (session.username, session.saved_password, label) == ("netops", "<pw>", "credential NetOps")
     assert pusher.enable_secret == "en"
     assert watch_service.backup_runner(plain, None, tmp_path) is None
+    made.configs.close()
+
+
+def test_service_backups_use_each_devices_own_login(tmp_path):
+    from nomad.netmap import watch_service
+    key = TeamKey.from_dict({"server_id": "s", "hosts": ["127.0.0.1"], "port": 1, "fingerprint": "f" * 64,
+                             "secret": "x", "format": 1})
+    config = watch_service.make_config(key, [1], protect=lambda text: f"<{text}>", backups={
+        "username": "netops", "password": "pw", "label": "credential NetOps", "credential_id": "c1",
+        "devices": {"10.0.0.5": "c2", "10.0.0.6": "gone"},
+        "logins": {"c2": {"username": "branch", "password": "bp", "label": "credential Branch"}}})
+    assert config["backups"]["devices"] == {"10.0.0.5": "c2"}  # One whose login wasn't copied uses the usual one
+    assert config["backups"]["logins"]["c2"]["password"] == "<bp>"
+    made = watch_service.backup_runner(config, client=None, directory=tmp_path, unprotect=lambda text: text[1:-1])
+    logins = made.pusher_factory().logins
+    session, label = logins.login_for("10.0.0.5", ["BR1"])
+    assert (session.username, session.saved_password, session.host, label) == \
+        ("branch", "<bp>", "10.0.0.5", "credential Branch")
+    assert logins.login_for("10.0.0.6")[1] == "credential NetOps"
+    # Updating with the same logins and the master password locked keeps them as they are
+    kept = watch_service.make_config(key, [1], protect=lambda text: f"<{text}>",
+                                     backups={"keep": config["backups"], "enable": "new", "trust_new": True})
+    assert kept["backups"] == dict(config["backups"], enable="<new>")
     made.configs.close()
 
 

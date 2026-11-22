@@ -2,7 +2,7 @@
 from a walk of a real pfSense 2.8.1 on ZFS."""
 from netmap_fakes import Device, build_network, number, oid, string
 
-from nomad.netmap import collect, pfsense
+from nomad.netmap import collect, details, pfsense
 from nomad.netmap.crawl import CrawlSettings, Crawler, apply_inventory, read_inventory_of
 from nomad.netmap.model import FIREWALL, Device as MapDevice, NetworkMap
 from nomad.snmp import OBJECT_ID, Value, parse_oid
@@ -162,12 +162,12 @@ def test_details_show_it_between_status_and_management_ip():
                                           disks=[{"name": "pfSense", "total": USED + FREE, "used": USED, "free": FREE}])
     html = netmap_tab.device_html(network_map, "fw")
     assert "<b>Disk</b>" in html and "(1.5%)" in html and "read 2026-10-31 17:51" in html
-    assert netmap_tab.disk_rows(network_map.devices["fw"])[0][1].startswith("1.5 GB of 102.0 GB used")
+    assert details.disk_rows(network_map.devices["fw"])[0][1].startswith("1.5 GB of 102.0 GB used")
     assert html.index("<b>Disk</b>") < html.index("Management IP")
 
 
 def test_each_disk_gets_a_row_when_there_are_several():
     device = MapDevice(key="fw", disks=[{"name": "zroot", "total": 4, "used": 1, "free": 3},
                                         {"name": "/data", "total": 0, "used": 0, "free": 0}])
-    assert [label for label, _ in netmap_tab.disk_rows(device)] == ["Disk zroot", "Disk /data"]
-    assert netmap_tab.disk_rows(MapDevice(key="other")) == []
+    assert [label for label, _ in details.disk_rows(device)] == ["Disk zroot", "Disk /data"]
+    assert details.disk_rows(MapDevice(key="other")) == []

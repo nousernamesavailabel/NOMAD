@@ -109,6 +109,8 @@ class FlowApi:
                                       query.get("exporter", ""), int(number("limit", 500)))
         if path == "/v1/summary":
             return self.queries.summary()
+        if path == "/v1/addresses":
+            return self.queries.addresses(number("start", 0.0), number("end"))
         raise KeyError(path)
 
     @staticmethod
@@ -201,6 +203,10 @@ class ServiceSource(FlowSource):
 
     def flows(self, address="", start=0.0, end=None, exporter="", limit=500):
         return self.get("/v1/flows", address=address, start=start, end=end, exporter=exporter, limit=limit)
+
+    def addresses(self, start, end=None):
+        """[[address, when last seen]] in the raw flows from start to end (store.FlowQueries.addresses)."""
+        return self.get("/v1/addresses", start=start, end=end)
 
 
 class LocalSource(FlowSource):

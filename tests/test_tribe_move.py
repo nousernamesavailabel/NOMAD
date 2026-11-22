@@ -225,7 +225,8 @@ def test_installing_one_service_stops_the_other_running_the_same_exe(monkeypatch
     from nomad.syslogs import service as syslog_service
     watcher = watch_service.spec()
     running = {service.IPAM.name: service.RUNNING, watcher.name: service.RUNNING,
-               flow_service.SERVICE_NAME: service.NOT_INSTALLED, syslog_service.SERVICE_NAME: service.NOT_INSTALLED}
+               flow_service.SERVICE_NAME: service.NOT_INSTALLED, syslog_service.SERVICE_NAME: service.NOT_INSTALLED,
+               "NOMADDashboard": service.NOT_INSTALLED}
     calls = []
 
     def stop(spec, force=False):

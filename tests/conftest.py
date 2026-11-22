@@ -38,15 +38,29 @@ class _NoSnmp:
 
 
 @pytest.fixture(autouse=True)
-def _no_nomad_services(monkeypatch):
+def _no_nomad_services(monkeypatch, tmp_path):
     """Tests see no NOMAD service on this computer, whatever is installed on it: a Flow or Syslog Collector really
-    running here would otherwise be read instead of the test's own data. Tests about the services stand in for them
-    themselves."""
+    running here would otherwise be read instead of the test's own data, and the Map Watcher's folders
+    (in ProgramData) are a test's own. Monitoring records go in the test's folder too. Tests about the services
+    stand in for them themselves."""
+    monkeypatch.setenv("ProgramData", str(tmp_path / "ProgramData"))
+    try:  # Backups' device logins are the test's own, not this computer's
+        from nomad.configs import logins as backup_logins
+        monkeypatch.setattr(backup_logins, "default_path", lambda: str(tmp_path / backup_logins.FILE_NAME))
+    except ImportError:
+        pass
+    try:
+        from nomad.netmap import monitor_record
+        records = tmp_path / "monitoring-records"
+        monkeypatch.setattr(monitor_record, "records_dir", lambda: records.mkdir(exist_ok=True) or records)
+    except ImportError:
+        pass
     try:
         from nomad.syslogs import service as syslog_service
-        from nomad.ui import flows_tab, syslog_tab
+        from nomad.ui import flows_tab, service_banner, syslog_tab
     except ImportError:
         return
+    monkeypatch.setattr(service_banner, "find_behind", lambda: [])
     monkeypatch.setattr(syslog_service, "running", lambda: False)
     monkeypatch.setattr(flows_tab, "service_state", lambda: "Not installed")
     monkeypatch.setattr(syslog_tab, "service_state", lambda: "Not installed")
