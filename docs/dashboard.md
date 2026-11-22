@@ -109,12 +109,14 @@ Most pages have **Download CSV** for their table. **Print** prints the page. To 
 
 The Map Watcher reads the traffic on the ports at both ends of every link on the map. To graph other ports too, such as a server's port or an internet uplink:
 
-1. Open the tribe map on NOMAD's **Network Map** page.
-2. Right-click the switch or router and choose **Tools** > **Graph on Dashboard...**
+1. Open the map on NOMAD's **Network Map** page.
+2. Right-click the switch or router and choose **Tools** > **Ports to Graph...**
 3. Tick the ports to graph. Link ports are always graphed.
 4. Click **OK**.
 
-The Map Watcher starts reading them on its next round.
+The Map Watcher starts reading them on its next round. NOMAD's [Traffic Graphs](network-map.md#traffic-graphs) page shows the same readings, and its **Keep Its History** box ticks one port the same way.
+
+On the map page, a device's details have a **Graph** link beside each port the Map Watcher reads. It opens that port on the Trends page.
 
 ## Kiosk mode for a wall screen
 

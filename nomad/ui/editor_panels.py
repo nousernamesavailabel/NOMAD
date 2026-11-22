@@ -457,8 +457,9 @@ class BackupsPanel(QWidget):
                                   "a device one can't reach goes to another.")
         layout.addWidget(self.run_check)
         explain = QLabel("Backups log in with a device's own login (Device Logins...), else its saved SSH session, "
-                         "else the login below (it needs a saved password: nobody's there to type one). The Map "
-                         "Watcher service can run them too (Tools > Map Watcher Service), with the same device logins.")
+                         "else the login below (it needs a saved password: nobody's there to type one). This is the "
+                         "one place to set them: the Map Watcher service on this computer (Tools > Map Watcher "
+                         "Service) is given the same logins whenever they change.")
         explain.setWordWrap(True)
         explain.setStyleSheet(f"color: {COLORS['muted']};")
         layout.addWidget(explain)
@@ -471,6 +472,10 @@ class BackupsPanel(QWidget):
         device_row.addWidget(self.device_logins_note, 1)
         device_row.addWidget(self.device_logins_button)
         layout.addLayout(device_row)
+        self.service_note = QLabel()
+        self.service_note.setWordWrap(True)
+        self.service_note.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        layout.addWidget(self.service_note)
         form = QFormLayout()
         interval_row = QHBoxLayout()
         self.interval = QSpinBox()

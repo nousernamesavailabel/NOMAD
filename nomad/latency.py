@@ -21,6 +21,19 @@ DEFAULT_TARGETS = [("Google DNS", "8.8.8.8"), ("Cloudflare DNS", "1.1.1.1")]
 HOST_LABEL = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?")
 
 
+def same_host(first, second):
+    """Whether two target hosts are the same: the same address however it's written (2001:db8::1 and
+    2001:DB8:0::1), or the same name in any case (and without a trailing dot)."""
+    def key(text):
+        text = text.strip()
+        address, percent, scope = text.partition("%")
+        try:
+            return str(ipaddress.ip_address(address)) + percent + scope.lower()
+        except ValueError:
+            return text.lower().rstrip(".")
+    return key(first) == key(second)
+
+
 def host_problem(text):
     """Why text can't be a target host (an IPv4 or IPv6 address or a host name), or "" when it can."""
     host = text.strip()

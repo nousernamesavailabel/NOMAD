@@ -5,12 +5,13 @@ imports it.
 device_details gives {"title", "sections": [{"title", "blocks"}]}, where each block is one of
     {"p": text}                         a paragraph (its new lines kept)
     {"label": text}                     a bold line, over the rows after it
-    {"rows": [[left, right]], "bold"}   a two-column table; bold: the left column's are labels
+    {"rows": [[left, right]], "bold"}   a two-column table; bold: the left column's are labels; "graph" (when
+                                        there): each row's port to offer a traffic graph of, or None
 The first section has no title. Nothing here is a credential or a config.
 """
 from . import hardware, l3, tunnels as tunnel_module
 from . import vlans as vlan_info
-from .model import AP_DOWN, AP_UP, CORRECTED_NAMES, KIND_NAMES, short_port
+from .model import AP_DOWN, AP_UP, CORRECTED_NAMES, KIND_NAMES, NETWORK_KINDS, port_key, short_port
 
 ROUTES_SHOWN = 50
 VLANS_LISTED = 40  # A device's details name this many of its VLANs
@@ -99,15 +100,23 @@ def device_details(network_map, key, status="", status_rows=(), live=None):
     def section(title, *blocks):
         sections.append({"title": title, "blocks": [block for block in blocks if block]})
 
+    graphable = device.kind in NETWORK_KINDS and bool(device.mgmt_ip)  # Its ports' traffic can be graphed
     links = network_map.links_of(key)
+    linked = set()
     if links:
-        lines = []
+        lines, graphs = [], []
         for link in sorted(links, key=lambda link: link.port_on(key)):
             other = network_map.devices[link.other(key)]
             port = vlan_port_text(vlan_info.port_info(device, link.port_on(key)))
             lines.append((link.port_on(key), f"→ {other.label} {link.port_on(other.key)}"
                           + (f" · {port}" if port else "")))
-        section("Links", _rows(lines))
+            graphs.append(link.port_on(key) if graphable and link.port_on(key) else None)
+            linked.add(port_key(link.port_on(key)))
+        section("Links", dict(_rows(lines), graph=graphs) if graphable else _rows(lines))
+    graphed = [port for port in network_map.graphed.get(key, []) if port_key(port) not in linked]
+    if graphable and graphed:
+        section("Ports Graphed", dict(_rows((port, device.port_status.get(port, {}).get("oper", ""))
+                                            for port in graphed), graph=list(graphed)))
     if device.tunnels:
         found = [tunnel for tunnel in tunnel_module.find(network_map, live) if key in (tunnel.a, tunnel.b)]
         lines = []

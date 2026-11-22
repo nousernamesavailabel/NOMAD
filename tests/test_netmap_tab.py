@@ -1140,47 +1140,63 @@ def test_the_map_watcher_dialog_takes_a_map_on_this_computer(tab, crawled, monke
     main.deleteLater()
 
 
-def test_the_map_watcher_dialog_remembers_the_backup_login(tab, monkeypatch, tmp_path):
-    from nomad.configs import logins as backup_logins
+def test_the_map_watcher_dialog_takes_the_editors_backup_logins(tab, monkeypatch, tmp_path):
+    """Backups' logins are set in one place, the Editor's Backups tab: the Map Watcher's window shows them and links
+    there, and installing gives the service the Editor's."""
     from nomad.netmap import watch_service
-    from nomad.terminal import credentials
-    from nomad.terminal.sessions import Credential, SessionStore
+    from nomad.terminal.sessions import SessionStore
     from nomad.ui import watch_service_dialog
+
+    class Sync:
+        store = SessionStore(str(tmp_path / "sessions.json"))
+        problem = ""
+        usable = True
+        asked = []
+
+        def summary(self):
+            return "the usual login is credential NetOps; 3 devices use their saved SSH session's login", self.usable
+
+        def backups_for_service(self, parent, old, ask=True):
+            self.asked.append((old, ask))
+            if self.problem:
+                return None
+            return {"keep": old}
+
+    class Editor:
+        backup_sync = Sync()
+        shown = []
+
+        def show_backup_logins(self):
+            self.shown.append(1)
+
+    class Navigator:
+        current = None
+
+        def setCurrentWidget(self, widget):
+            self.current = widget
 
     class Main(QWidget):
         admin = True
 
     main = Main()
-    main.session_store = store = SessionStore(str(tmp_path / "sessions.json"))
+    main.session_store = Sync.store
     main.netmap_tab = tab
-    netops = Credential("NetOps", username="netops", saved_password="p1")
-    branch = Credential("Branch", username="branch", saved_password="p2")
-    store.credentials.items = [netops, branch]
+    main.editor_tab = editor = Editor()
+    main.navigator = Navigator()
     monkeypatch.setattr(watch_service, "status", lambda: "Not installed")
-    monkeypatch.setattr(credentials, "unprotect", lambda text: text.strip("<>"))
-    # Installed before the credential was noted: found by its name, and the enable password read back
-    watch_service.save_config({"maps": [], "backups": {"username": "netops", "label": "credential NetOps",
-                                                       "password": "<p1>", "enable": "<en>"}})
+    old = {"username": "netops", "label": "credential NetOps", "password": "<p1>", "devices": {}, "logins": {}}
+    watch_service.save_config({"maps": [], "backups": old})
     dialog = watch_service_dialog.MapWatcherDialog(main)
-    assert dialog.backup_login.credential_id() == netops.id and dialog.backup_enable.text() == "en"
-    assert dialog.backups_check.isChecked() and dialog.device_logins_label.text() == "No device has its own login."
-    # With the same logins as the service has and the master password locked, an update keeps them, asking nothing
-    backup_logins.save({"10.0.0.5": branch.id})
-    dialog.show_device_logins()
-    assert dialog.device_logins_label.text().startswith("1 device with its own login")
-    watch_service.save_config({"maps": [], "backups": {
-        "username": "netops", "label": "credential NetOps", "password": "<p1>", "enable": "<en>",
-        "credential_id": netops.id, "devices": {"10.0.0.5": branch.id},
-        "logins": {branch.id: {"username": "branch", "password": "<p2>", "label": "credential Branch"}}}})
-    monkeypatch.setattr(type(store.vault), "enabled", property(lambda self: True))
-    monkeypatch.setattr(type(store.vault), "unlocked", property(lambda self: False))
-    settings = dialog.backup_login_settings()
-    assert settings["keep"]["logins"][branch.id]["password"] == "<p2>" and settings["enable"] == "en"
-    # A device given another login since: its password is read (the master password is asked for)
-    backup_logins.save({"10.0.0.5": netops.id})
-    asked = []
-    monkeypatch.setattr("nomad.ui.vault_dialog.ensure_unlocked", lambda *args: asked.append(1) or False)
-    assert dialog.backup_login_settings() is None and asked == [1]
+    text = dialog.backup_logins_label.text()
+    assert dialog.backups_check.isChecked() and "credential NetOps" in text and "saved SSH session" in text
+    assert "Change them in the Editor's Backups tab" in text
+    assert dialog.backup_login_settings() == {"keep": old} and Sync.asked == [(old, True)]
+    Sync.problem = "locked"  # The master password wasn't given
+    assert dialog.backup_login_settings() is None and "master password" in dialog.message_label.text()
+    Sync.problem, Sync.usable = "", False  # No login at all: nothing to back up with
+    assert dialog.backup_login_settings() is None and "Log in with" in dialog.message_label.text()
+    dialog.show_editor_logins("editor")  # The link: this window closes and the Editor's Backups tab shows
+    assert main.navigator.current is editor and editor.shown == [1]
     dialog.deleteLater()
     main.deleteLater()
 

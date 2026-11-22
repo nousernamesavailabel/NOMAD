@@ -18,7 +18,7 @@ import paramiko
 
 from ..oui import format_mac, normalize_mac
 from ..terminal.sessions import same_host
-from ..terminal.transports import Cancelled, ConnectionFailed, Prompter, SshTransport
+from ..terminal.transports import REFUSED_PROMPT, Cancelled, ConnectionFailed, Prompter, SshTransport
 from . import collect
 from .model import port_key, short_port
 
@@ -234,7 +234,13 @@ class BatchPrompter(Prompter):
         if title == "Password" and self.password and not self.given:
             self.given = True
             return self.password, False
-        self.problem = "it needs a password NOMAD doesn't have: save one in the credential or the switch's session."
+        if self.given or prompt.startswith(REFUSED_PROMPT):
+            # A saved (or typed) password was tried and refused: not one that's missing
+            self.problem = ("it refused the user name and password NOMAD logged in with: check the login used "
+                            "for it (its credential, its own login or its saved session).")
+        else:
+            self.problem = ("it needs a password NOMAD doesn't have: save one in the credential or the switch's "
+                            "session.")
         return None
 
     def username(self, host):

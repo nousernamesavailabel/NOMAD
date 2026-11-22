@@ -526,7 +526,7 @@
   }
 
   // A device's details as sections of paragraphs, bold lines and two-column tables, as the app draws them
-  function drawDetails(box, node, data) {
+  function drawDetails(box, node, data, mapId = state.params.id) {
     const parts = [h("h2", {}, data.title)];
     for (const section of data.sections) {
       if (section.title) parts.push(h("h3", {}, section.title));
@@ -534,10 +534,14 @@
         if (block.p !== undefined) parts.push(h("p", {class: "detail-text"}, block.p));
         else if (block.label !== undefined) parts.push(h("p", {class: "detail-label"}, block.label));
         else {
+          // A port the Map Watcher reads: a link to its graph on the Trends page, as NOMAD's Graph opens its own
+          const graphs = block.graph || [];
           parts.push(h("table", {class: `detail-rows ${block.bold ? "labels" : ""}`},
-            block.rows.map(([left, right]) => h("tr", {},
+            block.rows.map(([left, right], index) => h("tr", {},
               h("td", {}, left),
-              h("td", {}, block.bold && left === "Status" && node.status ? status(node.status, right) : right)))));
+              h("td", {}, block.bold && left === "Status" && node.status ? status(node.status, right) : right,
+                graphs[index] ? [" ", h("a", {href: `#trends?${new URLSearchParams({port: `${mapId}|${node.key}|${graphs[index]}`})}`},
+                  "Graph")] : null)))));
         }
       }
     }

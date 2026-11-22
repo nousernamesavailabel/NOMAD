@@ -8,7 +8,7 @@ import io
 import ipaddress
 import time
 
-from ..netmap import details, layout, monitor, monitor_record, tunnels as tunnel_module
+from ..netmap import details, layout, monitor, monitor_record, traffic_history, tunnels as tunnel_module
 from ..netmap.monitor import duration_text
 from ..netmap.monitor_record import UPTIME_NAMES, uptime_text
 from ..netmap.model import AP_DOWN, FIREWALL, NETWORK_KINDS, ROUTER, SWITCH, WLC, port_key
@@ -17,7 +17,7 @@ UP, DOWN, UNKNOWN, CANT, UNMONITORED = "up", "down", "unknown", "cant", "unmonit
 STATUS_TEXT = {UP: "Up", DOWN: "Down", UNKNOWN: "Checking", CANT: "Can't check", UNMONITORED: "Not monitored"}
 SEVERITIES = ["Emergency", "Alert", "Critical", "Error", "Warning", "Notice", "Info", "Debug"]
 WINDOWS = {"15m": 900, "1h": 3600, "24h": 86400, "7d": 7 * 86400}
-SPANS = {"6h": 6 * 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400, "1y": 365 * 86400}
+SPANS = traffic_history.SPANS  # NOMAD's Traffic Graphs page offers the same
 STALE_WATCHER = monitor_record.STALE_SECONDS  # Seconds without a poll before the watcher counts as stopped
 KIND_WEIGHTS = {FIREWALL: 3, ROUTER: 2, SWITCH: 1, WLC: 1}
 PAGES = ("overview", "devices", "events", "traffic", "vpns", "ipam", "hosts", "sites", "map", "trends")

@@ -11,6 +11,8 @@ import threading
 import time
 from pathlib import Path
 
+from ..netmap import traffic_history
+
 HISTORY_FILE = "history.db"
 RAW_DAYS = 30
 HOURLY_DAYS = 365
@@ -156,18 +158,18 @@ class HistoryStore:
             "SELECT * FROM gaps WHERE end_at > ? ORDER BY start_at", (float(start),))]
 
     def rate_series(self, map_id, device, port, start, end=None, hourly=None):
-        """[[time, in b/s, out b/s, peak in, peak out]] of a port: raw samples, or hourly ones for a long span."""
+        """[[time, in b/s, out b/s, peak in, peak out]] of a port: raw samples, or hourly ones for a long span (as
+        traffic_history draws every port's graph, NOMAD's too)."""
         end = self.clock() if end is None else end
         if hourly is None:
-            hourly = end - start > 3 * 86400
+            hourly = traffic_history.use_hourly(start, end)
         if hourly:
-            return [[row["hour"] * 3600, row["sum_in"] / row["samples"], row["sum_out"] / row["samples"],
-                     row["max_in"], row["max_out"]] for row in self.rows(
+            return traffic_history.hourly_points(self.rows(
                 "SELECT * FROM rates_hourly WHERE map_id = ? AND device = ? AND port = ? AND hour BETWEEN ? AND ? "
-                "ORDER BY hour", (int(map_id), device, port, int(start // 3600), int(end // 3600)))]
-        return [[row["at"], row["in_bps"], row["out_bps"], row["in_bps"], row["out_bps"]] for row in self.rows(
+                "ORDER BY hour", (int(map_id), device, port, int(start // 3600), int(end // 3600))))
+        return traffic_history.raw_points(self.rows(
             "SELECT * FROM rates WHERE map_id = ? AND device = ? AND port = ? AND at BETWEEN ? AND ? ORDER BY at",
-            (int(map_id), device, port, float(start), float(end)))]
+            (int(map_id), device, port, float(start), float(end))))
 
     def latest_rates(self, since):
         """{(map_id, device, port): the newest rate} since a time."""

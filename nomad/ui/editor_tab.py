@@ -19,6 +19,7 @@ from ..configs.archive import ArchiveError
 from ..configs.local import LocalConfigs
 from ..ipam.client import IpamError, OldServerError
 from ..system import account_name, app_data_dir, replace_file
+from .backup_logins_sync import UPDATE_LINK, BackupLoginSync
 from .code_editor import CISCO, LANGUAGE_NAMES, PLAIN, XML, CodeEditor, FindBar, language_for
 from .common import add_action, release_thread, run_in_background, set_hint
 from .compare_view import CompareView
@@ -84,6 +85,7 @@ class EditorTab(QWidget):
         self.configs = None
         self.sync_thread = self.backup_thread = None
         self.quiet_start = False  # Starting backups on its own (not the box ticked): no master password dialog
+        self.restoring = False  # Settings being restored: the logins aren't being changed by hand
         self.backups_waiting = False  # Ticked, but the master password is locked: they start once it's unlocked
         self.archive_note = ""
         self.jobs = {}
@@ -116,6 +118,10 @@ class EditorTab(QWidget):
         self.standards_panel = StandardsPanel()
         self.login_row = LoginRow(self, self.window.session_store, "The Editor", stacked=True)
         self.backups_panel = BackupsPanel(self, self.login_row)
+        self.backup_sync = BackupLoginSync(self)  # The one place backups' logins are set, for the Map Watcher too
+        self.login_row.enable_input.setToolTip("For devices that log in at the > prompt. Saved on this computer "
+                                               "(protected by the master password) and given to the Map Watcher "
+                                               "service here too.")
         self.side.addTab(self.archive_panel, "Archive")
         self.side.addTab(self.changes_panel, "Changes")
         self.side.addTab(self.standards_panel, "Standards")
@@ -204,6 +210,11 @@ class EditorTab(QWidget):
         self.backups_panel.refresh_button.clicked.connect(self.refresh_runners)
         self.backups_panel.due_all_button.clicked.connect(self.back_up_everything_now)
         self.backups_panel.device_logins_button.clicked.connect(self.device_logins_clicked)
+        self.backups_panel.service_note.linkActivated.connect(self.service_note_link)
+        if self.login_row.picker is not None:
+            self.login_row.picker.combo.currentIndexChanged.connect(self.backup_logins_changed)
+        self.login_row.enable_input.editingFinished.connect(self.backup_logins_changed)
+        self.login_row.trust_check.toggled.connect(self.backup_logins_changed)
         self.show_device_logins_count()
         self.side.currentChanged.connect(self.side_changed)
         self.runners_timer = QTimer(self)
@@ -1079,6 +1090,7 @@ class EditorTab(QWidget):
         """Logins for pulling from a device: its own (Device Logins...) when it has one, else as usual; None if
         cancelled."""
         store = self.login_row.sessions
+        self.backup_sync.fill_enable()
         if self.own_login(target["id"]) is None:
             return self.login_row.logins(self.status_label, [(target["address"], list(target.get("names") or ()))])
         if not ensure_unlocked(self, store, "The Editor logs in to devices with saved passwords."):
@@ -1372,6 +1384,8 @@ class EditorTab(QWidget):
             return
         self.backups_waiting = False
         self.unlock_timer.stop()
+        self.backup_sync.fill_enable()
+        logins = (logins[0], self.login_row.enable_input.text())
         make = self.login_row.pusher_maker(self.with_device_logins(logins))
         from ..configs import runner
         thread_ref = {}
@@ -1464,8 +1478,26 @@ class EditorTab(QWidget):
             self.status(f"Couldn't save the device logins: {error}", "error")
             return
         self.show_device_logins_count()
+        self.backup_sync.update_service(ask=True)
         if self.backup_thread is not None:
             self.set_backups_running(True)  # Uses them from the next round
+
+    def backup_logins_changed(self, *_):
+        """Log in with, the enable password or Trust new SSH keys changed: saved, and the Map Watcher service here
+        given the same."""
+        if self.restoring:
+            return
+        self.backup_sync.changed()
+        if self.backup_thread is not None:
+            self.set_backups_running(True)  # Uses them from the next round
+
+    def service_note_link(self, link):
+        if link == UPDATE_LINK:
+            self.backup_sync.update_service(ask=True)
+
+    def show_backup_logins(self):
+        """Show the Backups tab, where backups' logins are set (from the Map Watcher's window)."""
+        self.side.setCurrentWidget(self.backups_panel)
 
     def device_logins_clicked(self):
         self.edit_device_logins()
@@ -1514,6 +1546,7 @@ class EditorTab(QWidget):
     def refresh_runners_if_shown(self):
         if self.side.currentWidget() is self.backups_panel and self.isVisible():
             self.refresh_runners()
+            self.backup_sync.update_service()  # Saved sessions and the archive's devices change too
 
     def refresh_runners(self):
         if self.configs is None or getattr(self, "runners_pending", False):
@@ -1670,7 +1703,13 @@ class EditorTab(QWidget):
         self.side.setCurrentIndex(settings.value("editor/side_tab", 0, int))
         self.compare_mode = settings.value("editor/compare_mode", diff.SECTION, str)
         self.last_folder = settings.value("editor/folder", self.last_folder, str)
-        self.login_row.restore_settings(settings, "editor/login")
+        self.restoring = True
+        try:
+            self.login_row.restore_settings(settings, "editor/login")
+            self.backup_sync.restore()
+        finally:
+            self.restoring = False
+        QTimer.singleShot(0, self.backup_sync.update_service)
         if settings.value("editor/run_backups", False, bool):
             self.restart_backups_quietly()
 

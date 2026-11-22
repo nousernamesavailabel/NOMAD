@@ -74,6 +74,7 @@ NETWORK_API = 15  # And taking a laptop's whole network
 CONFIG_API = 16  # And the config archive
 VIEWER_API = 17  # And viewer keys (the NOMAD Dashboard), and ports graphed on the dashboard
 MONITOR_API = 18  # And the Map Watcher's monitoring of each map, for every NOMAD
+TRAFFIC_API = 19  # And the Map Watcher's readings of the ports' traffic, for every NOMAD's Traffic Graphs
 SERVER_FEATURES = ((2, "instant sync"), (3, "change history"), (4, "loopback subnets"), (5, "Last Seen sweep results"),
                    (6, "tribe maps"), (VLAN_API, "VLANs"), (PLACEMENT_API, "Subnet Placement"),
                    (ROLES_API, "subnet roles"), (MOVE_API, "moving subnets between networks"), (ASSET_API, "assets"),
@@ -81,7 +82,8 @@ SERVER_FEATURES = ((2, "instant sync"), (3, "change history"), (4, "loopback sub
                    (LOCK_API, "locked map icons"), (NETWORK_API, "sharing a whole network with a map"),
                    (CONFIG_API, "the config archive and scheduled backups"),
                    (VIEWER_API, "viewer keys for the NOMAD Dashboard"),
-                   (MONITOR_API, "the Map Watcher's monitoring on every NOMAD's map"))
+                   (MONITOR_API, "the Map Watcher's monitoring on every NOMAD's map"),
+                   (TRAFFIC_API, "the Map Watcher's traffic history on every NOMAD's Traffic Graphs"))
 
 
 @dataclass
@@ -479,6 +481,13 @@ class TeamClient:
     def map_monitoring(self, map_id):
         """The Map Watcher's monitoring of a map: {"summary", "updated", "by"} ({} if none was sent; server API 18)."""
         return self.request("GET", f"/api/maps/monitoring?map_id={int(map_id)}")
+
+    def map_traffic(self, map_id, device, port, start, end):
+        """A port's traffic graph as the Map Watcher read it: {"points", "hourly"} (server API 19)."""
+        from urllib.parse import urlencode
+        query = urlencode({"map_id": int(map_id), "device": device, "port": port, "start": float(start),
+                           "end": float(end)})
+        return self.request("GET", f"/api/maps/traffic?{query}")
 
     # ----------------------------------------------------------------- The config archive (server API 16)
 

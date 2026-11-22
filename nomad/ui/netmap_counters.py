@@ -1,11 +1,18 @@
-"""While monitoring: after each ping poll, read the counters of the map's linked ports on a background thread, for
-the Utilization and Errors overlay, and the status of the routers' tunnels (their interfaces and IKE sessions), for the
-tunnels drawn on the map."""
+"""While monitoring: after each ping poll, read the counters of the map's linked ports (and those ticked to graph) on
+a background thread, for the Utilization and Errors overlay and the Traffic Graphs page (each reading is kept in this
+computer's traffic history, traffic_history.own_store), and the status of the routers' tunnels (their interfaces and
+IKE sessions), for the tunnels drawn on the map."""
+import logging
+import time
+
 from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
-from ..netmap import counters, tunnels
+from ..netmap import counters, traffic_history, tunnels
+from ..netmap.model import port_key
 from ..snmp import SnmpClient
 from .common import release_thread
+
+log = logging.getLogger(__name__)
 
 
 class CounterThread(QThread):
@@ -38,6 +45,8 @@ class LinkCounters(QObject):
         self.thread = None
         self.network_map = None  # The map the counters are of
         self.live = {}  # Device key -> tunnels.read_live's reading of its tunnels, from the last poll
+        self.port_names = {}  # (device key, port key) -> the port's name on the map, as last polled
+        self.recorded = {}  # (device key, port key) -> the Rate kept last (each is kept once)
 
     @property
     def rates(self):
@@ -48,6 +57,7 @@ class LinkCounters(QObject):
         self.tracker.clear()
         self.indexes = {}
         self.live = {}
+        self.recorded = {}
 
     def poll_now(self):
         page = self.page
@@ -58,7 +68,9 @@ class LinkCounters(QObject):
             self.reset()
             self.network_map = network_map
         targets = []
-        for key, ports in counters.link_ports(network_map).items():
+        wanted = counters.graph_ports(network_map)
+        self.port_names = {(key, port_key(port)): port for key, ports in wanted.items() for port in ports}
+        for key, ports in wanted.items():
             address = network_map.devices[key].mgmt_ip
             credential, version = page.snmp_access(address)
             if credential is not None:
@@ -90,7 +102,29 @@ class LinkCounters(QObject):
         for key, (index, reading) in tunnel_results.items():
             self.indexes[key] = index
             self.live[key] = reading
+        self.record()
         self.updated.emit()
+
+    def record(self):
+        """Keep the rates that are new since the last poll in this computer's traffic history, under the map's
+        record (the Traffic Graphs page draws them)."""
+        name = getattr(self.page, "record_shown", None)
+        store = traffic_history.own_store() if name else None
+        if store is None:
+            return
+        now = time.time()
+        rows = []
+        for where, rate in self.tracker.rates.items():
+            if self.recorded.get(where) is rate or where not in self.port_names:
+                continue
+            self.recorded[where] = rate
+            rows.append({"device": where[0], "port": self.port_names[where], "at": now, "in_bps": rate.in_bps,
+                         "out_bps": rate.out_bps, "speed": rate.speed})
+        try:
+            store.add(name, rows)
+            store.prune()
+        except Exception as error:  # The overlay still works: the history just misses this poll
+            log.warning("Couldn't keep the ports' traffic: %s", error)
 
     def shutdown(self):
         if self.thread is not None:

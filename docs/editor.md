@@ -97,25 +97,30 @@ Every router, switch, firewall and WLC on the tribe maps that has a management a
 To have this computer run backups:
 
 1. Go to the **Backups** tab.
-2. Choose the login for devices without a saved SSH session. It needs a saved password.
-3. Tick **Run scheduled config backups on this computer**.
+2. In **Log in with**, choose the login for devices without a saved SSH session. It needs a saved password.
+3. If devices log in at the > prompt, type the **Enable password**. It's saved on this computer and protected by the master password.
+4. Tick **Run scheduled config backups on this computer**.
+
+The **Backups** tab is the only place to set how backups log in. NOMAD's own backups, **Pull Config** and the Map Watcher service all use the same logins.
 
 Backups run while NOMAD is open. The box stays ticked the next time NOMAD starts. If the master password is locked then, backups wait and start as soon as you unlock it. With a tribe, every computer that has this ticked shares the work. The server hands out a few due devices at a time, so two computers never back up the same device. If a computer can't reach a device or log in to it, the device goes to another computer.
 
-The Map Watcher service can run backups too, with nobody signed in. In **Tools** > **Map Watcher Service**, tick **Run the tribe's scheduled config backups** and choose a saved credential. The service gets the due devices first. The window remembers the credential, so you don't choose it again when you update the service.
+The Map Watcher service can run backups too, with nobody signed in. In **Tools** > **Map Watcher Service**, tick **Run the tribe's scheduled config backups**. The service gets the due devices first. It logs in the same way as the **Backups** tab says, and its window shows what that is. The service can't read your saved sessions, so NOMAD copies in the logins it needs, with the passwords encrypted for that computer. These are the usual login, each device's own login, and the login of each device's saved SSH session.
+
+When you change a login on the **Backups** tab, NOMAD gives the service the change straight away. It also looks for changed saved sessions and credentials when it starts and while the **Backups** tab is open. If the master password is locked, the **Backups** tab shows a link to update the service. Updating the service needs NOMAD running as administrator.
 
 ### Devices that need a different login
 
 Some devices may not take the usual login, such as a branch router with its own local account. To give a device its own login:
 
 1. On the **Backups** tab, click **Device Logins...** Or right-click devices in the **Archive** and choose **Log In With...**
-2. Select the devices. The **Last problem** column shows which ones couldn't be backed up and why.
+2. Select the devices. The **Logs in with** column shows what each device uses now: its own login, its saved session, or the usual login. The **Last problem** column shows which ones couldn't be backed up and why.
 3. Choose a saved credential and click **Use for Selected**. Only credentials with a saved password are listed.
 4. Click **OK**.
 
 A device's own login comes first, then its saved SSH session, then the usual login. **Pull Config** uses it too.
 
-The Map Watcher uses the same device logins. Its window has the same **Device Logins...** button. Click **Update Service** after changing them, so the service gets the new logins.
+The Map Watcher service gets the device logins too, as soon as you click **OK**.
 
 To leave a device out, right-click it on the map, then **Config** > **Leave Out of Scheduled Backups**.
 

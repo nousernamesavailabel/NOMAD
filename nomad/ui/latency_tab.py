@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDoubleSpin
 
 from ..icmp import IcmpClient, resolve_host
 from ..latency import DEFAULT_WINDOW_SECONDS, WINDOW_OPTIONS, CsvLog, LatencyTarget, autoscale, \
-    host_problem, targets_from_dicts
+    host_problem, same_host, targets_from_dicts
 from ..system import log_dir
 from .common import ColumnFitter, StoppableThread, release_thread, set_hint, set_invalid
 from .latency_charts import GaugePanel, LatencyGauge, LatencyGraph, series_color
@@ -188,7 +188,8 @@ class LatencyTab(QWidget):
         self.host_input = QLineEdit()
         self.host_input.setPlaceholderText("Host name or IP address")
         self.add_button = QPushButton("Add / Update")
-        self.add_button.setToolTip("Add a target, or change the host of the target with this name.")
+        self.add_button.setToolTip("Add a target, rename the target for this host, or change the host of the "
+                                   "target with this name.")
         self.remove_button = QPushButton("Remove")
         self.gateway_button = QPushButton("Add Gateway")
         self.gateway_button.setToolTip("Monitor the selected adapter's default gateway.")
@@ -313,6 +314,8 @@ class LatencyTab(QWidget):
 
         self.gauges = {id(target): LatencyGauge(target.name, series_color(target.color_index))
                        for target in self.enabled_targets()}
+        for gauge in self.gauges.values():
+            gauge.switch_off.connect(self.on_gauge_switched_off)
         if self.gauges:
             self.gauge_panel.set_widgets(self.gauges.values())
         else:
@@ -329,19 +332,39 @@ class LatencyTab(QWidget):
     def target_named(self, name):
         return next((target for target in self.targets if target.name.lower() == name.lower()), None)
 
+    def target_for(self, host):
+        """The target pinging host (the same address however it's written, or the same name in any case)."""
+        return next((target for target in self.targets if same_host(target.host, host)), None)
+
+    def conflict(self, name, host):
+        """(target named name, target for host) when they're two different targets, else None: changing either would
+        leave two targets with the same name or the same host."""
+        named, for_host = self.target_named(name), self.target_for(host)
+        return (named, for_host) if named is not None and for_host is not None and named is not for_host else None
+
     def add_target(self, name, host):
-        """Add a target (or point an existing one with this name at host) and switch it on."""
-        target = self.target_named(name)
-        changed = target is None or target.host != host
+        """Add a target and switch it on. The target already pinging host takes the name (a new name for an
+        address), else the one with this name is pointed at host (a new address for a name). When they're two
+        different targets, the one pinging host is switched on and keeps its name."""
+        target = self.target_for(host)
+        if target is not None and self.conflict(name, host):
+            name = target.name
+        target = target or self.target_named(name)
+        moved = target is None or not same_host(target.host, host)
         if target is None:
             target = LatencyTarget(name, host, True, self.next_color_index())
             self.targets.append(target)
             self.append_line(f"Added {name} ({host})")
-        elif changed or not target.enabled:
+        elif moved:
+            self.append_line(f"Updated {target.name} -> {host}" if target.name == name else
+                             f"Updated {target.name} -> {name} ({host})")
             target.name, target.host, target.enabled = name, host, True
             target.reset()
-            self.append_line(f"Updated {name} -> {host}")
-        if self.monitoring and (changed or id(target) not in self.workers):
+        elif target.name != name or not target.enabled:
+            if target.name != name:
+                self.append_line(f"Renamed {target.name} -> {name} ({target.host})")
+            target.name, target.enabled = name, True  # Same host: its history still counts
+        if self.monitoring and (moved or id(target) not in self.workers):
             self.start_worker(target)  # Replaces any worker still pinging the old host
         self.rebuild_targets()
         return target
@@ -356,6 +379,17 @@ class LatencyTab(QWidget):
             self.host_problem_shown = problem
             self.host_input.setFocus()
             self.host_input.selectAll()
+            return
+        if name and host and self.conflict(name, host):
+            named, for_host = self.conflict(name, host)
+            problem = (f"{named.name} is already the name of the target for {named.host}, and {for_host.host} is "
+                       f"already monitored as {for_host.name}. Remove one of them, or choose another name.")
+            set_invalid(self.name_input, True)
+            set_invalid(self.host_input, True)
+            set_hint(self.status_label, problem, "error")
+            self.host_problem_shown = problem
+            self.name_input.setFocus()
+            self.name_input.selectAll()
             return
         if self.host_problem_shown and self.status_label.text() == self.host_problem_shown:
             self.status_label.clear()
@@ -383,6 +417,14 @@ class LatencyTab(QWidget):
             self.name_input.setText(target.name)
             self.host_input.setText(target.host)
         self.update_buttons()
+
+    def on_gauge_switched_off(self):
+        """A gauge's x: untick its target's On box, which stops it the same way."""
+        gauge = self.sender()
+        row = next((row for row, target in enumerate(self.targets) if self.gauges.get(id(target)) is gauge), None)
+        item = self.table.item(row, COL_ON) if row is not None else None
+        if item is not None:
+            item.setCheckState(Qt.Unchecked)
 
     def on_item_changed(self, item):
         if item.column() != COL_ON:

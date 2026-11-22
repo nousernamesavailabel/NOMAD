@@ -4,6 +4,21 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-11-22
+
+- **New:** the **Traffic Graphs** page graphs the traffic on any port of a switch, router or firewall on the Network Map over the last 6 hours to a year, from SNMP. No NetFlow needed. It shows the Map Watcher's readings, the same as the NOMAD Dashboard, and this computer's own while **Monitor** is on. Right-click a device, link or port > **Graph Traffic**, or click **Graph** beside a link in the details pane. Update the tribe server to see the Watcher's readings on other computers.
+- **New:** **Keep Its History** on the Traffic Graphs page, or **Tools > Ports to Graph...**, keeps any port's traffic, not just the ports at the ends of links.
+- **New:** the NetFlow page's graph shows the interface's SNMP rate over the whole time chosen, not just since the page opened.
+- **New:** on the dashboard's map, a device's details have a **Graph** link beside each port the Map Watcher reads.
+- **New:** each gauge on the Latency page has an **x** in its corner that stops monitoring that target, the same as unticking its **On** box.
+- **Changed:** how backups log in is now set in one place, the Editor's **Backups** tab. The Map Watcher service on this computer gets the same logins as soon as you change them, including each device's saved SSH session login, so a device with a saved session backs up from the service too. The Map Watcher's window shows what it uses and links to the Backups tab. The enable password is now remembered.
+- **Changed:** **Device Logins** shows which login each device uses: its own, its saved session, or the usual one.
+- **Changed:** **Update Now** on the service banner updates the services that need it, keeping their settings. No service's window opens. Services & Firewall also has an **Update** button.
+- **Fixed:** **Monitor Latency** from a map device's right-click menu now names the target after the device instead of its address.
+- **Fixed:** on the Latency page, **Add / Update** with a new name for an address that's already a target now renames that target instead of adding a second one. A new address for a name still updates that target's address.
+- **Fixed:** the service banner no longer lists services that are already up to date.
+- **Fixed:** when a backup or another login with no one to ask is turned down because the saved password is wrong for that device, NOMAD now says the password was refused instead of saying it has no password.
+
 ## [2.8.0] - 2026-11-21
 
 - **New:** the **NOMAD Dashboard**, a read-only web site of the network's state for people without NOMAD. Install it with **Tools > NOMAD Dashboard Service...** on the computer with the Map Watcher and the collectors, and give each person a login. It shows devices up and down, events, traffic, VPNs, IPAM, hosts per subnet, the tribe maps and trends, updates itself, and has a kiosk mode for wall screens. It uses NOMAD's colors. Its map shows each device's uptime, and clicking one shows the same details as NOMAD's map. The map can hide the details or go full screen. See the NOMAD Dashboard guide.

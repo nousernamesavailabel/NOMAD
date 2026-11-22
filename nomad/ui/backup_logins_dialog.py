@@ -1,10 +1,11 @@
 """Device Logins: the saved credential scheduled backups log in to each device with, for the devices that need a
-different login from the usual one (configs/logins.py). Opened from the Editor's Backups tab and the Map Watcher's
-window: both use the same choices."""
+different login from their saved SSH session's or the usual one (configs/logins.py). Opened from the Editor's Backups
+tab; the Map Watcher service on this computer is given the same."""
 from PyQt5.QtCore import QItemSelectionModel, Qt
 from PyQt5.QtWidgets import QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, \
     QLineEdit, QPushButton, QTableWidgetItem, QVBoxLayout
 
+from ..configs import logins
 from ..terminal.sessions import AUTH_PASSWORD, SSH
 from .common import read_only_table
 
@@ -26,10 +27,12 @@ class DeviceLoginsDialog(QDialog):
         self.store = store
         self.choices = dict(chosen)
         self.devices = list(devices)
+        self.sessions = logins.ssh_sessions(store)
         layout = QVBoxLayout(self)
-        intro = QLabel("Choose a login for the devices that don't use the usual one. Scheduled backups and Pull "
-                       "Config use it, in NOMAD and the Map Watcher service. Only saved credentials with a saved "
-                       "password can be chosen, because nobody is there to type one.")
+        intro = QLabel("Devices with a saved SSH session log in with it, and the rest with the usual login. Choose "
+                       "a login here for the devices that need another one. Scheduled backups and Pull Config use "
+                       "it, in NOMAD and the Map Watcher service. Only saved credentials with a saved password can "
+                       "be chosen, because nobody is there to type one.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         self.filter = QLineEdit()
@@ -63,12 +66,19 @@ class DeviceLoginsDialog(QDialog):
         layout.addWidget(buttons)
         self.fill(set(select or ()))
 
-    def login_text(self, device_id):
-        credential_id = self.choices.get(device_id)
-        if not credential_id:
-            return USUAL
-        credential = self.store.credentials.get(credential_id)
-        return credential.name if credential is not None else "A credential that was deleted (the usual login)"
+    def login_text(self, device):
+        credential_id = self.choices.get(device["id"])
+        credential = self.store.credentials.get(credential_id) if credential_id else None
+        if credential is not None:
+            return credential.name
+        session = logins.session_for(self.sessions, device)
+        if session is None:
+            fallback = USUAL
+        elif logins.usable(session):
+            fallback = f"Its saved session ({session.name})"
+        else:
+            fallback = f"Its saved session ({session.name}) has no saved password: {USUAL.lower()}"
+        return f"A credential that was deleted: {fallback[0].lower()}{fallback[1:]}" if credential_id else fallback
 
     def fill(self, select=()):
         self.table.setRowCount(len(self.devices))
@@ -76,7 +86,7 @@ class DeviceLoginsDialog(QDialog):
         for row, device in enumerate(self.devices):
             failures = device.get("failures") or []
             values = [device.get("name") or device["id"], device.get("address") or "",
-                      self.login_text(device["id"]), failures[0]["reason"] if failures else ""]
+                      self.login_text(device), failures[0]["reason"] if failures else ""]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
@@ -105,9 +115,8 @@ class DeviceLoginsDialog(QDialog):
                 self.choices[device_id] = credential_id
             else:
                 self.choices.pop(device_id, None)
-        for row in range(self.table.rowCount()):
-            device_id = self.table.item(row, 0).data(Qt.UserRole)
-            self.table.item(row, 2).setText(self.login_text(device_id))
+        for row, device in enumerate(self.devices):
+            self.table.item(row, 2).setText(self.login_text(device))
 
     def apply_filter(self, text):
         text = text.strip().lower()

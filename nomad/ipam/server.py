@@ -43,6 +43,10 @@ Tribe maps (network maps shared by everyone; see nomad/netmap/shared.py), kept i
     GET  /api/maps/secrets?map_id=N   its community strings; POST /api/maps/secrets {"map_id", "secrets"}
     GET  /api/maps/monitoring?map_id=N  the Map Watcher's monitoring of it (API 18): {"summary", "updated", "by"}
     POST /api/maps/monitoring         {"map_id", "summary"}: the Map Watcher's latest (not a change anyone waits for)
+    GET  /api/maps/traffic?map_id=N&device=K&port=P&start=T&end=T  a port's traffic graph (API 19): {"points",
+                                      "hourly"}, as traffic_history draws it
+    POST /api/maps/traffic            {"map_id", "rates": [{device, port, at, in_bps, out_bps, speed}]}: the Map
+                                      Watcher's readings (each kept once)
     POST /api/maps/lease              {"map_id", "holder", "kind", "release", "take"}: who's watching it for new
                                       devices (so two computers don't both poll the network)
     /api/wait also takes maps_since, and answers when a map changes.
@@ -89,6 +93,7 @@ from .. import __version__
 from ..system import replace_file
 from ..configs import checks as config_checks, scope as config_scope
 from ..configs.archive import ArchiveError, ConfigStore
+from ..netmap import traffic_history
 from ..netmap.shared import MapError, MapStore
 from .store import IpamError, IpamStore
 from .assets import AssetStore, label as asset_label
@@ -108,7 +113,7 @@ TEAM, ADMIN, VIEWER = "team", "admin", "viewer"
 # What a viewer key may ask (all reading): never a map's credentials (/api/maps/secrets) or a config's text
 # (/api/configs/version), and nothing that changes anything
 VIEWER_GETS = frozenset({"/api/status", "/api/wait", "/api/changes", "/api/log", "/api/sightings",
-                         "/api/maps/changes", "/api/maps/monitoring", "/api/configs/changes", "/api/configs/results",
+                         "/api/maps/changes", "/api/maps/monitoring", "/api/maps/traffic", "/api/configs/changes", "/api/configs/results",
                          "/api/configs/runners"})
 ADMIN_ONLY_ACTIONS = {"add_network", "delete_network"}
 WHOLE_NETWORK_ACTIONS = {"take_network"}  # Their reply carries every row made, however many
@@ -119,11 +124,12 @@ VIEWER_RECHECK_SECONDS = 5
 STOP_WAIT_SECONDS = 10  # How long stop() waits for the listener to close
 HANDSHAKE_SECONDS = 15  # A connection that hasn't finished its TLS handshake by then is dropped
 IDLE_SECONDS = MAX_WAIT_SECONDS + 30  # A connection that sends nothing for this long is closed (past /api/wait's)
-API_LEVEL = 18  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
+API_LEVEL = 19  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
 # 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks, 11 assets,
 # 12 software targets, 13 wireless controller assets, 14 map icons locked in place, 15 taking a laptop's whole network,
 # 16 the config archive, 17 viewer keys (the NOMAD Dashboard) and ports graphed on the dashboard (a map section),
-# 18 the Map Watcher's monitoring of each map (/api/maps/monitoring), for every NOMAD to show.
+# 18 the Map Watcher's monitoring of each map (/api/maps/monitoring), for every NOMAD to show, 19 the Map Watcher's
+# readings of the ports' traffic (/api/maps/traffic, kept in traffic.db), for every NOMAD's Traffic Graphs.
 # Clients cope with servers below this, and recommend updating them (add each new level to client.SERVER_FEATURES)
 
 
@@ -316,6 +322,8 @@ class IpamServer:
         self.latest_sightings = self.store.sighting_seq()  # Sweeps' news, which laptops also wait for
         self.maps = MapStore(self.directory / "maps.db", *_map_secret_protection())
         self.latest_maps = self.maps.revision()
+        # The ports' traffic the Map Watcher reads (API 19): history only, so left out of the backups
+        self.traffic = traffic_history.TrafficStore(self.directory / traffic_history.FILE_NAME)
         self.configs = ConfigStore(self.directory / "configs.db")
         self.latest_configs = self.configs.revision()
         self.scope_revision = None  # The map revision the backups' devices were last taken from
@@ -330,6 +338,7 @@ class IpamServer:
             self.store.close()
             self.maps.close()
             self.configs.close()
+            self.traffic.close()
             raise OSError(f"Couldn't listen on port {self.port}: {error.strerror or error}. Another program may be "
                           f"using it (see which with: netstat -ano | findstr :{self.port}).") from error
         self.port = self.httpd.server_address[1]  # The actual port, when asked for any free one (0)
@@ -354,6 +363,7 @@ class IpamServer:
                 self.maps.close()
             with self.configs.lock:
                 self.configs.close()
+            self.traffic.close()
             log.info("IPAM server stopped")
 
     def stop(self):
@@ -503,6 +513,8 @@ class IpamServer:
 
     def map_request(self, action, user, request):
         """A change to the tribe's maps. Returns the reply; announces the new map revision."""
+        if action == "traffic":  # Not a change anyone waits for, and kept outside the maps' lock
+            return self.add_traffic(request)
         with self.maps.lock:
             if action == "create":
                 map_id, revision = self.maps.create(request["name"], user, request.get("changes", []),
@@ -543,6 +555,30 @@ class IpamServer:
     def map_monitoring(self, map_id):
         with self.maps.lock:
             return self.maps.monitoring(map_id)
+
+    def add_traffic(self, request):
+        """The Map Watcher's readings of a map's ports' traffic (API 19). Readings of deleted maps go within the
+        hour."""
+        map_id = int(request["map_id"])
+        with self.maps.lock:
+            self.maps._map(map_id)  # Still on the server
+            keep = [str(item["id"]) for item in self.maps.maps()] if time.time() >= self.traffic.next_prune else None
+        rows = traffic_history.clean_rows(request.get("rates"))
+        added = self.traffic.add(str(map_id), rows)
+        if keep is not None:
+            self.traffic.prune(keep_maps=keep)
+        return {"added": added}
+
+    def map_traffic(self, query):
+        """A port's traffic graph: {"points", "hourly"} (traffic_history.points)."""
+        map_id = int(query["map_id"][0])
+        with self.maps.lock:
+            self.maps._map(map_id)
+        end = float(query.get("end", [time.time()])[0])
+        start = float(query.get("start", [end - 86400])[0])
+        hourly = traffic_history.use_hourly(start, end)
+        return {"points": self.traffic.points(str(map_id), query["device"][0], query["port"][0], start, end, hourly),
+                "hourly": hourly}
 
     # ----------------------------------------------------------------- The config archive
 
@@ -1025,6 +1061,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 return self._reply(200, app.map_changes(int(parse_qs(url.query).get("since", ["0"])[0])))
             if method == "GET" and url.path == "/api/maps/monitoring":
                 return self._reply(200, app.map_monitoring(int(parse_qs(url.query)["map_id"][0])))
+            if method == "GET" and url.path == "/api/maps/traffic":
+                return self._reply(200, app.map_traffic(parse_qs(url.query)))
             if method == "GET" and url.path == "/api/maps/secrets":
                 return self._reply(200, app.map_secrets(int(parse_qs(url.query)["map_id"][0])))
             if method == "POST" and url.path.startswith("/api/maps/"):

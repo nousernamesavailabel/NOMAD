@@ -53,6 +53,22 @@ def link_ports(network_map):
     return found
 
 
+def graph_ports(network_map):
+    """{device key: [port]}: the ports whose traffic is kept for graphs, on the network devices that answer SNMP: those
+    at the ends of links, and those ticked to graph (Graph Traffic of Ports). The Map Watcher and NOMAD's Monitor both
+    read these."""
+    found = link_ports(network_map)
+    for key, ports in network_map.graphed.items():
+        device = network_map.devices.get(key)
+        if device is None or device.source != SNMP or not device.mgmt_ip or device.kind not in NETWORK_KINDS:
+            continue
+        chosen = found.setdefault(key, [])
+        for port in ports:
+            if port_key(port) not in {port_key(item) for item in chosen}:
+                chosen.append(port)
+    return found
+
+
 def interface_index(client):
     """{port_key of the port's short name: ifIndex} from ifName (and ifDescr)."""
     names = collect.interface_names(list(client.walk(parse_oid(collect.IF_NAME))),

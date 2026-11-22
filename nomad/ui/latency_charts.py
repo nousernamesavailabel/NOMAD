@@ -1,9 +1,9 @@
 """Latency tab charts: a semicircle gauge per target and a graph of every target over time."""
 import time
 
-from PyQt5.QtCore import QPointF, QRectF, QSize, Qt
+from PyQt5.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
-from PyQt5.QtWidgets import QGridLayout, QScrollArea, QSizePolicy, QWidget
+from PyQt5.QtWidgets import QGridLayout, QScrollArea, QSizePolicy, QToolButton, QWidget
 
 from ..latency import latency_level
 from .theme import COLORS
@@ -13,6 +13,7 @@ SERIES_COLORS = ["#35f28b", "#58a6ff", "#f0b429", "#c678dd", "#56d4dd", "#ff9e64
                  "#f78fb3", "#8b98a5"]
 LOSS_LANE_HEIGHT = 5
 LEVEL_COLORS = {"good": COLORS["success"], "fair": COLORS["warning"], "poor": COLORS["error"], None: COLORS["muted"]}
+OFF_BUTTON_SIZE = 20
 
 
 def format_ms(ms):
@@ -25,7 +26,10 @@ def series_color(index):
 
 
 class LatencyGauge(QWidget):
-    """Semicircle meter showing a target's average latency against the shared scale."""
+    """Semicircle meter showing a target's average latency against the shared scale, with an x in its corner that
+    switches the target off (switch_off), the same as unticking its On box."""
+
+    switch_off = pyqtSignal()
 
     def __init__(self, name, color, parent=None):
         super().__init__(parent)
@@ -34,9 +38,27 @@ class LatencyGauge(QWidget):
         self.scale = (0.0, 200.0)
         self.setMinimumSize(170, 150)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.off_button = QToolButton(self)
+        self.off_button.setText("✕")
+        self.off_button.setToolTip(f"Stop monitoring {name} (tick On in the table to bring it back)")
+        self.off_button.setAutoRaise(True)
+        self.off_button.setFocusPolicy(Qt.NoFocus)
+        self.off_button.setCursor(Qt.PointingHandCursor)
+        self.off_button.setFixedSize(OFF_BUTTON_SIZE, OFF_BUTTON_SIZE)
+        self.off_button.setStyleSheet(f"QToolButton {{ color: {COLORS['muted']}; border: none; padding: 0; }}"
+                                      f"QToolButton:hover {{ color: {COLORS['error']}; }}")
+        self.off_button.clicked.connect(self.switch_off)
+        self.place_off_button()
 
     def sizeHint(self):
         return QSize(200, 160)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.place_off_button()
+
+    def place_off_button(self):
+        self.off_button.move(self.width() - OFF_BUTTON_SIZE - 5, 6)
 
     def update_value(self, stats, error, scale):
         self.stats, self.error, self.scale = stats, error, scale
@@ -56,8 +78,9 @@ class LatencyGauge(QWidget):
         bold = QFont(self.font())
         bold.setBold(True)
         painter.setFont(bold)
-        painter.drawText(QRectF(rect.left() + 26, rect.top() + 5, rect.width() - 32, 22), Qt.AlignVCenter,
-                         painter.fontMetrics().elidedText(self.name, Qt.ElideRight, int(rect.width() - 32)))
+        name_width = rect.width() - 32 - OFF_BUTTON_SIZE  # Clear of the x
+        painter.drawText(QRectF(rect.left() + 26, rect.top() + 5, name_width, 22), Qt.AlignVCenter,
+                         painter.fontMetrics().elidedText(self.name, Qt.ElideRight, int(name_width)))
 
         stats = self.stats
         lost = stats is not None and stats.last_lost

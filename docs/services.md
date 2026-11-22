@@ -46,14 +46,14 @@ The status of each service updates every few seconds.
 
 ## Keep the services up to date
 
-The **Version** column shows which NOMAD each running service runs. It says **update** when a service runs an older NOMAD than the one you have open, or was started before its copy of NOMAD changed.
+The **Version** column shows which NOMAD each running service runs. It says **update** when a service runs an older NOMAD than the one you have open, or was started before the code it runs changed. When NOMAD runs from source, only a change to a file that service uses counts.
 
 NOMAD also shows a banner across its window when a service on this computer needs updating. To update them:
 
 1. Start NOMAD as administrator.
-2. Open **Tools** > **Services & Firewall...**
-3. Tick the services marked **update**.
-4. Click **Install or Update Ticked**. The Syslog and Flow Collectors are updated with the settings they have. The Tribe Server, Map Watcher and NOMAD Dashboard open their own windows, where you click **Update Service**.
+2. Click **Update Now** on the banner.
+
+Each service is updated with the settings it has, and no service's window opens. You can also update a service in **Tools** > **Services & Firewall...**: select it and click **Update**, or tick several and click **Install or Update Ticked**.
 
 **Dismiss** hides the banner until another service needs updating.
 

@@ -62,11 +62,13 @@ def test_the_recommendation_names_the_server_and_the_version_to_update_to():
 
 def test_what_the_update_brings_is_only_what_the_server_lacks():
     monitoring = "the Map Watcher's monitoring on every NOMAD's map"
+    traffic = "the Map Watcher's traffic history on every NOMAD's Traffic Graphs"
     assert server_update(status(NETWORK_API)).missing == ["the config archive and scheduled backups",
-                                                          "viewer keys for the NOMAD Dashboard", monitoring]
+                                                          "viewer keys for the NOMAD Dashboard", monitoring, traffic]
     assert server_update(status(CONFIG_API - 2)).missing == ["sharing a whole network with a map",
                                                              "the config archive and scheduled backups",
-                                                             "viewer keys for the NOMAD Dashboard", monitoring]
+                                                             "viewer keys for the NOMAD Dashboard", monitoring,
+                                                             traffic]
     assert "locked map icons" in server_update(status(LOCK_API - 1)).missing
 
 

@@ -1,5 +1,6 @@
-"""Right-click a device on a tribe map > Tools > Graph on Dashboard: choose which of its ports the Map Watcher reads the
-traffic of for the NOMAD Dashboard's graphs, besides the ports at the ends of its links (always read)."""
+"""Right-click a device on the map > Tools > Ports to Graph: choose which of its ports' traffic is kept for graphs, besides
+the ports at the ends of its links (always kept): by the Map Watcher (for the NOMAD Dashboard and every NOMAD's Traffic
+Graphs page), and by this computer while the map's Monitor is on."""
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout
 
@@ -20,11 +21,12 @@ class GraphPortsDialog(QDialog):
     def __init__(self, parent, network_map, key):
         super().__init__(parent)
         device = network_map.devices[key]
-        self.setWindowTitle(f"Graph on Dashboard: {device.label}")
+        self.setWindowTitle(f"Ports to Graph: {device.label}")
         self.setMinimumSize(380, 460)
         layout = QVBoxLayout(self)
-        note = QLabel("Tick the ports whose traffic the Map Watcher keeps for the NOMAD Dashboard's graphs. Ports at "
-                      "the ends of links are always kept.")
+        note = QLabel("Tick the ports whose traffic is kept for graphs: by the Map Watcher (for the NOMAD Dashboard "
+                      "and every NOMAD's Traffic Graphs page), and by this computer while Monitor is on. Ports at the "
+                      "ends of links are always kept.")
         note.setWordWrap(True)
         layout.addWidget(note)
         self.filter_input = QLineEdit()

@@ -8,13 +8,11 @@ from pathlib import Path
 from PyQt5 import sip
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, \
-    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout
+    QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout
 
 from ..ipam.client import current_key
 from ..netmap import monitor, store, watch_local, watch_monitor, watch_service
-from ..terminal.sessions import AUTH_PASSWORD, SSH
 from .common import run_in_background, set_hint
-from .credential_dialogs import CredentialPicker
 from .netmap_watch import WatchTimers
 from .theme import accent_button
 
@@ -48,29 +46,15 @@ class MapWatcherDialog(QDialog):
         form.addRow("", self.listen_check)
         self.backups_check = QCheckBox("Run the tribe's scheduled config backups (it gets the devices due first)")
         self.backups_check.setToolTip("The Editor page's config archive: each router, switch, firewall and WLC on the "
-                                      "tribe maps is backed up once an interval. The service logs in with the login "
-                                      "below (its password is copied into the service's settings, encrypted for this "
-                                      "computer).")
+                                      "tribe maps is backed up once an interval. The service logs in the way the "
+                                      "Editor's Backups tab says (the passwords are copied into the service's "
+                                      "settings, encrypted for this computer).")
         form.addRow("", self.backups_check)
-        backup_row = QHBoxLayout()
-        self.backup_login = CredentialPicker(self, getattr(window, "session_store", None), SSH, "",
-                                             "Choose a saved credential")
-        self.backup_enable = QLineEdit()
-        self.backup_enable.setEchoMode(QLineEdit.Password)
-        self.backup_enable.setPlaceholderText("Enable password (if they log in at >)")
-        backup_row.addWidget(self.backup_login, 2)
-        backup_row.addWidget(self.backup_enable, 1)
-        form.addRow("Backups log in with:", backup_row)
-        device_row = QHBoxLayout()
-        self.device_logins_label = QLabel()
-        self.device_logins_label.setWordWrap(True)
-        self.device_logins_button = QPushButton("Device Logins...")
-        self.device_logins_button.setToolTip("Choose a login for the devices that need a different one (the same "
-                                             "as the Editor's Backups tab)")
-        self.device_logins_button.clicked.connect(self.edit_device_logins)
-        device_row.addWidget(self.device_logins_label, 1)
-        device_row.addWidget(self.device_logins_button)
-        form.addRow("", device_row)
+        self.backup_logins_label = QLabel()
+        self.backup_logins_label.setWordWrap(True)
+        self.backup_logins_label.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
+        self.backup_logins_label.linkActivated.connect(self.show_editor_logins)
+        form.addRow("Backups log in:", self.backup_logins_label)
         layout.addLayout(form)
         layout.addWidget(self.make_monitoring_box())
         layout.addWidget(self.make_local_box())
@@ -308,7 +292,7 @@ class MapWatcherDialog(QDialog):
         self.timers.set_values(watch_service.config_timers(config))
         self.listen_check.setChecked(config.get("listen", True))
         self.backups_check.setChecked(bool(config.get("backups")))
-        self.fill_backup_login(config.get("backups") or {})
+        self.show_backup_logins()
         self.set_monitoring(config)
         self.fill_local(config)
         if maps is None:
@@ -321,36 +305,31 @@ class MapWatcherDialog(QDialog):
                                          "(Tribe > Share This Map with the Tribe), or give it maps on this computer "
                                          "(below).", "warning")
 
-    def fill_backup_login(self, backups):
-        """The login and enable password the service has now, so an update keeps them."""
-        store = getattr(self.window, "session_store", None)
-        if store is not None and backups:
-            credential = store.credentials.get(backups.get("credential_id", ""))
-            if credential is None:  # From before the credential was noted: "credential NAME"
-                name = (backups.get("label") or "").removeprefix("credential ")
-                credential = next((item for item in store.credentials.items if item.name == name), None)
-            if credential is not None:
-                self.backup_login.fill(credential.id)
-        if backups.get("enable"):
-            try:
-                from ..terminal.credentials import unprotect
-                self.backup_enable.setText(unprotect(backups["enable"]))
-            except Exception as error:  # Encrypted on another computer: typed again
-                log.info("Couldn't read the Map Watcher's enable password: %s", error)
-        self.show_device_logins()
-
-    def show_device_logins(self):
-        from ..configs import logins
-        count = len(logins.load())
-        self.device_logins_label.setText(
-            f"{count} device{'s' if count != 1 else ''} with {'its' if count == 1 else 'their'} own login (copied in "
-            f"when you click Update Service)." if count else "No device has its own login.")
-
-    def edit_device_logins(self):
+    def backup_sync(self):
         editor = getattr(self.window, "editor_tab", None)
-        if editor is not None:
-            editor.edit_device_logins(parent=self)
-        self.show_device_logins()
+        return getattr(editor, "backup_sync", None)
+
+    def show_backup_logins(self):
+        """What the service's backups log in with: as the Editor's Backups tab says (set there only)."""
+        sync = self.backup_sync()
+        if sync is None:
+            self.backup_logins_label.setText("As the Editor's Backups tab says.")
+            return
+        text, _ = sync.summary()
+        self.backup_logins_label.setText(
+            f"The same way as NOMAD's own backups: {text}. <a href=\"editor\">Change them in the Editor's Backups "
+            "tab</a> (the service is given the change at once).")
+
+    def show_editor_logins(self, _link):
+        """Close this window and show the Editor's Backups tab, the one place backups' logins are set."""
+        self.reject()
+        editor = getattr(self.window, "editor_tab", None)
+        navigator = getattr(self.window, "navigator", None)
+        if editor is None:
+            return
+        if navigator is not None:
+            navigator.setCurrentWidget(editor)
+        editor.show_backup_logins()
 
     def chosen_maps(self):
         return [self.maps_list.item(row).data(Qt.UserRole) for row in range(self.maps_list.count())
@@ -447,42 +426,25 @@ class MapWatcherDialog(QDialog):
         self.show_local()
 
     def backup_login_settings(self):
-        """The backup logins for the service's config ({"username", "password", ..., "devices", "logins"} as typed),
-        or None (and why, said). With the master password locked and the same logins as the service has, it keeps
-        those (nothing asked)."""
-        from ..configs import logins
-        store = getattr(self.window, "session_store", None)
-        credential = self.backup_login.credential() if store is not None else None
-        if credential is None or credential.auth != AUTH_PASSWORD or not credential.saved_password:
-            set_hint(self.message_label, "Choose a saved credential with a saved password for the backups: the "
-                                         "service has nobody to ask.", "warning")
+        """The backup logins for the service's config, from the Editor's Backups tab (make_config's backups), or None
+        (and why, said). When they haven't changed since the service was given them, they're kept as they are
+        (nothing asked)."""
+        sync = self.backup_sync()
+        if sync is None or sync.store is None:
+            set_hint(self.message_label, "The Editor isn't available, so the backups have no logins.", "error")
             return None
-        chosen = {device: credential_id for device, credential_id in logins.load().items()
-                  if store.credentials.get(credential_id) is not None}
-        old = self.configured().get("backups") or {}
-        same = old.get("credential_id") == credential.id and old.get("devices", {}) == chosen and \
-            all(credential_id in (old.get("logins") or {}) for credential_id in chosen.values())
-        if same and store.vault.enabled and not store.vault.unlocked:
-            return {"keep": old, "enable": self.backup_enable.text(), "trust_new": True}
-        from .vault_dialog import ensure_unlocked
-        if not ensure_unlocked(self, store, "The Map Watcher's backups need the credentials' passwords."):
+        _, usable = sync.summary()
+        if not usable:
+            set_hint(self.message_label, "Backups have no login to use: in the Editor's Backups tab, choose a saved "
+                                         "credential with a saved password in Log in with (the service has nobody "
+                                         "to ask).", "warning")
             return None
-        device_logins = {}
-        try:
-            password = store.vault.reveal(credential.saved_password)
-            for credential_id in set(chosen.values()):
-                item = store.credentials.get(credential_id)
-                if item.auth != AUTH_PASSWORD or not item.saved_password:
-                    continue  # Can't log in with nobody there: those devices use the login above
-                device_logins[credential_id] = {"username": item.username, "label": f"credential {item.name}",
-                                                "password": store.vault.reveal(item.saved_password)}
-        except Exception as error:
-            set_hint(self.message_label, f"Couldn't read the credential's password: {error}", "error")
-            return None
-        return {"username": credential.username, "password": password, "enable": self.backup_enable.text(),
-                "label": f"credential {credential.name}", "trust_new": True, "credential_id": credential.id,
-                "devices": {device: credential_id for device, credential_id in chosen.items()
-                            if credential_id in device_logins}, "logins": device_logins}
+        backups = sync.backups_for_service(self, self.configured().get("backups"), ask=True)
+        if backups is None:
+            locked = sync.problem == "locked"
+            set_hint(self.message_label, "The backup logins need the master password." if locked else sync.problem,
+                     "warning" if locked else "error")
+        return backups
 
     def uninstall(self):
         if QMessageBox.question(self, "Uninstall the Map Watcher",

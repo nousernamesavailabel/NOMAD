@@ -278,3 +278,18 @@ def test_page_entries_are_not_repeated_in_the_submenus(app, window):
     tools = next(action.menu() for action in menu.actions() if action.text() == "Tools")
     assert [action.text() for action in tools.actions()] == [
         "Traceroute", "Monitor Latency", "Scan Ports", "SNMP Details"]
+
+
+def test_monitor_latency_names_the_target_after_the_device(app, window):
+    """The map passes the device's name: Monitor Latency names the Latency page's target with it, not the address."""
+    window.navigator, window.latency_tab = Mock(), Mock()
+    menu = QMenu()
+    actions = HostActions(window, window).add_to(menu, "10.0.0.1", name="R1.lab")
+    next(run for action, run in actions.items() if action.text() == "Monitor Latency")()
+    window.latency_tab.add_target.assert_called_once_with("R1.lab", "10.0.0.1")
+
+    window.latency_tab.reset_mock()
+    menu = QMenu()
+    actions = HostActions(window, window).add_to(menu, "10.0.0.2")  # No name: the address
+    next(run for action, run in actions.items() if action.text() == "Monitor Latency")()
+    window.latency_tab.add_target.assert_called_once_with("10.0.0.2", "10.0.0.2")

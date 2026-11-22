@@ -78,7 +78,7 @@ class HostActions:
         tool_entries = {
             "Ping": lambda: self.ping(host),
             "Traceroute": lambda: self.trace(host),
-            "Monitor Latency": lambda: self.monitor_latency(host),
+            "Monitor Latency": lambda: self.monitor_latency(host, name),
             "Scan Ports": lambda: self.scan_ports(host),
             "SNMP Details": lambda: self.snmp(host, *(snmp or ())),
             "Capture Traffic...": lambda: self.capture(host),
@@ -237,10 +237,11 @@ class HostActions:
             self.window.navigator.setCurrentWidget(self.window.traceroute_tab)
             self.window.traceroute_tab.trace_host(host)
 
-    def monitor_latency(self, host):
+    def monitor_latency(self, host, name=""):
+        """Monitor host on the Latency page, named after the device or host when the page knows its name."""
         if host:
             self.window.navigator.setCurrentWidget(self.window.latency_tab)
-            self.window.latency_tab.add_target(host, host)
+            self.window.latency_tab.add_target(name.strip() or host, host)
 
     def scan_ports(self, host):
         if host:

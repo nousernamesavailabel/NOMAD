@@ -1,5 +1,6 @@
 """NetFlow page: who and what is using each router interface, from the flows Cisco routers send (Flexible NetFlow),
-with the interface's live rate read over SNMP beside it.
+with the interface's live rate read over SNMP beside it, and its rate as kept over time (traffic_history: the Map
+Watcher's readings, or this computer's while the Network Map's Monitor is on) for a router on the map open.
 
 Where the flows come from:
 - The NOMAD Flow Collector service on this computer, when it runs (everyone using NOMAD here reads the same one: on a
@@ -22,12 +23,14 @@ from PyQt5.QtWidgets import QAbstractItemView, QApplication, QComboBox, QHBoxLay
 from ..flows import store
 from ..flows.api import FlowSourceError, LocalSource, ServiceSource
 from ..flows.collector import FLOW_PORT, FlowCollector, port_problem
+from ..netmap import traffic_history
 from ..netmap.model import port_key, short_port
 from ..system import allow_inbound_port, log_dir
 from .common import ColumnFitter, SortableTableItem, StoppableThread, format_size, release_thread, \
     run_in_background, set_hint
 from .table_filter import TableFilter
 from .theme import COLORS, accent_button
+from .traffic_graph import IN_COLOR, OUT_COLOR, format_rate, nice_ceiling, runs  # noqa: F401 (format_rate: others)
 
 log = logging.getLogger(__name__)
 
@@ -38,35 +41,10 @@ REFRESH_MS = 15000
 SOURCE_CHECK_MS = 30000
 LIVE_SECONDS = 5
 LIVE_KEPT = 720  # An hour of live samples
+RECORDED_SECONDS = 60  # The interface's kept rates are read again this often
 FIREWALL_RULE = "NOMAD NetFlow"
 EVERY_INTERFACE = -1
 ROW_LIMIT = 25
-IN_COLOR, OUT_COLOR = "#3b82f6", "#f59e0b"
-
-
-def format_rate(bits_per_second):
-    """Bits per second for display, such as "12.3 Mb/s"."""
-    value = float(bits_per_second or 0)
-    for unit in ("b/s", "kb/s", "Mb/s", "Gb/s"):
-        if value < 1000 or unit == "Gb/s":
-            return f"{value:.0f} {unit}" if unit == "b/s" else f"{value:.1f} {unit}"
-        value /= 1000
-    return ""
-
-
-def nice_ceiling(value):
-    """The axis top for value: 1, 2 or 5 times a power of ten."""
-    if value <= 0:
-        return 1.0
-    power = 1.0
-    while power * 10 <= value:
-        power *= 10
-    while power > value:
-        power /= 10
-    for step in (1, 2, 5, 10):
-        if power * step >= value:
-            return power * step
-    return power * 10
 
 
 def flows_db_path():
@@ -94,13 +72,20 @@ class RateGraph(QWidget):
         super().__init__(parent)
         self.minutes = []  # [(start, in b/s, out b/s)] from the flows
         self.live = []  # [(time, in b/s, out b/s)] from SNMP
+        self.recorded = []  # [(time, in b/s, out b/s)] from SNMP, as kept over time (before the live ones)
+        self.recorded_hourly = False
         self.start, self.end = time.time() - 3600, time.time()
         self.note = ""
         self.setMinimumHeight(170)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-    def set_data(self, minutes, live, start, end, note=""):
+    def set_data(self, minutes, live, start, end, note="", recorded=None, hourly=None):
+        """recorded (and hourly: whether they're each hour's average): the kept rates; None keeps those shown."""
         self.minutes, self.live, self.start, self.end, self.note = list(minutes), list(live), start, end, note
+        if recorded is not None:
+            first = live[0][0] if live else float("inf")
+            self.recorded = [point for point in recorded if point[0] < first]
+            self.recorded_hourly = bool(hourly)
         self.update()
 
     def paintEvent(self, _event):
@@ -111,8 +96,9 @@ class RateGraph(QWidget):
         left = metrics.horizontalAdvance("000.0 Mb/s") + 10
         plot = QRectF(left, 8, max(1, self.width() - left - 12), max(1, self.height() - metrics.height() - 22))
         visible_live = [item for item in self.live if item[0] >= self.start]
+        recorded = [item for item in self.recorded if item[0] >= self.start - 3600]
         peak = max([max(item[1], item[2]) for item in self.minutes] + [max(item[1], item[2]) for item in visible_live]
-                   + [0])
+                   + [max(item[1], item[2]) for item in recorded] + [0])
         top = nice_ceiling(peak * 1.1)
         grid = QPen(QColor(COLORS["border"]), 1)
         for step in range(5):
@@ -130,7 +116,7 @@ class RateGraph(QWidget):
         def y_of(rate):
             return plot.bottom() - max(0.0, min(1.0, rate / top)) * plot.height()
 
-        if not self.minutes and not visible_live:
+        if not self.minutes and not visible_live and not recorded:
             painter.setPen(QColor(COLORS["muted"]))
             painter.drawText(plot, Qt.AlignCenter | Qt.TextWordWrap, self.note or "No flows in this time.")
         painter.setClipRect(plot)
@@ -141,6 +127,15 @@ class RateGraph(QWidget):
                 x1, x2 = x_of(item[0]), x_of(item[0] + 60)
                 rectangle = QRectF(x1, y_of(item[index]), max(1.0, x2 - x1), plot.bottom() - y_of(item[index]))
                 painter.fillRect(rectangle, fill)
+        for index, color in ((1, IN_COLOR), (2, OUT_COLOR)):
+            painter.setPen(QPen(QColor(color), 1.5))
+            for run in runs(recorded, traffic_history.gap_seconds(recorded, self.recorded_hourly)):
+                if len(run) < 2:
+                    continue
+                path = QPainterPath(QPointF(x_of(run[0][0]), y_of(run[0][index])))
+                for item in run[1:]:
+                    path.lineTo(QPointF(x_of(item[0]), y_of(item[index])))
+                painter.drawPath(path)
         for index, color in ((1, IN_COLOR), (2, OUT_COLOR)):
             if len(visible_live) < 2:
                 continue
@@ -155,7 +150,7 @@ class RateGraph(QWidget):
         stamp = "%H:%M" if span <= 86400 else "%d %b %H:%M"
         painter.drawText(labels, Qt.AlignLeft, time.strftime(stamp, time.localtime(self.start)))
         painter.drawText(labels, Qt.AlignRight, time.strftime(stamp, time.localtime(self.end)))
-        legend = "■ In   ■ Out    filled: a minute at a time from the flows    lines: live, from SNMP"
+        legend = "■ In   ■ Out    filled: a minute at a time from the flows    lines: from SNMP (kept, then live)"
         painter.drawText(labels, Qt.AlignHCenter, legend)
         width = metrics.horizontalAdvance(legend)
         x = plot.left() + (plot.width() - width) / 2
@@ -246,6 +241,11 @@ class FlowsTab(QWidget):
         self.last_sample = None
         self.live_speed = 0
         self.live_note = ""
+        self.recorded = []  # [(time, in b/s, out b/s)] kept of the interface chosen (traffic_history)
+        self.recorded_hourly = False
+        self.recorded_where = None  # (exporter, ifindex, seconds shown) they're of
+        self.recorded_at = 0.0  # When they were read
+        self.recorded_wanted = None  # The where being read now
         self.wanted = None  # (addresses, port name) to choose once the routers are read (from the map)
         self.saved_exporter, self.saved_ifindex = "", None
         self.port, self.raw_hours, self.summary_days = FLOW_PORT, store.RAW_SECONDS / 3600, store.SUMMARY_DAYS
@@ -766,8 +766,10 @@ class FlowsTab(QWidget):
         for widget in self.tables.values():
             widget.setRowCount(0)
             self.table_filters[widget].apply()
-        self.graph.set_data([], self.live_points(), *self.chosen()[3:], note=note)
+        self.graph.set_data([], self.live_points(), *self.chosen()[3:], note=note, recorded=self.recorded_points(),
+                            hourly=self.recorded_hourly)
         self.total_label.setText(note)
+        self.update_recorded()
 
     # ----------------------------------------------------------------- Showing
 
@@ -778,9 +780,11 @@ class FlowsTab(QWidget):
             self.fill_table(kind, top, seconds)
         minutes = [(row[0], row[1] * 8 / 60, row[2] * 8 / 60) for row in answer["series"]]
         note = "No flows from this router in this time." if not minutes else ""
-        self.graph.set_data(minutes, self.live_points(), start, end, note)
+        self.graph.set_data(minutes, self.live_points(), start, end, note, recorded=self.recorded_points(),
+                            hourly=self.recorded_hourly)
         self.show_totals(answer["series"], answer["tops"][store.SOURCES]["total"], ifindex, direction, seconds)
         self.update_rate_label()
+        self.update_recorded()
 
     def show_totals(self, series, total, ifindex, direction, seconds):
         """In and out side by side (bytes, average and busiest minute, from the graph's minutes), then the flows in
@@ -841,6 +845,61 @@ class FlowsTab(QWidget):
                 widget.setItem(number, column, item)
         widget.setSortingEnabled(True)  # Sorts as the header shows: by Bytes, or as the user sorted it
         self.table_filters[widget].apply()
+
+    # ----------------------------------------------------------------- The rate kept over time
+
+    def map_port(self, exporter, ifindex):
+        """(map record, device key, port name, tribe maps, tribe map ID) of a router's interface on the Network Map
+        open, or None when the router isn't on it."""
+        page = getattr(self.window, "netmap_tab", None)
+        network_map = getattr(page, "network_map", None)
+        name = next((item["name"] for item in self.interface_rows if item["ifindex"] == ifindex), "")
+        if network_map is None or not name or not exporter or not getattr(page, "record_shown", None):
+            return None
+        key = next((key for key in network_map.devices if exporter in page.device_addresses(key)), None)
+        if key is None:
+            return None
+        map_id = page.tribe_map_id
+        maps = page.tribe.maps if map_id is not None else None
+        return page.record_shown, key, name, maps, map_id
+
+    def recorded_points(self):
+        exporter, ifindex, _, start, end = self.chosen()
+        return list(self.recorded) if self.recorded_where == (exporter, ifindex, round(end - start)) else []
+
+    def update_recorded(self):
+        """Read the chosen interface's rate as kept over the time shown (in the background, at most every
+        RECORDED_SECONDS): the Map Watcher's readings, else this computer's."""
+        exporter, ifindex, _, start, end = self.chosen()
+        where = (exporter, ifindex, round(end - start))
+        if ifindex is None or not self.isVisible() or self.recorded_wanted == where or (
+                where == self.recorded_where and time.time() - self.recorded_at < RECORDED_SECONDS):
+            return
+        found = self.map_port(exporter, ifindex)
+        if found is None:
+            self.recorded, self.recorded_where = [], where
+            return
+        record, key, port, maps, map_id = found
+        self.recorded_wanted = where
+
+        def fetch():
+            return where, traffic_history.history_for(record, key, port, start, end, maps=maps, map_id=map_id)
+
+        run_in_background(fetch, self.on_recorded, self.on_recorded_failed)
+
+    def on_recorded(self, result):
+        where, history = result
+        self.recorded_wanted = None
+        points = history.watcher + traffic_history.outside(history.own, history.watcher, history.hourly)
+        self.recorded = [(point[0], point[1], point[2]) for point in sorted(points)]
+        self.recorded_hourly, self.recorded_where, self.recorded_at = history.hourly, where, time.time()
+        if where[:2] == self.chosen()[:2]:
+            self.graph.set_data(self.graph.minutes, self.live_points(), *self.chosen()[3:], self.graph.note,
+                                recorded=self.recorded_points(), hourly=self.recorded_hourly)
+
+    def on_recorded_failed(self, error):
+        self.recorded_wanted = None
+        log.info("NetFlow page: couldn't read the interface's kept rate: %s", error)
 
     # ----------------------------------------------------------------- Live rate
 

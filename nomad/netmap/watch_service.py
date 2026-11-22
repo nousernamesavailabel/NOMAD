@@ -10,14 +10,17 @@ It also monitors the maps it watches for the NOMAD Dashboard (watch_monitor.py):
 their IP SLA probes), reads the traffic on their links and graphed ports, and sweeps their IPAM subnets on a schedule,
 keeping what it finds in status.db in its folder. Each map's monitoring (statuses and uptime, nothing secret) is
 shared for NOMAD's own map: in %ProgramData%\\NOMAD\\monitoring for anyone on this computer, and through the tribe
-(API 18) for everyone else.
+(API 18) for everyone else. So are the ports' traffic readings, for NOMAD's Traffic Graphs (traffic_history.py: in
+traffic.db there, and through the tribe with API 19).
 
 It can monitor maps on this computer that aren't shared with the tribe too (watch_local.py), and then runs without a
 tribe at all if it has no tribe maps.
 
-It can also run the tribe's scheduled config backups (nomad/configs/runner.py): devices due are handed to it first,
-and it logs in with the one login chosen for it (copied into its config, its password encrypted for this computer:
-the service has no saved sessions of its own).
+It can also run the tribe's scheduled config backups (nomad/configs/runner.py): devices due are handed to it first.
+It logs in the way the Editor's Backups tab says (configs/logins.py): NOMAD copies the usual login, each device's own
+login and the logins of the devices' saved SSH sessions into its config, their passwords encrypted for this computer,
+since the service has no saved sessions of its own. It reads them again before each round, so NOMAD can update them
+without restarting it.
 
 Its folder (%ProgramData%\\NOMAD\\watcher, readable by Administrators, SYSTEM and the service) holds config.json
 (the tribe key, with the secret encrypted for this computer, the maps to watch, and the backup login), its copy of the
@@ -36,7 +39,7 @@ from ..snmp import TRAP_PORT
 from ..syslog import SYSLOG_PORT, SyslogReceiver
 from ..syslogs.feed import SyslogListener
 from ..syslogs.service import DISPLAY_NAME as SYSLOG_SERVICE_NAME
-from . import monitor_record, triggers, watch, watch_local, watch_monitor
+from . import monitor_record, traffic_history, triggers, watch, watch_local, watch_monitor
 from .crawl import credentials_from_json, ordered_credentials
 
 log = logging.getLogger(__name__)
@@ -54,6 +57,10 @@ BACKUP_SECONDS = 30
 SYSLOG_CHECK_SECONDS = 60  # Checking whether the Syslog Collector service has been installed or removed here
 MONITORING_SEND_SECONDS = 60  # A map's monitoring goes to the tribe at most this often
 MONITORING_RETRY_SECONDS = 3600  # After a tribe server too old to take it
+TRAFFIC_SECONDS = 60  # The ports' traffic readings are copied for this computer and sent to the tribe this often
+TRAFFIC_BATCH = 5000  # Readings a request (and a copy)
+TRAFFIC_BATCHES = 10  # At most this many each time (catching up after being offline takes a few minutes)
+TRAFFIC_COPIED, TRAFFIC_SENT = "traffic_copied", "traffic_sent"  # status.db's meta: the last reading copied, sent
 
 
 def watcher_dir():
@@ -78,9 +85,10 @@ def make_config(key, map_ids, listen=True, timers=None, protect=None, backups=No
     maps only, with no tribe). local_maps: the config's watch_local entries, kept. timers: {name: seconds}, as
     watch.TIMERS has them. monitoring: watch_monitor.MONITOR_DEFAULTS' settings (the defaults for any left out).
     backups: None (no scheduled config backups), or {"username", "password", "enable", "label", "trust_new",
-    "credential_id", "devices": {device id: credential id}, "logins": {credential id: {"username", "password",
-    "label"}}} with the passwords as typed (they're encrypted here); or {"keep": the config's backups as they are,
-    "enable", "trust_new"} when the logins haven't changed (nothing to read from the master password)."""
+    "credential_id", "devices": {device id: login key}, "logins": {login key: {"username", "password", "label"}},
+    "signature"} with the passwords as typed (they're encrypted here; configs.logins.service_backups makes it; the
+    usual login's username is "" when there's none); or {"keep": the config's backups as they are, "enable",
+    "trust_new"} when the logins haven't changed (nothing to read from the master password)."""
     if protect is None:  # For this computer: the service runs as another account
         from ..terminal.credentials import protect as dpapi
 
@@ -100,9 +108,10 @@ def make_config(key, map_ids, listen=True, timers=None, protect=None, backups=No
 
 def protect_backups(backups, protect):
     """The config's backups from make_config's backups (its passwords encrypted with protect)."""
-    if "keep" in backups:
+    if "keep" in backups:  # The enable password and trust are kept too unless given
         kept = dict(backups["keep"])
-        kept["enable"] = protect(backups["enable"]) if backups.get("enable") else ""
+        if "enable" in backups:
+            kept["enable"] = protect(backups["enable"]) if backups.get("enable") else ""
         kept["trust_new"] = bool(backups.get("trust_new", kept.get("trust_new", True)))
         return kept
     logins = {credential_id: {"username": login["username"], "label": login.get("label", ""),
@@ -114,7 +123,7 @@ def protect_backups(backups, protect):
             "trust_new": bool(backups.get("trust_new", True)), "credential_id": backups.get("credential_id", ""),
             "devices": {device: credential_id for device, credential_id in (backups.get("devices") or {}).items()
                         if credential_id in logins},
-            "logins": logins}
+            "logins": logins, "signature": backups.get("signature", "")}
 
 
 def config_timers(config):
@@ -184,6 +193,9 @@ class WatchEngine:
         self.summaries_lock = threading.Lock()
         self.next_summaries = 0.0
         self.monitoring_refused_until = 0.0
+        self.traffic = None  # traffic_history.TrafficStore shared on this computer, while monitoring
+        self.next_traffic = 0.0
+        self.traffic_refused_until = 0.0
 
     # ----------------------------------------------------------------- Listening
 
@@ -266,6 +278,9 @@ class WatchEngine:
         if self.summaries and now >= self.next_summaries and now >= self.monitoring_refused_until:
             self.next_summaries = now + MONITORING_SEND_SECONDS
             self.send_summaries()
+        if self.monitoring is not None and self.traffic is not None and now >= self.next_traffic:
+            self.next_traffic = now + TRAFFIC_SECONDS
+            self.share_traffic()
         due = self.queue.due()
         for watched in self.watched.values():
             if self.stop_event.is_set():
@@ -284,15 +299,18 @@ class WatchEngine:
         except Exception as error:  # Offline, or an old server: try again next time
             log.info("Config backups: %s", error)
 
+    def record_of(self, map_id):
+        """The name a map's monitoring and traffic go by on this computer (monitor_record.record_name)."""
+        if map_id >= 0:
+            return monitor_record.record_name(server_id=self.server_id, map_id=map_id)
+        info = self.maps.map_info(map_id) or {}
+        return monitor_record.record_name(record_id=info.get("record_id", ""))
+
     def share_summary(self, map_id, summary):
         """A map's monitoring summary (from the monitoring's thread): written for anyone on this computer at once,
         and sent to the tribe on the next step for a tribe map."""
         tribe = map_id >= 0
-        if tribe:
-            name = monitor_record.record_name(server_id=self.server_id, map_id=map_id)
-        else:
-            info = self.maps.map_info(map_id) or {}
-            name = monitor_record.record_name(record_id=info.get("record_id", ""))
+        name = self.record_of(map_id)
         try:
             monitor_record.write_shared(name, summary, self.shared_dir)
         except OSError as error:
@@ -315,6 +333,72 @@ class WatchEngine:
             except Exception as error:  # Offline: the next one goes when it's back
                 log.info("Couldn't send the monitoring of %s: %s", self.map_name(map_id), error)
                 return
+
+    def share_traffic(self):
+        """The ports' traffic read since last time (status.db's): copied into traffic.db for anyone on this computer,
+        and sent to the tribe for tribe maps. Each goes on from where it got to, so nothing's lost while offline
+        (status.db keeps three days) or copied twice."""
+        try:
+            self.copy_traffic()
+        except Exception as error:  # Tried again next time
+            log.info("Couldn't keep the traffic for NOMAD on this computer: %s", error)
+        if self.clock() >= self.traffic_refused_until:
+            try:
+                self.send_traffic()
+            except Exception as error:  # Sent from where it got to next time
+                log.info("Couldn't send the traffic to the tribe: %s", error)
+
+    def traffic_rows(self, after):
+        return self.monitoring.store.rates_after(after, TRAFFIC_BATCH)
+
+    @staticmethod
+    def reading(row):
+        return {"device": row["device"], "port": row["port"], "at": row["at"], "in_bps": row["in_bps"],
+                "out_bps": row["out_bps"], "speed": row["speed"] or 0}
+
+    def copy_traffic(self):
+        store = self.monitoring.store
+        after = int(store.get_meta(TRAFFIC_COPIED, 0) or 0)
+        for _ in range(TRAFFIC_BATCHES):
+            rows = self.traffic_rows(after)
+            if not rows:
+                break
+            by_map = {}
+            for row in rows:
+                by_map.setdefault(row["map_id"], []).append(self.reading(row))
+            for map_id, readings in by_map.items():
+                self.traffic.add(self.record_of(map_id), readings)
+            after = rows[-1]["id"]
+            store.set_meta(TRAFFIC_COPIED, after)
+        self.traffic.prune(keep_maps={self.record_of(map_id) for map_id in self.monitoring.map_ids})
+
+    def send_traffic(self):
+        from ..ipam.client import IpamError, OldServerError, ServerUnreachable
+        store = self.monitoring.store
+        tribe_maps = {map_id for map_id in self.monitoring.map_ids if map_id >= 0}
+        after = int(store.get_meta(TRAFFIC_SENT, 0) or 0)
+        for _ in range(TRAFFIC_BATCHES):
+            rows = self.traffic_rows(after)
+            if not rows:
+                return
+            by_map = {}
+            for row in rows:
+                if row["map_id"] in tribe_maps:
+                    by_map.setdefault(row["map_id"], []).append(self.reading(row))
+            for map_id, readings in by_map.items():
+                try:
+                    self.maps.send_traffic(map_id, readings)
+                except OldServerError:  # A server before API 19: try again in an hour (it may be updated by then)
+                    log.info("The tribe server is too old to share the ports' traffic with every NOMAD (update it)")
+                    self.traffic_refused_until = self.clock() + MONITORING_RETRY_SECONDS
+                    return
+                except (ServerUnreachable, OSError) as error:  # Offline: sent from here when it's back
+                    log.info("Couldn't send the traffic of %s: %s", self.map_name(map_id), error)
+                    return
+                except IpamError as error:  # Refused (the map's been deleted, say): not sent again
+                    log.info("The tribe server didn't take the traffic of %s: %s", self.map_name(map_id), error)
+            after = rows[-1]["id"]
+            store.set_meta(TRAFFIC_SENT, after)
 
     def sync(self):
         try:
@@ -526,10 +610,18 @@ def add_monitoring(engine, config, key, client, directory, local=None):
     except OSError:
         pass
     if not monitored:
+        try:  # Nothing's graphed from here any more
+            traffic_history.watcher_path(engine.shared_dir).unlink(missing_ok=True)
+        except OSError:
+            pass
         return
     from ..dashboard.history import HISTORY_FILE
     from ..dashboard.service import dashboard_dir
     store = watch_monitor.MonitorStore(Path(directory) / watch_monitor.STATUS_FILE)
+    try:
+        engine.traffic = traffic_history.TrafficStore(traffic_history.watcher_path(engine.shared_dir), shared=True)
+    except Exception as error:  # Monitoring still works: NOMAD just can't graph its readings from this computer
+        log.warning("Couldn't open the traffic kept for NOMAD on this computer: %s", error)
     engine.monitoring = watch_monitor.MonitorRunner(engine.maps, list(engine.watched) + local_ids, store,
                                                     engine.options, settings, on_summary=engine.share_summary,
                                                     source=f"the Map Watcher on {socket.gethostname()}",
@@ -542,9 +634,10 @@ def add_monitoring(engine, config, key, client, directory, local=None):
 
 
 def backup_runner(config, client, directory, unprotect=None):
-    """The runner for the tribe's scheduled config backups, from the config's backup login (None without one)."""
+    """The runner for the tribe's scheduled config backups (None when the config has none). Its logins are read from
+    the config again before each round (NOMAD rewrites them when they change in the Editor's Backups tab)."""
     settings = config.get("backups")
-    if not settings or not settings.get("username"):
+    if not settings or not (settings.get("username") or settings.get("devices")):
         return None
     from ..configs import archive, runner
     from ..configs.logins import DeviceLogins
@@ -554,24 +647,30 @@ def backup_runner(config, client, directory, unprotect=None):
     from . import configpush, macssh
     if unprotect is None:
         from ..terminal.credentials import unprotect
-    enable = unprotect(settings["enable"]) if settings.get("enable") else ""
-    fallback = Session("", username=settings["username"], saved_password=settings.get("password", ""))
-    label = settings.get("label") or f"user {settings['username']}"
     configs = TribeConfigs(config["server_id"], client, Path(directory) / "configs.db")
     known_hosts = KnownHosts(str(Path(directory) / "known_hosts"))
     computer = socket.gethostname()
 
-    own = service_device_logins(settings)
+    def current():
+        try:
+            latest = load_config(directory).get("backups")
+        except (OSError, ValueError):
+            latest = None
+        return latest or settings  # Turned off since: the service is restarted for that
 
     def make_pusher():
-        logins = DeviceLogins(macssh.SshLogins([], fallback, None, label), own)
-        return configpush.Pusher(logins, None, known_hosts, bool(settings.get("trust_new", True)), enable)
+        now = current()
+        enable = unprotect(now["enable"]) if now.get("enable") else ""
+        fallback = Session("", username=now["username"], saved_password=now.get("password", ""))             if now.get("username") else None
+        label = now.get("label") or (f"user {now['username']}" if now.get("username") else "")
+        logins = DeviceLogins(macssh.SshLogins([], fallback, None, label), service_device_logins(now))
+        return configpush.Pusher(logins, None, known_hosts, bool(now.get("trust_new", True)), enable)
     return runner.BackupRunner(configs, make_pusher, f"{computer}-service", computer, SERVICE_USER, archive.SERVICE)
 
 
 def service_device_logins(settings):
     """own(device id) -> (Session, label) or None, from the config's backups' device logins (the Device Logins
-    the Editor's Backups tab sets, copied in by the Map Watcher's window)."""
+    and saved SSH sessions' logins NOMAD copies in)."""
     from ..terminal.sessions import Session
     devices, logins = settings.get("devices") or {}, settings.get("logins") or {}
 

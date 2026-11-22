@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import counters, monitor, monitor_record, probes, tunnels
-from .model import NETWORK_KINDS, SNMP, port_key
+from .model import SNMP, port_key
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +114,10 @@ class MonitorStore(monitor_record.RecordStore):
     def set_summary(self, map_id, summary):
         """A map's summary, for the dashboard to show as it is."""
         self.set_meta(f"{SUMMARY_META}{int(map_id)}", summary)
+
+    def rates_after(self, after, limit=5000):
+        """The readings after id `after`, oldest first (to copy and send on)."""
+        return self.rows("SELECT * FROM rates WHERE id > ? ORDER BY id LIMIT ?", (int(after), int(limit)))
 
     def take_older_history(self, path):
         """Once: the status changes and gaps the NOMAD Dashboard's history (history.db at path) has from before this
@@ -458,18 +462,9 @@ class MonitorRunner:
 
     @staticmethod
     def ports_to_read(network_map):
-        """{device key: [port]}: the ports at the ends of links and those marked Graph on Dashboard, on the devices
-        that answer SNMP."""
-        found = counters.link_ports(network_map)
-        for key, ports in network_map.graphed.items():
-            device = network_map.devices.get(key)
-            if device is None or device.source != SNMP or not device.mgmt_ip or device.kind not in NETWORK_KINDS:
-                continue
-            chosen = found.setdefault(key, [])
-            for port in ports:
-                if port_key(port) not in {port_key(item) for item in chosen}:
-                    chosen.append(port)
-        return found
+        """{device key: [port]}: the ports at the ends of links and those marked to graph, on the devices that answer
+        SNMP."""
+        return counters.graph_ports(network_map)
 
     def read_counters(self, map_id, state, network_map, options):
         ports = self.ports_to_read(network_map)

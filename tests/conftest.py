@@ -67,6 +67,19 @@ def _no_nomad_services(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _own_traffic_store():
+    """NOMAD's own traffic history (one for the whole program) is opened afresh in each test's folder."""
+    try:
+        from nomad.netmap import traffic_history
+    except ImportError:
+        yield
+        return
+    traffic_history.close_own_store()
+    yield
+    traffic_history.close_own_store()
+
+
+@pytest.fixture(autouse=True)
 def _no_monitor_snmp(monkeypatch):
     try:
         from nomad.ui import netmap_monitor

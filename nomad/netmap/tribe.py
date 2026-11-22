@@ -503,6 +503,16 @@ class TribeMaps:
                 self.db.execute("DELETE FROM monitoring WHERE map_id = ?", (int(map_id),))
         return summary
 
+    def send_traffic(self, map_id, rates):
+        """Send the Map Watcher's readings of a map's ports' traffic ([{device, port, at, in_bps, out_bps, speed}]) to
+        the server (API 19; an older one raises OldServerError)."""
+        self.client.map_request("traffic", map_id=int(map_id), rates=rates)
+
+    def fetch_traffic(self, map_id, device, port, start, end):
+        """A port's traffic graph as the Map Watcher read it, from the server: {"points", "hourly"}. Raises when the
+        server can't be reached or is older than API 19."""
+        return self.client.map_traffic(map_id, device, port, start, end)
+
     def kept_monitoring(self, map_id):
         """The summary fetch_monitoring got last, or None."""
         with self.lock:

@@ -332,7 +332,7 @@ def test_service_config_carries_the_backup_login(tmp_path):
                                                 "label": "credential NetOps"})
     assert config["backups"] == {"username": "netops", "label": "credential NetOps", "password": "<pw>",
                                  "enable": "<en>", "trust_new": True, "credential_id": "", "devices": {},
-                                 "logins": {}}
+                                 "logins": {}, "signature": ""}
     made = watch_service.backup_runner(config, client=None, directory=tmp_path, unprotect=lambda text: text[1:-1])
     assert made.kind == archive.SERVICE and made.holder.endswith("-service")
     pusher = made.pusher_factory()
@@ -364,6 +364,35 @@ def test_service_backups_use_each_devices_own_login(tmp_path):
                                      backups={"keep": config["backups"], "enable": "new", "trust_new": True})
     assert kept["backups"] == dict(config["backups"], enable="<new>")
     made.configs.close()
+
+
+def test_service_reads_its_logins_again_each_round(tmp_path):
+    """NOMAD rewrites the service's logins when they change in the Editor: the next round uses them, no restart."""
+    from nomad.netmap import watch_service
+    key = TeamKey.from_dict({"server_id": "s", "hosts": ["127.0.0.1"], "port": 1, "fingerprint": "f" * 64,
+                             "secret": "x", "format": 1})
+    protect = lambda text: f"<{text}>"  # noqa: E731
+    config = watch_service.make_config(key, [1], protect=protect, backups={
+        "username": "netops", "password": "pw", "label": "credential NetOps"})
+    watch_service.save_config(config, tmp_path)
+    made = watch_service.backup_runner(config, client=None, directory=tmp_path, unprotect=lambda text: text[1:-1])
+    assert made.pusher_factory().logins.login_for("10.0.0.1")[1] == "credential NetOps"
+    # Changed to no usual login, with R2's saved session's login and a new enable password
+    latest = watch_service.make_config(key, [1], protect=protect, backups={
+        "username": "", "password": "", "label": "", "enable": "en2", "devices": {"10.100.2.1": "lab"},
+        "logins": {"lab": {"username": "admin", "password": "lp", "label": "credential Lab Admin"}},
+        "signature": "s2"})
+    watch_service.save_config(latest, tmp_path)
+    pusher = made.pusher_factory()
+    session, label = pusher.logins.login_for("10.100.2.1", ["R2.home.lab"])
+    assert (session.username, session.saved_password, label) == ("admin", "<lp>", "credential Lab Admin")
+    assert pusher.logins.login_for("10.0.0.1") == (None, "")
+    assert pusher.enable_secret == "en2"
+    made.configs.close()
+    # A service with only devices' logins (no usual one) still runs backups
+    only = watch_service.backup_runner(latest, client=None, directory=tmp_path, unprotect=lambda text: text[1:-1])
+    assert only is not None
+    only.configs.close()
 
 
 def test_watch_engine_steps_backups():

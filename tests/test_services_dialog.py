@@ -4,6 +4,7 @@ import json
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -169,13 +170,16 @@ def fake_entry(key, title, states, calls, quiet):
         calls.append(f"uninstall {key}")
         states[key] = "Not installed"
 
-    return catalog.ServiceEntry(key, title, "", lambda: key, Path, FIREWALL[key].copy, uninstall,
-                                install if quiet else None, catalog.entry(key).dialog)
+    def update():
+        calls.append(f"update {key}")
+
+    return catalog.ServiceEntry(key, title, "", lambda: SimpleNamespace(argument=key), Path, FIREWALL[key].copy,
+                                uninstall, install if quiet else None, catalog.entry(key).dialog, update)
 
 
 @pytest.fixture
 def dialog(app, monkeypatch):
-    from nomad.ui import services_dialog
+    from nomad.ui import services_dialog, syslog_service_dialog
     window = Window()
     states = {"tribe": "Not installed", "syslog": "Not installed", "flows": "Not installed",
               "watcher": "Not installed"}
@@ -192,8 +196,9 @@ def dialog(app, monkeypatch):
              Found("NICManager-iperf-server", protocol="TCP", ports="5201")]
     monkeypatch.setattr(firewall, "read_state", lambda: firewall.FirewallState(list(found)))
     monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
-    monkeypatch.setattr(services_dialog, "free_syslog_port", lambda window: calls.append("free 514") or "watcher")
-    monkeypatch.setattr(services_dialog, "give_syslog_port_back",
+    monkeypatch.setattr(syslog_service_dialog, "free_syslog_port",
+                        lambda window: calls.append("free 514") or "watcher")
+    monkeypatch.setattr(syslog_service_dialog, "give_syslog_port_back",
                         lambda window, released: calls.append(f"give 514 back to {released}"))
     shown = services_dialog.ServicesDialog(window)
     shown.found = found
@@ -291,6 +296,30 @@ def test_install_ticked_goes_in_order_and_asks_where_it_must(app, dialog):
     assert [call for call in calls if call.startswith("uninstall")] == ["uninstall syslog", "uninstall tribe"]
     assert "tribe key changed" in calls and "Removed Syslog Collector and Tribe Server." in \
         dialog.message_label.text()
+
+
+def test_updating_a_service_opens_no_window(app, dialog, monkeypatch):
+    """A service that wants updating is updated with the settings it has, even one installed in its own window."""
+    from nomad import service_versions
+    calls = dialog.window.calls
+    dialog.window.states.update(tribe="Running", syslog="Running", watcher="Running")
+    old = {"tribe", "watcher", "syslog"}
+    monkeypatch.setattr(service_versions, "read_note", lambda argument: {"version": "1.0.0" if argument in old
+                                                                         else "99.0.0"})
+    dialog.refresh_services()
+    assert dialog.services_table.item(0, 2).text() == "1.0.0: update"
+    tick(dialog, "watcher", "tribe")
+    dialog.install_ticked()
+    assert wait_for(lambda: not dialog.busy, app=app)
+    assert calls == ["update tribe", "tribe key changed", "update watcher"]  # No window opened
+    calls.clear()
+    dialog.services_table.selectRow(1)  # The Syslog Collector, with Update
+    assert dialog.update_button.isEnabled()
+    dialog.update_service()
+    assert wait_for(lambda: not dialog.busy, app=app)
+    assert calls == ["free 514", "update syslog", "give 514 back to watcher"]
+    dialog.services_table.selectRow(2)  # Not installed: nothing to update
+    assert not dialog.update_button.isEnabled()
 
 
 def test_without_administrator_rights_it_only_shows(app, dialog):

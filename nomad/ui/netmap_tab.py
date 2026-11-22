@@ -10,8 +10,9 @@ import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import quote, unquote
 
-from PyQt5.QtCore import QSettings, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QSettings, Qt, QTimer, QUrl, pyqtSignal
 from PyQt5.QtGui import QColor, QKeySequence
 from PyQt5.QtWidgets import QAbstractItemView, QActionGroup, QApplication, QCheckBox, QComboBox, QDialog, \
     QAction, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, \
@@ -75,6 +76,7 @@ ALIGNMENTS = [("Align Left", LEFT), ("Align Center", CENTER), ("Align Right", RI
               ("Align Middle", MIDDLE), ("Align Bottom", BOTTOM)]
 GROUP_LINKS_SHOWN = 20
 VLANS_IN_MENU = 60  # A device's Highlight VLAN menu lists this many
+GRAPH_LINK = "graph:"  # The details pane's Graph link beside a port: graph:<port, quoted>
 OVERLAY_ITEMS = 60  # The Overlay menu lists this many VLANs, VRFs or subnets
 CHECK_WORKERS = 8  # Devices added by hand asked over SNMP at once
 DETAILS_WIDTH = 260  # The details pane beside the map, at first and when Show Details opens it again
@@ -462,6 +464,7 @@ class NetworkMapTab(QWidget):
         self.details = QTextBrowser()
         self.details_shown = (None, None)  # The selection and HTML showing, so a refresh can keep the scroll
         self.details.setOpenLinks(False)
+        self.details.anchorClicked.connect(self.on_details_link)
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.tabs)
         self.splitter.addWidget(self.details)
@@ -1579,7 +1582,8 @@ class NetworkMapTab(QWidget):
         set_hint(self.status_label, message, "success")
 
     def graph_on_dashboard(self, key):
-        """Choose the device's ports whose traffic the Map Watcher keeps for the NOMAD Dashboard, and save."""
+        """Choose the device's ports whose traffic is kept for graphs (by the Map Watcher, for the NOMAD Dashboard and
+        every NOMAD's Traffic Graphs, and by this computer while Monitor is on), and save."""
         from .graph_ports_dialog import GraphPortsDialog
         network_map = self.network_map
         if network_map is None or key not in network_map.devices or self.worker is not None:
@@ -1587,23 +1591,39 @@ class NetworkMapTab(QWidget):
         dialog = GraphPortsDialog(self, network_map, key)
         if dialog.exec_() != QDialog.Accepted or self.network_map is not network_map:
             return
-        chosen = dialog.chosen()
+        ok, message = self.save_graphed(key, dialog.chosen())
+        set_hint(self.status_label, message, "success" if ok else "error")
+
+    def set_graphed(self, key, port, on):
+        """Keep one port's traffic history (or stop), as Ports to Graph does. Returns (saved, what to say)."""
+        network_map = self.network_map
+        if network_map is None or key not in network_map.devices:
+            return False, "That device isn't on the map open any more."
+        if self.worker is not None:
+            return False, "Wait for the map to finish being read first."
+        chosen = [item for item in network_map.graphed.get(key, []) if port_key(item) != port_key(port)]
+        return self.save_graphed(key, chosen + [port] if on else chosen)
+
+    def save_graphed(self, key, chosen):
+        network_map = self.network_map
         if chosen:
-            network_map.graphed[key] = chosen
+            network_map.graphed[key] = list(chosen)
         else:
             network_map.graphed.pop(key, None)
         try:
-            self.write_map(network_map, self.map_path)
+            path = self.write_map(network_map, self.map_path)
         except OSError as error:
-            set_hint(self.status_label, f"Couldn't save the map: {error}", "error")
-            return
+            return False, f"Couldn't save the map: {error}"
+        if self.tribe_map_id is None:
+            self.map_path = path
         label = network_map.devices[key].label
-        message = (f"The Map Watcher keeps the traffic of {count_text(len(chosen), 'port')} of {label} for the "
-                   "dashboard, besides its links." if chosen else f"Only {label}'s links are graphed now.")
-        maps = self.tribe.maps
+        message = (f"The traffic of {count_text(len(chosen), 'port')} of {label} is kept for graphs, besides its "
+                   "links: by the Map Watcher, and by this computer while Monitor is on." if chosen else
+                   f"Only the traffic of {label}'s links is kept for graphs now.")
+        maps = self.tribe.maps if self.tribe_map_id is not None else None
         if maps is not None and maps.server_api and not maps.sends_graphed:
             message += " The tribe server is too old to share this: it stays on this computer until it's updated."
-        set_hint(self.status_label, message, "success")
+        return True, message
 
     def selection_to_lock(self, view):
         """What's selected on a view, with the devices of the groups selected."""
@@ -2736,6 +2756,14 @@ class NetworkMapTab(QWidget):
         else:
             self.set_details(port_html(network_map, selection[1], selection[2]), selection)
 
+    def on_details_link(self, url):
+        """A link in the details pane: Graph beside a port (graph:<port>) opens its traffic graph."""
+        text = url.toString(QUrl.FullyEncoded)
+        selection = self.details_shown[0]
+        if text.startswith(GRAPH_LINK) and selection and selection[0] == "device" and \
+                hasattr(self.window, "show_traffic"):
+            self.window.show_traffic(selection[1], unquote(text[len(GRAPH_LINK):]))
+
     def set_details(self, html, selection):
         """Shows the details, unless they're already showing. A refresh of the same selection (after every monitor
         poll) keeps where the details were scrolled to: setHtml alone would jump back to the top."""
@@ -2893,11 +2921,13 @@ class NetworkMapTab(QWidget):
                           and action.text() == "Tools"), menu)
             actions[tools.addAction(label)] = lambda: self.show_probes(
                 [item for item in keys if item in self.network_map.devices])
-        if (self.tribe_map_id is not None and self.worker is None and key in self.network_map.devices
-                and device.source == SNMP and device.kind in NETWORK_KINDS and device.mgmt_ip):
+        if (self.network_map is not None and key in self.network_map.devices and device.kind in NETWORK_KINDS
+                and device.mgmt_ip and hasattr(self.window, "show_traffic")):
             tools = next((action.menu() for action in menu.actions() if action.menu() is not None
                           and action.text() == "Tools"), menu)
-            actions[tools.addAction("Graph on Dashboard...")] = lambda: self.graph_on_dashboard(key)
+            actions[tools.addAction("Graph Traffic")] = lambda: self.window.show_traffic(key)
+            if self.worker is None and device.source == SNMP:
+                actions[tools.addAction("Ports to Graph...")] = lambda: self.graph_on_dashboard(key)
         news = self.news_of_devices(keys)
         if news and self.worker is None:
             actions[menu.addAction("Mark as Seen")] = lambda: self.mark_seen(news)
@@ -3133,6 +3163,8 @@ class NetworkMapTab(QWidget):
                 actions[menu.addAction("ACLs on This Port...")] =                     lambda: self.window.show_acls(device=key, port=port)
             if hasattr(self.window, "show_flows") and device.mgmt_ip:
                 actions[menu.addAction("Top Talkers on This Port (NetFlow)")] = lambda: self.show_flows(key, port)
+            if hasattr(self.window, "show_traffic") and device.mgmt_ip:
+                actions[menu.addAction("Graph Traffic on This Port")] = lambda: self.window.show_traffic(key, port)
         if len(hosts) == 1:
             self.add_address_link(menu, actions, hosts[0].ip)
         if actions:
@@ -3318,6 +3350,9 @@ class NetworkMapTab(QWidget):
         flow_end = self.flow_end(links[0]) if len(links) == 1 and hasattr(self.window, "show_flows") else None
         if flow_end is not None:
             actions[menu.addAction("Top Talkers on This Link (NetFlow)")] = lambda: self.show_flows(*flow_end)
+        graph_end = self.graph_end(links[0]) if len(links) == 1 and hasattr(self.window, "show_traffic") else None
+        if graph_end is not None:
+            actions[menu.addAction("Graph Traffic on This Link")] = lambda: self.window.show_traffic(*graph_end)
         menu.addSeparator()
         self.add_link_actions(menu, actions, links)
         chosen = menu.exec_(position)
@@ -3332,6 +3367,16 @@ class NetworkMapTab(QWidget):
             if device is not None and port and device.mgmt_ip and device.kind in (ROUTER, SWITCH):
                 ends.append((device.kind != ROUTER, key, port))
         return min(ends)[1:] if ends else None
+
+    def graph_end(self, link):
+        """(device key, port) of the end of a link to graph the traffic of: one that answers SNMP (a router's, else
+        a switch's, else a firewall's), or None."""
+        ends = []
+        for key, port in ((link.a, link.a_port), (link.b, link.b_port)):
+            device = self.network_map.devices.get(key)
+            if device is not None and port and device.mgmt_ip and device.kind in NETWORK_KINDS:
+                ends.append((device.source != SNMP, device.kind != ROUTER, device.kind != SWITCH, key, port))
+        return min(ends)[3:] if ends else None
 
     def device_addresses(self, key):
         """Every address the map knows a device by (a router sends its flows from any of them)."""
@@ -4716,6 +4761,7 @@ def details_html(details):
 
 
 def blocks_html(blocks):
+    """Paragraphs, bold lines and tables; a table's rows may have a Graph link (graph:<port>, on_details_link)."""
     escape = html.escape
     parts = []
     for block in blocks:
@@ -4725,9 +4771,13 @@ def blocks_html(blocks):
             parts.append(f"<p><b>{escape(block['label'])}</b></p>")
         else:
             parts.append("<table>")
-            for left, right in block["rows"]:
+            graphs = block.get("graph") or []
+            for number, (left, right) in enumerate(block["rows"]):
                 left = f"<b>{escape(left)}</b>" if block["bold"] else escape(left)
-                parts.append(f"<tr><td>{left}&nbsp;</td><td>{escape(right)}</td></tr>")
+                port = graphs[number] if number < len(graphs) else None
+                link = (f"&nbsp; <a href='{GRAPH_LINK}{escape(quote(port, safe=''))}' "
+                        f"style='color: {COLORS['link']}'>Graph</a>") if port else ""
+                parts.append(f"<tr><td>{left}&nbsp;</td><td>{escape(right)}{link}</td></tr>")
             parts.append("</table>")
     return "".join(parts)
 

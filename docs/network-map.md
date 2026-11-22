@@ -342,6 +342,18 @@ Monitor then reads each probe's latest result over read-only SNMP, showing the d
 
 The probes live on the routers, so everyone monitoring the map uses the same ones. They're found again when monitoring starts and every 10 minutes. The probes list shows them all and takes them away. Nothing is saved to startup unless you tick write memory.
 
+## Traffic graphs
+
+The **Traffic Graphs** page (under **Capture & Logs**) graphs the traffic on any port of a switch, router or firewall on the open map, from its SNMP counters. NetFlow isn't needed.
+
+1. Right-click a device and choose **Tools** > **Graph Traffic**, or right-click a link or a port and choose **Graph Traffic on This Link** or **Graph Traffic on This Port**. The details pane also has a **Graph** link beside each of a device's links.
+2. Choose the **Port** if it isn't the one you want. Ports whose history is kept are listed first.
+3. Choose how far back to look: 6 hours, 24 hours, 7 days, 30 days or a year.
+
+The solid lines are the Map Watcher's readings. They are the same numbers the NOMAD Dashboard graphs. On the Watcher's own computer NOMAD reads them directly, and on other computers a tribe map's readings come through the tribe server, which must be updated to this version. The dashed lines are this computer's readings, shown where the Map Watcher has none. While **Monitor** is on, NOMAD keeps the readings of the same ports for a year. The port you're looking at is also read every 5 seconds while the page shows, so the right-hand end of the graph is live. Over 7 days or more, the graph shows each hour's average, with the hour's peak in a dotted line.
+
+The Map Watcher and Monitor keep the history of the ports at both ends of every link. To keep another port's history, such as a server's port or an internet uplink, tick **Keep Its History** on the Traffic Graphs page. To choose several at once, right-click the device and choose **Tools** > **Ports to Graph...**. The choice is saved with the map, and a tribe map shares it.
+
 ## Links that are gone
 
 A full crawl draws only the links it finds. **Crawl from Here** and **Watch** add to the map, so when they read a device again they remove the CDP/LLDP links it no longer has, if nothing else could still report them:

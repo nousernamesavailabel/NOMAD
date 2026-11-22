@@ -231,6 +231,7 @@ Good to know:
 | **Port Mirroring** | Sets up SPAN, RSPAN or ERSPAN on Cisco IOS / IOS-XE switches in a click, checks the ports first, and takes it away again | [Port mirroring](capture-mirroring.md#mirror-a-port) |
 | **Syslog** | Receives syslog from network devices, colored by severity and filterable, or reads and searches every message the Syslog Collector service kept | [Syslog](syslog.md) |
 | **NetFlow** | The top talkers, destinations, conversations and applications on each router interface, from the flows routers send, with the interface's live rate from SNMP | [NetFlow](netflow.md) |
+| **Traffic Graphs** | The traffic on any port of a switch, router or firewall on the Network Map over time, from SNMP: the Map Watcher's readings (the same as the NOMAD Dashboard's), this computer's while Monitor is on, and live | [Traffic graphs](network-map.md#traffic-graphs) |
 
 ## Utilities
 

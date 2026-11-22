@@ -530,3 +530,105 @@ def test_device_logins_dialog(app, tmp_path):
     dialog.filter.setText("R1")
     assert dialog.table.isRowHidden(1) and not dialog.table.isRowHidden(0)
     dialog.deleteLater()
+
+
+def test_device_logins_dialog_shows_the_saved_session_a_device_uses(app, tmp_path):
+    from nomad.terminal.sessions import Credential, Session, SessionStore
+    from nomad.ui.backup_logins_dialog import USUAL, DeviceLoginsDialog
+    store = SessionStore(str(tmp_path / "sessions.json"))
+    lab = Credential("Lab Admin", username="admin", saved_password="x")
+    store.credentials.items = [lab]
+    store.sessions = [Session("R2.home.lab", host="10.18.0.12", credential_id=lab.id),
+                      Session("SW9", host="10.0.0.9", username="nobody")]
+    devices = [{"id": "10.100.2.1", "name": "R2.home.lab", "address": "10.100.2.1",
+                "names": ["R2.home.lab", "10.18.0.12"], "failures": []},
+               {"id": "10.0.0.9", "name": "SW9", "address": "10.0.0.9", "names": [], "failures": []},
+               {"id": "10.0.0.5", "name": "R5", "address": "10.0.0.5", "names": [], "failures": []}]
+    dialog = DeviceLoginsDialog(None, store, devices, {})
+    assert [dialog.table.item(row, 2).text() for row in range(3)] == [
+        "Its saved session (R2.home.lab)", "Its saved session (SW9) has no saved password: the usual login", USUAL]
+    dialog.deleteLater()
+
+
+# ----------------------------------------------------------------- Backups' logins, set once for the Map Watcher too
+
+def lab_logins(page, monkeypatch):
+    """Lab Admin for R2's saved session, the archive holding R2 by another address, and passwords "encrypted" as
+    <text> (for the Map Watcher's config too)."""
+    from nomad.terminal import credentials
+    from nomad.terminal.sessions import Credential, Session
+    monkeypatch.setattr(credentials, "protect", lambda text, machine=False: f"<{text}>")
+    monkeypatch.setattr(credentials, "unprotect", lambda text: text[1:-1])
+    store = page.window.session_store
+    lab = Credential("Lab Admin", username="admin", saved_password="<lab-pw>")
+    longpw = Credential("jared longpw", username="jared", saved_password="<long-pw>")
+    store.credentials.items = [lab, longpw]
+    r2 = Session("R2.home.lab", host="10.18.0.12", credential_id=lab.id)
+    store.credentials.apply(r2)
+    store.sessions = [r2]
+    with page.configs.lock:
+        page.configs.store.sync_devices([{"id": "10.100.2.1", "name": "R2.home.lab", "address": "10.100.2.1",
+                                          "names": ["R2.home.lab", "10.18.0.12"], "platform": "ios",
+                                          "kind": "router", "facts": {}}])
+    page.login_row.picker.fill("")
+    return store, lab, longpw
+
+
+def test_the_map_watcher_gets_the_editors_backup_logins(page, monkeypatch):
+    from nomad.configs import logins as backup_logins
+    from nomad.netmap import watch_service
+    from nomad.ui import backup_logins_sync
+    store, lab, longpw = lab_logins(page, monkeypatch)
+    # Installed before: the login and enable password chosen in the Map Watcher's window
+    watch_service.save_config({"maps": [], "backups": {
+        "username": "jared", "label": "credential jared longpw", "password": "<long-pw>", "enable": "<en>",
+        "credential_id": longpw.id, "devices": {}, "logins": {}}})
+    page.backup_sync.restore()  # NOMAD starting: the Editor had no usual login, so it takes the Map Watcher's
+    assert page.login_row.picker.credential_id() == longpw.id and page.login_row.enable_input.text() == "en"
+    assert backup_logins.read()["usual"] == longpw.id
+    saves = []
+    real_save = watch_service.save_config
+    monkeypatch.setattr(watch_service, "save_config", lambda config, *args: saves.append(1) or real_save(config))
+    page.backup_sync.update_service()
+    backups = watch_service.load_config()["backups"]
+    # R2 is backed up with its saved session's login (Lab Admin), the rest with the usual one
+    assert backups["devices"] == {"10.100.2.1": lab.id}
+    assert backups["logins"][lab.id] == {"username": "admin", "password": "<lab-pw>", "label": "credential Lab Admin"}
+    assert (backups["username"], backups["password"], backups["enable"]) == ("jared", "<long-pw>", "<en>")
+    assert backup_logins.read()["enable"] == "<en>"  # Saved in the Editor's file now
+    assert "now logs in the same way" in page.backups_panel.service_note.text()
+    page.backup_sync.update_service()  # Nothing changed: nothing written
+    assert len(saves) == 1
+    # Changing the usual login in the Editor changes the service's at once
+    page.login_row.picker.combo.setCurrentIndex(page.login_row.picker.combo.findData(lab.id))
+    assert watch_service.load_config()["backups"]["username"] == "admin" and len(saves) == 2
+    assert backup_logins.read()["usual"] == lab.id
+    # And the enable password
+    page.login_row.enable_input.setText("en2")
+    page.login_row.enable_input.editingFinished.emit()
+    assert backup_logins.read()["enable"] == "<en2>"
+    assert watch_service.load_config()["backups"]["enable"] == "<en2>" and len(saves) == 3
+    # A password changed while the master password is locked: a link to update the service, nothing asked
+    monkeypatch.setattr(type(store.vault), "enabled", property(lambda self: True))
+    monkeypatch.setattr(type(store.vault), "unlocked", property(lambda self: False))
+    lab.saved_password = "<lab-pw2>"
+    store.credentials.apply(store.sessions[0])
+    monkeypatch.setattr(backup_logins_sync, "ensure_unlocked", lambda *args: pytest.fail("asked"))
+    page.backup_sync.update_service()
+    assert "Update the Service's Logins" in page.backups_panel.service_note.text() and len(saves) == 3
+    monkeypatch.setattr(backup_logins_sync, "ensure_unlocked", lambda *args: True)  # Clicked, and unlocked
+    page.service_note_link(backup_logins_sync.UPDATE_LINK)
+    assert watch_service.load_config()["backups"]["logins"][lab.id]["password"] == "<lab-pw2>"
+
+
+def test_no_map_watcher_here_leaves_the_backup_logins_alone(page, monkeypatch):
+    from nomad.configs import logins as backup_logins
+    from nomad.netmap import watch_service
+    lab_logins(page, monkeypatch)
+    page.backup_sync.restore()
+    page.backup_sync.update_service(ask=True)  # Not installed (or not readable without administrator rights)
+    assert page.backups_panel.service_note.text() == ""
+    assert backup_logins.read()["usual"] == ""  # A user name and password asked for
+    watch_service.save_config({"maps": []})  # Installed, without backups
+    page.backup_sync.update_service(ask=True)
+    assert "backups" not in watch_service.load_config()

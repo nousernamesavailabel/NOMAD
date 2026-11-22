@@ -76,7 +76,7 @@ Input is enough. NOMAD counts each flow coming in on the interface it arrived on
 
 The line above the graph adds up the time you chose. It shows how much came in and how much went out, the average rate of each, the busiest minute of each, and how many flows there were. These totals come from the flows. With **Every interface** chosen, it shows one total for what went through the router.
 
-The graph shows the interface's rate in and out. The filled bars are a minute at a time from the flows. The lines are live, from SNMP. Under it are the tabs:
+The graph shows the interface's rate in and out. The filled bars are a minute at a time from the flows. The lines are from SNMP. When the router is on the open Network Map, the lines go back over the whole time chosen, from the readings the Map Watcher (or this computer's Monitor) kept, as on the [Traffic Graphs](network-map.md#traffic-graphs) page. The rest is read live every 5 seconds. Under the graph are the tabs:
 
 | Tab | Shows |
 | --- | --- |
@@ -108,3 +108,4 @@ Find Flows looks through each flow as it was sent, which is kept for 2 hours unl
 - If the NetFlow page says it's waiting for a router's templates, the router hasn't sent them yet. They come within a minute.
 - If no flows arrive, check that the router can reach the collector on UDP 2055 and that Windows Firewall lets them in.
 - If the live rate is missing, add the router's community string or SNMPv3 user to the Network Map (**SNMP Credentials...**).
+- To graph a port of a switch, or of a router that doesn't send flows, use the [Traffic Graphs](network-map.md#traffic-graphs) page.

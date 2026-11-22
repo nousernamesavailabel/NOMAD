@@ -54,6 +54,7 @@ from .acl_tab import AclTab
 from .vpn_tab import VpnTab
 from .syslog_tab import SyslogTab
 from .flows_tab import FlowsTab
+from .traffic_tab import TrafficTab
 from .flow_config_tab import FlowConfigTab
 from .tftp_tab import TftpTab
 from .theme import COLORS, DEFAULT_TEXT_SCALE, TEXT_SCALES, closest_text_scale, set_text_scale
@@ -162,6 +163,8 @@ class MainWindow(QMainWindow):
         from .service_banner import ServiceUpdateBanner
         self.service_banner = ServiceUpdateBanner(self.admin, central)
         self.service_banner.open_services.connect(self.show_services)
+        self.service_banner.update_wanted.connect(self.update_services)
+        self.service_updater = None  # service_updates.ServiceUpdater, made when first needed
         layout.addWidget(self.service_banner)
 
         # App-wide adapter picker used by the Interfaces, MTU, Ping, Sweep and other pages
@@ -213,6 +216,7 @@ class MainWindow(QMainWindow):
         self.mirror_tab = MirrorTab(self)  # The Network Map's switches, saved sessions' SSH logins, Packet Capture
         self.syslog_tab = SyslogTab(self)
         self.flows_tab = FlowsTab(self)  # Reads the Network Map's SNMP credentials for the live rate
+        self.traffic_tab = TrafficTab(self)  # The Network Map's devices, credentials and monitoring record
         self.tftp_tab = TftpTab(self)
         self.subnet_tab = SubnetTab(self)
         self.snmp_config_tab = SnmpConfigTab(self)
@@ -256,7 +260,8 @@ class MainWindow(QMainWindow):
                 (self.acl_tab, "ACLs & Route Maps"), (self.vpn_tab, "VPNs"),
                 (self.assets_tab, "Assets"), (self.inventory_tab, "Ansible Inventory")]),
             ("Capture & Logs", [(self.capture_tab, "Packet Capture"), (self.mirror_tab, "Port Mirroring"),
-                                (self.syslog_tab, "Syslog"), (self.flows_tab, "NetFlow")]),
+                                (self.syslog_tab, "Syslog"), (self.flows_tab, "NetFlow"),
+                                (self.traffic_tab, "Traffic Graphs")]),
             ("Utilities", [(self.subnet_tab, "Subnet Calculator"), (self.editor_tab, "Editor")]),
         ]
         self.all_tabs = []
@@ -438,6 +443,11 @@ class MainWindow(QMainWindow):
         self.navigator.setCurrentWidget(self.flows_tab)
         if addresses:
             self.flows_tab.show_flows_for(addresses, port)
+
+    def show_traffic(self, key, port=""):
+        """The Traffic Graphs page, on a Network Map device's port (its first link's when no port's given)."""
+        self.traffic_tab.show_port(key, port)  # First: showing it then reads that port's history
+        self.navigator.setCurrentWidget(self.traffic_tab)
 
     def show_flow_config(self, routers=(), ports=(), destination=""):
         """The NetFlow Config page, sending flows to destination (this computer when not given) from routers."""
@@ -803,6 +813,20 @@ class MainWindow(QMainWindow):
         from .services_dialog import ServicesDialog  # Loads pywin32 only when it's needed
         ServicesDialog(self).exec_()
         self.service_banner.check()  # It may have updated some
+
+    def update_services(self, keys):
+        """The banner's Update Now: update these services with the settings they have, no window opened."""
+        from .. import services_catalog
+        from .service_updates import ServiceUpdater
+        if self.service_updater is None:
+            self.service_updater = ServiceUpdater(self, self)
+            self.service_updater.finished.connect(self.services_updated)
+        entries = [entry for entry in services_catalog.SERVICES if entry.key in keys]
+        if entries and self.service_updater.update(entries):
+            self.service_banner.set_updating(True)
+
+    def services_updated(self, problems):
+        self.service_banner.set_updating(False, problems)
 
     def show_syslog_collector(self):
         from .syslog_service_dialog import SyslogCollectorDialog  # Loads pywin32 only when it's needed

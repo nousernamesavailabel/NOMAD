@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 10
 PASSWORD_TRIES = 3
+REFUSED_PROMPT = "That didn't work."  # How the password prompt starts when it's asked again after a refusal
 READ_SIZE = 65536
 SERIAL_PARITY = {"None": serial.PARITY_NONE, "Even": serial.PARITY_EVEN, "Odd": serial.PARITY_ODD,
                  "Mark": serial.PARITY_MARK, "Space": serial.PARITY_SPACE}
@@ -366,7 +367,7 @@ class SshTransport(Transport):
                 return
             failed = True  # The saved password no longer works: ask for the new one
         for attempt in range(PASSWORD_TRIES):
-            prompt = "That didn't work. Try the password again:" if failed or attempt else \
+            prompt = f"{REFUSED_PROMPT} Try the password again:" if failed or attempt else \
                 f"Password for {username}@{session.host}:"
             answer = self.prompter.secret("Password", prompt, True)
             if answer is None:

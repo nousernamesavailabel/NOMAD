@@ -1,8 +1,9 @@
 """NOMAD's five Windows services in one list, for Tools > Services & Firewall (ui/services_dialog.py).
 
 Each service keeps its own module and setup dialog; this only says, for each one, how to tell its state, which
-firewall rules it opens on which ports, where its folder is, how to start, stop and remove it, and whether it can
-be installed without questions (with its usual settings, or the ones it was installed with before).
+firewall rules it opens on which ports, where its folder is, how to start, stop and remove it, whether it can be
+installed without questions (with its usual settings, or the ones it was installed with before), and how to update
+an installed one to this NOMAD with the settings it has (no window: update()).
 
 They're listed in the order they're best installed: the Tribe Server first (the Map Watcher needs a tribe), the
 Syslog Collector before the Map Watcher (so it has UDP 514 when the Map Watcher starts, and the Map Watcher reads
@@ -26,6 +27,11 @@ class ServiceEntry:
     uninstall: object  # () -> None
     install_quietly: object = None  # () -> None, or None: it's set up in its own dialog
     dialog: str = ""  # The main window's method that opens its dialog
+    update_quietly: object = None  # () -> None: run this NOMAD with the settings it has (install_quietly if None)
+
+    def update(self):
+        """Point the installed service at this NOMAD and start it again, keeping its settings (administrator)."""
+        (self.update_quietly or self.install_quietly)()
 
 
 def _module(name):
@@ -63,6 +69,10 @@ def _tribe_firewall():
 
 def _tribe_uninstall():
     _module("ipam.service").uninstall()
+
+
+def _tribe_update():
+    _module("ipam.service").install()  # No port: the one it has
 
 
 # --------------------------------------------------------------------- Syslog Collector
@@ -111,6 +121,11 @@ def _watcher_firewall():
     return {rule: (port, (UDP,)) for rule, port in _watcher().FIREWALL_RULES.items()}
 
 
+def _watcher_update():
+    module = _watcher()
+    module.install(module.load_config())  # Its maps, copies and logins as they are
+
+
 # --------------------------------------------------------------------- NOMAD Dashboard
 
 def _dashboard():
@@ -123,11 +138,17 @@ def _dashboard_firewall():
     return {module.FIREWALL_RULE: (config["port"] if config else None, (TCP,))}
 
 
+def _dashboard_update():
+    module = _dashboard()
+    module.install(module.load_config())
+
+
 SERVICES = [
     ServiceEntry("tribe", "Tribe Server",
                  "Shares the tribe's IP addresses and network maps with NOMAD on every laptop. Install it on one "
                  "computer that's always on.",
-                 _tribe_spec, _tribe_folder, _tribe_firewall, _tribe_uninstall, dialog="show_tribe_management"),
+                 _tribe_spec, _tribe_folder, _tribe_firewall, _tribe_uninstall, dialog="show_tribe_management",
+                 update_quietly=_tribe_update),
     ServiceEntry("syslog", "Syslog Collector",
                  "Keeps every syslog message devices send to this computer, for everyone using NOMAD on it.",
                  lambda: _syslog().spec(), lambda: _syslog().collector_dir(), _syslog_firewall,
@@ -140,12 +161,13 @@ SERVICES = [
                  "Watches the tribe's maps for new switches, access points and hosts, even when nobody has NOMAD "
                  "open. Needs a tribe.",
                  lambda: _watcher().spec(), lambda: _watcher().watcher_dir(), _watcher_firewall,
-                 lambda: _watcher().uninstall(), dialog="show_map_watcher"),
+                 lambda: _watcher().uninstall(), dialog="show_map_watcher", update_quietly=_watcher_update),
     ServiceEntry("dashboard", "NOMAD Dashboard",
                  "A read-only web site showing the network's state to people without NOMAD. Install it on the "
                  "computer with the Map Watcher and the collectors.",
                  lambda: _dashboard().spec(), lambda: _dashboard().dashboard_dir(), _dashboard_firewall,
-                 lambda: _dashboard().uninstall(), dialog="show_dashboard_service"),
+                 lambda: _dashboard().uninstall(), dialog="show_dashboard_service",
+                 update_quietly=_dashboard_update),
 ]
 
 

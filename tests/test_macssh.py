@@ -200,8 +200,19 @@ def test_batch_prompter_never_asks():
     assert macssh.BatchPrompter(trust_new=True).host_key("h", 22, "k", "f", False, "") == "trust"
     assert macssh.BatchPrompter(trust_new=True).host_key("h", 22, "k", "f", True, "old") == "cancel"
     assert prompter.secret("Password", "Password for x:", True) == ("pw", False)
-    assert prompter.secret("Password", "That didn't work", True) is None  # Given once only
+    assert prompter.secret("Password", "That didn't work. Try the password again:", True) is None  # Given once only
+    assert "refused" in prompter.problem
     assert prompter.username("h") is None
+
+
+def test_batch_prompter_says_a_refused_password_was_refused():
+    """A saved password the device turns down isn't reported as one NOMAD doesn't have."""
+    missing = macssh.BatchPrompter()
+    assert missing.secret("Password", "Password for admin@r2:", True) is None
+    assert "doesn't have" in missing.problem
+    refused = macssh.BatchPrompter()
+    assert refused.secret("Password", "That didn't work. Try the password again:", True) is None
+    assert "refused" in refused.problem and "doesn't have" not in refused.problem
 
 
 def test_logins_prefer_the_switchs_saved_session():
