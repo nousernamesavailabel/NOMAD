@@ -6,6 +6,11 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.10.4] - 2026-11-23
+
+### Changed
+- **The dashboard's Devices page shows Site, Building and Room in their own columns**, so each can be filtered and sorted on its own (the funnel in each header). They replace the one Site / Building / Room column. A device's groups go in the column of their kind: a building in no site leaves Site empty. The Devices CSV has the three columns too. The Overview's narrow Down now panel keeps the one combined column. `views.place_of` (replaces `site_of`); the Sites page still gives a building or room in no site its own tile.
+
 ## [2.10.3] - 2026-11-23
 
 ### Added

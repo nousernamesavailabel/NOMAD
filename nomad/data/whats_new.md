@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.10.4] - 2026-11-23
+
+- **Changed:** the NOMAD Dashboard's **Devices** page shows **Site**, **Building** and **Room** in separate columns, so you can filter or sort by each one. The Devices CSV has them as separate columns too. Update the NOMAD Dashboard service to get it.
+
 ## [2.10.3] - 2026-11-23
 
 - **New:** config backups now work for Palo Alto firewalls. NOMAD keeps their configuration as set commands, one setting per line, so the Editor's Compare shows exactly what changed. Before, the backup failed right after logging in. Restart the Map Watcher service to have it back up Palo Altos too.

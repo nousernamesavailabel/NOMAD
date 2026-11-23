@@ -39,9 +39,13 @@ def device_status(snapshot, map_id, key):
     return row["status"], row
 
 
-def site_of(network_map, key):
-    path = network_map.group_path(key)
-    return path[0].name if path else ""
+def place_of(network_map, key):
+    """{"site", "building", "room"}: the names of the groups a device is in, by their kind ("" where it's in none)."""
+    place = {"site": "", "building": "", "room": ""}
+    for group in network_map.group_path(key):
+        if group.kind in place:
+            place[group.kind] = group.name
+    return place
 
 
 def utilization(rate):
@@ -100,7 +104,7 @@ def device_rows(snapshot):
             uptimes = {name: snapshot.uptime.get(name, {}).get((entry.id, key)) for name in ("24h", "7d", "30d")}
             rows.append({
                 "map_id": entry.id, "map": entry.name, "key": key, "name": device.label, "address": device.mgmt_ip,
-                "kind": device.kind, "platform": device.platform, "site": site_of(network_map, key),
+                "kind": device.kind, "platform": device.platform, **place_of(network_map, key),
                 "group": network_map.device_group_label(key), "status": status, "status_text": STATUS_TEXT[status],
                 "since": row["since"] if row else None, "exact": bool(row.get("exact", True)) if row else True,
                 "checked": row["checked"] if row else None, "rtt": row["rtt"] if row else None,
@@ -135,8 +139,9 @@ def sites(snapshot, now=None):
     rows = device_rows(snapshot)
     tiles = {}
     for row in rows:
-        tile = tiles.setdefault((row["map_id"], row["site"]), {"map_id": row["map_id"], "map": row["map"],
-                                                               "site": row["site"] or "(no site)", "devices": []})
+        outer = row["site"] or row["building"] or row["room"]  # A building or room in no site gets its own tile
+        tile = tiles.setdefault((row["map_id"], outer), {"map_id": row["map_id"], "map": row["map"],
+                                                         "site": outer or "(no site)", "devices": []})
         tile["devices"].append(row)
     result = []
     for tile in tiles.values():
@@ -644,9 +649,9 @@ def csv_table(name, snapshot, history=None, engine=None, query=None):
     query = query or {}
     if name == "devices":
         rows = device_rows(snapshot)
-        header = ["Map", "Site / Building / Room", "Name", "Address", "Kind", "Status", "Since", "Response (ms)",
+        header = ["Map", "Site", "Building", "Room", "Name", "Address", "Kind", "Status", "Since", "Response (ms)",
                   "Checked from", "Problem", "Uptime 24 h %", "Uptime 7 d %", "Uptime 30 d %"]
-        body = [[row["map"], row["group"], row["name"], row["address"], row["kind"], row["status_text"],
+        body = [[row["map"], row["site"], row["building"], row["room"], row["name"], row["address"], row["kind"], row["status_text"],
                  _when(row["since"]), row["rtt"] if row["rtt"] is not None else "", row["via"], row["problem"],
                  row["uptime_24h"], row["uptime_7d"], row["uptime_30d"]] for row in rows]
     elif name == "events":

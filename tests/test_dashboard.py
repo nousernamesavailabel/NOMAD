@@ -296,6 +296,26 @@ def test_pages_show_devices_sites_and_the_map():
     assert not views.overview(snapshot, now=5000.0)["freshness"]["watcher"]["ok"]  # It stopped checking
 
 
+def test_device_rows_have_site_building_and_room_in_their_own_columns():
+    network_map = small_map()
+    network_map.groups += [Group("building:a", "Building A", kind="building", parent="site:hq"),
+                           Group("room:1", "Room 1", kind="room", parent="building:a"),
+                           Group("building:b", "Building B", kind="building")]  # In no site
+    network_map.group_of = {"r1": "room:1", "s1": "site:hq", "s2": "building:b"}
+    snapshot = snapshot_of(network_map)
+    rows = {row["key"]: row for row in views.device_rows(snapshot)}
+    assert [rows["r1"][name] for name in ("site", "building", "room")] == ["HQ", "Building A", "Room 1"]
+    assert [rows["s1"][name] for name in ("site", "building", "room")] == ["HQ", "", ""]
+    assert [rows["s2"][name] for name in ("site", "building", "room")] == ["", "Building B", ""]
+    assert rows["r1"]["group"] == "HQ / Building A / Room 1"  # Still there for the Overview's Down now
+    tiles = {tile["site"]: tile["total"] for tile in views.sites(snapshot, now=1000.0)["sites"]}
+    assert tiles == {"HQ": 2, "Building B": 1}  # A building in no site keeps its own tile
+    _, text = views.csv_table("devices", snapshot)
+    header, *lines = text.splitlines()
+    assert header.startswith("Map,Site,Building,Room,Name")
+    assert any(line.startswith("Campus,HQ,Building A,Room 1,R1") for line in lines)
+
+
 def test_hosts_per_subnet_count_each_address_once_from_every_source():
     network_map = small_map()
     snapshot = snapshot_of(network_map)

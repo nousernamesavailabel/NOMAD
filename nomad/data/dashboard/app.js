@@ -375,7 +375,9 @@
     {key: "address", label: "Address", render: (r) => h("span", {class: "mono"}, r.address)},
     {key: "kind", label: "Kind"},
     {key: "map", label: "Map"},
-    {key: "group", label: "Site / Building / Room"},
+    {key: "site", label: "Site"},
+    {key: "building", label: "Building"},
+    {key: "room", label: "Room"},
     {key: "since", label: "For", render: (r) => r.stale_text ? r.stale_text : r.since ? fmtAgo(r.since) + (r.exact === false ? "+" : "") : "",
      value: (r) => r.since ? -r.since : null},
     {key: "rtt", label: "Response", number: true, render: (r) => r.rtt === null || r.rtt === undefined ? "" : `${r.rtt} ms`},
@@ -384,6 +386,9 @@
     {key: "uptime_7d", label: "Up 7 d", number: true, render: (r) => fmtPercent(r.uptime_7d)},
     {key: "uptime_30d", label: "Up 30 d", number: true, render: (r) => fmtPercent(r.uptime_30d)},
   ];
+  // The Overview's narrow Down now panel: the place in one column
+  const downColumns = [...deviceColumns.slice(0, 5), {key: "group", label: "Site / Building / Room"},
+    deviceColumns.find((column) => column.key === "since")];
 
   const pages = {
     overview(data) {
@@ -402,7 +407,7 @@
           stat("NetFlow (last hour)", data.flows.available ? fmtBytes(data.flows.bytes) : "–", "accent",
             "#traffic?at=netflow")),
         stacks(
-          panel("Down now", data.down.length ? table("ov-down", deviceColumns.slice(0, 7), data.down) :
+          panel("Down now", data.down.length ? table("ov-down", downColumns, data.down) :
             empty("Nothing is down.")),
           panel("Recent events", data.events.length ? h("div", {}, data.events.map((event) => h("div", {class: "event"},
             h("span", {class: `pill ${event.kind}`}, event.kind), " ", h("span", {class: "muted small"}, fmtTime(event.at)),
