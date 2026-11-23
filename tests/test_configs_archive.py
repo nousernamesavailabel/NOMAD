@@ -332,7 +332,7 @@ def test_service_config_carries_the_backup_login(tmp_path):
                                                 "label": "credential NetOps"})
     assert config["backups"] == {"username": "netops", "label": "credential NetOps", "password": "<pw>",
                                  "enable": "<en>", "trust_new": True, "credential_id": "", "devices": {},
-                                 "logins": {}, "signature": ""}
+                                 "logins": {}, "signature": "", "unreadable": []}
     made = watch_service.backup_runner(config, client=None, directory=tmp_path, unprotect=lambda text: text[1:-1])
     assert made.kind == archive.SERVICE and made.holder.endswith("-service")
     pusher = made.pusher_factory()

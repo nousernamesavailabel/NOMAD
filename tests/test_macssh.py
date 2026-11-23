@@ -215,6 +215,14 @@ def test_batch_prompter_says_a_refused_password_was_refused():
     assert "refused" in refused.problem and "doesn't have" not in refused.problem
 
 
+def test_batch_prompter_says_a_saved_password_cant_be_read_here():
+    """A session's password saved on another computer (or Windows account) is named, not called missing."""
+    prompter = macssh.BatchPrompter()
+    prompter.secret_unreadable("RM338", Exception("The saved password can't be read with this Windows account."))
+    assert prompter.secret("Password", "Password for admin@rm338:", True) is None
+    assert "RM338 can't be read on this computer" in prompter.problem and "doesn't have" not in prompter.problem
+
+
 def test_logins_prefer_the_switchs_saved_session():
     own = Session("sw2", host="sw2.corp.example", username="local-admin")
     logins = macssh.SshLogins([own], fallback=Session("", username="tacacs"))

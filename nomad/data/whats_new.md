@@ -4,6 +4,12 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.10.3] - 2026-11-23
+
+- **New:** config backups now work for Palo Alto firewalls. NOMAD keeps their configuration as set commands, one setting per line, so the Editor's Compare shows exactly what changed. Before, the backup failed right after logging in. Restart the Map Watcher service to have it back up Palo Altos too.
+- **Fixed:** when a backup can't use a saved session's password because it was saved on another computer or by another Windows account, it now says so and names the session. Before, it said it had no password. Open the session on this computer and type the password again.
+- **Fixed:** one saved password that can't be read on this computer no longer stops the Map Watcher service getting the other backup logins. The Editor's **Backups** tab names the ones it couldn't copy.
+
 ## [2.10.2] - 2026-11-22
 
 - **New:** every count at the top of the NOMAD Dashboard's Overview can now be clicked, as **Hosts seen** could. **Down**, **Up**, **Checking / can't check** and **Not monitored** open the Devices page showing just those devices. **Syslog errors** opens the new Syslog page, and **NetFlow** opens the Traffic page at its NetFlow top talkers. Update the NOMAD Dashboard service to get it.

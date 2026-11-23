@@ -61,6 +61,10 @@ class Prompter:
         """Ask for the master password so saved secrets can be used. True once unlocked, False if declined."""
         return False
 
+    def secret_unreadable(self, name, error):
+        """Told when the secret saved for name (a session or credential) can't be read here, such as one saved on
+        another computer or by another Windows account, just before it's asked for instead."""
+
     def save_secret(self, kind, value):
         """Remember a password ("password") or key passphrase ("passphrase") the user asked us to save."""
 
@@ -103,6 +107,7 @@ class Transport:
                 return None
         except CredentialError as error:
             log.warning("A saved secret for %s couldn't be read: %s", self.session.name, error)
+            getattr(self.prompter, "secret_unreadable", lambda *args: None)(self.session.name, error)
             return None
 
     def connect(self):

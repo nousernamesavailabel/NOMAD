@@ -6,6 +6,15 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.10.3] - 2026-11-23
+
+### Added
+- **Config backups of Palo Alto firewalls (PAN-OS).** Scheduled backups, Pull Config and Back Up Now read a PAN-OS firewall with `set cli pager off`, `set cli config-output-format set` and `show config running`, so the archive keeps its configuration as set commands, one setting per line, which compares well. Before, NOMAD typed `enable` at its `user@host>` prompt, which PAN-OS doesn't have, and the backup failed straight after logging in. A map device is known as PAN-OS from SNMP (`platform_for_device` maps `detect_platform`'s `panos`); one the archive doesn't know as PAN-OS (an older Tribe server, or a pull by address) is taken for it by its `user@host>` prompt. `text.PANOS` ("Palo Alto PAN-OS" in the platform lists), `platform_of` knows PAN-OS's set commands, XML and braces (a PAN-OS XML file is no longer taken for pfSense), `hostname_in` reads `set deviceconfig system hostname`. `pull.read_panos`, `configpush.NO_ENABLE_PROMPT` (no `enable` at a `user@host>` prompt). Fix commands aren't written for PAN-OS.
+
+### Fixed
+- **A backup whose saved password was saved on another computer says so.** A saved session's password is encrypted for the Windows account that saved it, so a sessions file brought from another computer can't be read on the Tribe server. Backups then said "it needs a password NOMAD doesn't have", although the session had one. Now they name the session and say to type its password again on this computer (`Prompter.secret_unreadable`, `BatchPrompter.unreadable`).
+- **One unreadable saved password no longer stops the Map Watcher service getting any backup logins.** Copying the backup logins to the service failed as a whole on the first password it couldn't read, so the service kept its old logins for every device. Now that login is left out (its devices use the usual login), the rest are copied, and the Editor's Backups tab names the ones left out until their passwords are typed again (`service_backups` "unreadable", kept in the service's config). A locked master password still asks for it as before.
+
 ## [2.10.2] - 2026-11-22
 
 ### Added

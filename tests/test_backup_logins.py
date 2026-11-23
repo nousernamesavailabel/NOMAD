@@ -83,3 +83,30 @@ def test_the_signature_changes_only_with_what_the_service_logs_in_with(tmp_path)
     assert usual_login is None and "10.100.2.1" in mapped
     backups = logins.service_backups(logins.service_plan(store, "", {}, DEVICES), lambda text: text)
     assert backups["username"] == "" and backups["password"] == ""
+
+
+def test_a_password_that_cant_be_read_here_leaves_only_its_login_out(tmp_path):
+    """A session saved on another computer doesn't stop the rest reaching the Map Watcher: its devices use the usual
+    login, and it's named so it can be typed again."""
+    import pytest
+    from nomad.terminal.credentials import CredentialError
+    from nomad.terminal.vault import VaultLocked
+    store, lab, usual, *_ = store_with(tmp_path)
+    plan = logins.service_plan(store, usual.id, {}, DEVICES)
+
+    def reveal(stored):
+        if stored == "<lab>":
+            raise CredentialError("The saved password can't be read with this Windows account.")
+        return stored.strip("<>")
+    backups = logins.service_backups(plan, reveal)
+    assert backups["unreadable"] == ["credential Lab Admin"]
+    assert lab.id not in backups["logins"] and "10.100.2.1" not in backups["devices"]
+    assert backups["password"] == "ops" and "10.0.0.7" in backups["devices"]
+    # The usual login itself unreadable: no usual login
+    backups = logins.service_backups(plan, lambda stored: reveal("<lab>") if stored == "<ops>" else stored)
+    assert backups["username"] == "" and backups["unreadable"] == ["credential NetOps"]
+
+    def locked(stored):
+        raise VaultLocked()
+    with pytest.raises(VaultLocked):  # A locked master password still asks for it
+        logins.service_backups(plan, locked)

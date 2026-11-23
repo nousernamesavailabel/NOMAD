@@ -174,15 +174,39 @@ def signature(plan, enable="", trust_new=True):
 
 
 def service_backups(plan, reveal, enable="", trust_new=True, signed=""):
-    """watch_service.make_config's backups from a service_plan, the passwords read with reveal(stored) (which may
-    raise VaultLocked or CredentialError). enable: as typed. signed: the plan's signature, kept in the config."""
+    """watch_service.make_config's backups from a service_plan, the passwords read with reveal(stored). enable: as
+    typed. signed: the plan's signature, kept in the config.
+
+    A locked master password (VaultLocked) is raised. A password that can't be read here (CredentialError: saved on
+    another computer or by another Windows account) leaves that login out instead, so the others still reach the
+    service: its devices fall back to the usual login, and "unreadable" names the logins left out."""
+    from ..terminal.vault import VaultLocked
     usual, mapped, logins = plan
+    unreadable = []
+
+    def read(stored, label):
+        try:
+            return reveal(stored)
+        except VaultLocked:
+            raise
+        except Exception as error:  # CredentialError, or anything else a bad saved secret raises
+            log.warning("Backup logins for the Map Watcher: the password of %s can't be read here: %s", label, error)
+            unreadable.append(label)
+            return None
+
     username, stored, label = usual if usual is not None else ("", "", "")
-    return {"username": username, "password": reveal(stored) if stored else "", "label": label, "enable": enable,
-            "trust_new": bool(trust_new), "credential_id": "", "devices": dict(mapped),
-            "logins": {key: {"username": user, "password": reveal(secret), "label": text}
-                       for key, (user, secret, text) in logins.items()},
-            "signature": signed}
+    password = read(stored, label) if stored else ""
+    if password is None:
+        username, password, label = "", "", ""
+    copied = {}
+    for key, (user, secret, text) in logins.items():
+        revealed = read(secret, text)
+        if revealed is not None:
+            copied[key] = {"username": user, "password": revealed, "label": text}
+    return {"username": username, "password": password, "label": label, "enable": enable,
+            "trust_new": bool(trust_new), "credential_id": "",
+            "devices": {device: key for device, key in mapped.items() if key in copied},
+            "logins": copied, "signature": signed, "unreadable": unreadable}
 
 
 class DeviceLogins:

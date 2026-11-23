@@ -123,7 +123,8 @@ def protect_backups(backups, protect):
             "trust_new": bool(backups.get("trust_new", True)), "credential_id": backups.get("credential_id", ""),
             "devices": {device: credential_id for device, credential_id in (backups.get("devices") or {}).items()
                         if credential_id in logins},
-            "logins": logins, "signature": backups.get("signature", "")}
+            "logins": logins, "signature": backups.get("signature", ""),
+            "unreadable": list(backups.get("unreadable") or [])}
 
 
 def config_timers(config):

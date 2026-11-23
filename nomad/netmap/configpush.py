@@ -29,6 +29,8 @@ LINE_TIMEOUT = 30  # Seconds for one configuration line (creating a VLAN can tak
 ENABLE_TIMEOUT = 15
 PASSWORD_PROMPT = re.compile(r"(?:password|secret)\s*:\s*$", re.IGNORECASE)
 CONFIRM_PROMPT = re.compile(r"\[(?:confirm|yes/no|y/n)\]\s*:?\s*$", re.IGNORECASE)
+# user@host> (Palo Alto PAN-OS, Junos): no enable there, and Cisco hostnames can't hold an @
+NO_ENABLE_PROMPT = re.compile(r"^[^\s@]+@\S+>$")
 ROLLBACK_NOTE = re.compile(r"rollback|backing up|archive|confirmed change", re.IGNORECASE)
 ROLLED_BACK = re.compile(r"rolling to|rollback done", re.IGNORECASE)  # What configure revert now says when it does
 NOTHING_PENDING = re.compile(r"no rollback confirmed change pending", re.IGNORECASE)
@@ -48,7 +50,7 @@ class ConfigShell(macssh.SshShell):
 
     def open(self):
         super().open()
-        if self.prompt.endswith(">"):
+        if self.prompt.endswith(">") and not NO_ENABLE_PROMPT.match(self.prompt):
             self.enable()
 
     def enable(self):

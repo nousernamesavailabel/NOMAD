@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 
 from ..netmap import vpn
 
-IOS, NXOS, ASA, ARUBA, PFSENSE, OTHER = "ios", "nxos", "asa", "aruba", "pfsense", "other"
+IOS, NXOS, ASA, ARUBA, PFSENSE, PANOS, OTHER = "ios", "nxos", "asa", "aruba", "pfsense", "panos", "other"
 PLATFORM_NAMES = {IOS: "Cisco IOS / IOS XE", NXOS: "Cisco NX-OS", ASA: "Cisco ASA", ARUBA: "ArubaOS",
-                  PFSENSE: "pfSense", OTHER: "Other"}
+                  PFSENSE: "pfSense", PANOS: "Palo Alto PAN-OS", OTHER: "Other"}
 FIXABLE = {IOS, NXOS, ASA}  # The platforms NOMAD writes fix commands for
 
 SKIPPED = re.compile(r"^(?:!|end$|exit$|exit-[a-z-]+$)")
@@ -99,7 +99,12 @@ def key_of(line, parent_line=""):
 def platform_of(text):
     """Which platform a configuration came from, by what it says."""
     head = (text or "")[:4000]
-    if re.search(r"<\?xml|<pfsense>", head):
+    if "<pfsense>" in head:
+        return PFSENSE
+    if re.search(r"^set (?:mgt-config|deviceconfig|shared|network|vsys|rulebase) |<config version=|"
+                 r"^\s*(?:mgt-config|deviceconfig) \{", head, re.MULTILINE):
+        return PANOS  # Set commands, XML or PAN-OS's own braces
+    if "<?xml" in head:
         return PFSENSE
     if re.search(r"^!Command: show (?:running|startup)-config|^!Time:|^feature \S+|^!Running configuration last done",
                  head, re.MULTILINE):
@@ -123,11 +128,13 @@ def platform_for_device(device):
     if device.kind == model.WLC or "arubaos" in (device.sys_descr or "").lower():
         return ARUBA
     found = detect_platform(device)
-    return {"ios": IOS, "nxos": NXOS, "asa": ASA}.get(found, IOS if not found else OTHER)
+    return {"ios": IOS, "nxos": NXOS, "asa": ASA, "panos": PANOS}.get(found, IOS if not found else OTHER)
 
 
 def hostname_in(text):
-    """The hostname a configuration sets (hostname x, or pfSense's <hostname>), or ""."""
+    """The hostname a configuration sets (hostname x, PAN-OS's set deviceconfig system hostname x, or the <hostname>
+    of pfSense's and PAN-OS's XML), or ""."""
     found = re.search(r"^hostname\s+(\S+)", text or "", re.MULTILINE) or \
+        re.search(r"^set deviceconfig system hostname\s+(\S+)", text or "", re.MULTILINE) or \
         re.search(r"<hostname>([^<]+)</hostname>", text or "")
     return found.group(1).strip().strip('"') if found else ""

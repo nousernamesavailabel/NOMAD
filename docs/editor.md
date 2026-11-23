@@ -124,6 +124,12 @@ The Map Watcher service can run backups too, with nobody signed in. In **Tools**
 
 When you change a login on the **Backups** tab, NOMAD gives the service the change straight away. It also looks for changed saved sessions and credentials when it starts and while the **Backups** tab is open. If the master password is locked, the **Backups** tab shows a link to update the service. Updating the service needs NOMAD running as administrator.
 
+Saved passwords are encrypted for the Windows account that saved them. If your saved sessions came from another computer, their passwords can't be read on this one. A backup that needs one says which session it is, and the **Backups** tab lists the ones the service couldn't get. Open each session on this computer and type its password again. Until then, the service uses the usual login for those devices.
+
+### Palo Alto firewalls
+
+NOMAD backs up a Palo Alto (PAN-OS) firewall as set commands, one setting per line, so **Compare** shows exactly what changed. It turns the pager off and runs `show config running`. The login needs an admin role that's allowed the CLI. There's no enable password on PAN-OS. NOMAD doesn't write fix commands for PAN-OS.
+
 ### Devices that need a different login
 
 Some devices may not take the usual login, such as a branch router with its own local account. To give a device its own login:

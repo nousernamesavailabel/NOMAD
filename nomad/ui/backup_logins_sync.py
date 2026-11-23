@@ -10,6 +10,7 @@ service instead of asking. Writing the service's config needs administrator righ
 
 The Map Watcher's window shows what the service logs in with and links here; it no longer has logins of its own.
 """
+import html
 import logging
 
 from PyQt5.QtCore import QObject
@@ -28,6 +29,17 @@ UPDATE_LINK = "update-service-logins"
 def machine_protect(text):
     from ..terminal.credentials import protect
     return protect(text, machine=True)
+
+
+def unreadable_note(backups):
+    """What to say of the logins left out of the service's copy because their passwords can't be read here, or ""."""
+    labels = [html.escape(label) for label in dict.fromkeys((backups or {}).get("unreadable") or [])]
+    if not labels:
+        return ""
+    shown = ", ".join(labels[:4]) + (f" and {len(labels) - 4} more" if len(labels) > 4 else "")
+    return (f"The Map Watcher service got every login except {shown}: the saved password can't be read on this "
+            "computer (it was saved on another computer or by another Windows account). Open it here and type the "
+            "password again. Until then, those devices use the usual login.")
 
 
 class BackupLoginSync(QObject):
@@ -189,9 +201,8 @@ class BackupLoginSync(QObject):
         try:
             return backup_logins.service_backups(plan, self.store.vault.reveal, self.enable_text(), self.trust_new(),
                                                  signed)
-        except Exception as error:  # A password saved by another account or master password
-            self.problem = f"Couldn't read a saved password: {error}"
-            log.warning("Backup logins for the Map Watcher: %s", self.problem)
+        except VaultLocked:
+            self.problem = "locked"
             return None
 
     def update_service(self, ask=False):
@@ -207,7 +218,7 @@ class BackupLoginSync(QObject):
             self.show_note(self.problem)
             return
         if "keep" in backups:
-            self.show_note("")
+            self.show_note(unreadable_note(old), "warning")
             return
         from ..netmap import watch_service
         config["backups"] = watch_service.protect_backups(backups, machine_protect)
@@ -218,9 +229,10 @@ class BackupLoginSync(QObject):
             return
         log.info("Gave the Map Watcher service the backup logins (%d devices with their own or a saved session's)",
                  len(backups["devices"]))
-        self.show_note("updated")
+        note = unreadable_note(backups)
+        self.show_note(note or "updated", "warning")
 
-    def show_note(self, problem):
+    def show_note(self, problem, level="error"):
         label = self.editor.backups_panel.service_note
         if problem == "locked":
             set_hint(label, "The Map Watcher service on this computer still has the old backup logins: they need the "
@@ -229,7 +241,7 @@ class BackupLoginSync(QObject):
         elif problem == "updated":
             set_hint(label, "The Map Watcher service on this computer now logs in the same way.", "success")
         elif problem:
-            set_hint(label, problem, "error")
+            set_hint(label, problem, level)
         else:
             label.setText("")
 

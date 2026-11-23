@@ -88,6 +88,12 @@ def test_parse_keeps_line_numbers_and_modes():
     assert family.children[0].path == ["router bgp 65000", "address-family ipv4"]
 
 
+PANOS_SET = ("set mgt-config users admin phash *\n"
+             "set deviceconfig system hostname PA-FW1\n"
+             "set deviceconfig system ip-address 10.10.10.52\n"
+             "set network interface ethernet ethernet1/1 layer3 ip 203.0.113.2/30\n")
+
+
 def test_platform_of_texts():
     assert text.platform_of(IOS) == text.IOS
     assert text.platform_of("!Command: show running-config\n!Time: x\nfeature bgp\n") == text.NXOS
@@ -95,6 +101,12 @@ def test_platform_of_texts():
     assert text.platform_of('<?xml version="1.0"?>\n<pfsense>\n') == text.PFSENSE
     assert text.hostname_in(IOS) == "R1"
     assert text.hostname_in("<pfsense><system><hostname>fw1</hostname>") == "fw1"
+    # Palo Alto PAN-OS in set commands, XML (not taken for pfSense) and its braces
+    assert text.platform_of(PANOS_SET) == text.PANOS
+    assert text.platform_of('<?xml version="1.0"?>\n<config version="10.2.0" urldb="paloaltonetworks">\n') == \
+        text.PANOS
+    assert text.platform_of("config {\n  mgt-config {\n    users {\n") == text.PANOS
+    assert text.hostname_in(PANOS_SET) == "PA-FW1"
 
 
 def test_noise_lines_and_fingerprint():
@@ -362,6 +374,36 @@ def test_pull_reports_problems():
     assert "Authentication failed" in pull.pull_device(FakePusher(None), "10.0.0.1").problem
     refused = pull.pull_device(FakePusher(FakeShell({})), "10.0.0.1", platform=text.IOS)
     assert not refused.ok and "wouldn't show" in refused.problem
+
+
+def test_pull_palo_alto_as_set_commands():
+    shell = FakeShell({"set cli pager off": "", "set cli config-output-format set": "",
+                       "show config running": "\n" + PANOS_SET + "\n"})
+    result = pull.pull_device(FakePusher(shell), "10.10.10.52", platform=text.PANOS,
+                              which=(pull.RUNNING, pull.STARTUP))
+    assert shell.ran == ["set cli pager off", "set cli config-output-format set", "show config running"]
+    assert result.ok and result.platform == text.PANOS
+    assert result.texts == {pull.RUNNING: PANOS_SET}
+
+
+def test_pull_takes_a_user_at_host_prompt_for_palo_alto():
+    """A device the archive doesn't know as PAN-OS (an older Tribe server, or pulled by address) still is by its
+    prompt."""
+    shell = FakeShell({"set cli pager off": "", "set cli config-output-format set": "",
+                       "show config running": PANOS_SET})
+    shell.prompt = "jared.polack@PA-FW1>"
+    result = pull.pull_device(FakePusher(shell), "10.10.10.52", platform=text.OTHER)
+    assert result.ok and result.platform == text.PANOS and "show running-config" not in shell.ran
+    refused = FakeShell({"show config running": "Server error : not allowed"})
+    refused.prompt = "viewer@PA-FW1>"
+    result = pull.pull_device(FakePusher(refused), "10.10.10.52")
+    assert not result.ok and "wouldn't show its configuration" in result.problem
+
+
+def test_no_enable_at_a_user_at_host_prompt():
+    from nomad.netmap.configpush import NO_ENABLE_PROMPT
+    assert NO_ENABLE_PROMPT.match("jared.polack@PA-FW1>") and NO_ENABLE_PROMPT.match("admin@PA-VM(active)>")
+    assert not NO_ENABLE_PROMPT.match("SW1>") and not NO_ENABLE_PROMPT.match("(wlc) >")
 
 
 def test_pull_aruba_turns_paging_off():

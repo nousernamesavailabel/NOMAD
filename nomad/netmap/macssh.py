@@ -218,6 +218,10 @@ class BatchPrompter(Prompter):
         self.trust_new, self.password = trust_new, password
         self.given = False
         self.problem = ""
+        self.unreadable = ""  # The saved login whose password can't be read on this computer
+
+    def secret_unreadable(self, name, error):
+        self.unreadable = name or "its saved login"
 
     def host_key(self, host, port, key_type, fingerprint, changed, old_fingerprint):
         if changed:
@@ -238,6 +242,10 @@ class BatchPrompter(Prompter):
             # A saved (or typed) password was tried and refused: not one that's missing
             self.problem = ("it refused the user name and password NOMAD logged in with: check the login used "
                             "for it (its credential, its own login or its saved session).")
+        elif self.unreadable:
+            self.problem = (f"the password saved in {self.unreadable} can't be read on this computer (it was saved "
+                            "on another computer or by another Windows account). Open it here and type the "
+                            "password again.")
         else:
             self.problem = ("it needs a password NOMAD doesn't have: save one in the credential or the switch's "
                             "session.")

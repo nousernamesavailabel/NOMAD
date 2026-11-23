@@ -1,8 +1,10 @@
 """Reading a device's configuration over SSH, and who changed it last.
 
 Cisco IOS / IOS XE, NX-OS and ASA: show running-config (and show startup-config when asked). ArubaOS: no paging, then
-show running-config. pfSense: cat /conf/config.xml, run on its own (not typed at a prompt: its shell's prompt isn't
-one NOMAD knows, and the admin user gets the console menu instead of a shell).
+show running-config. Palo Alto PAN-OS: pager off and set-command output, then show config running (no enable there;
+a device whose platform isn't known is taken for PAN-OS by its user@host> prompt). pfSense: cat /conf/config.xml, run
+on its own (not typed at a prompt: its shell's prompt isn't one NOMAD knows, and the admin user gets the console menu
+instead of a shell).
 
 Who changed it: the running-config's "! Last configuration change at ... by user" line; for IOS without a user there,
 the last entry of show archive log config all (when archive logging is on); pfSense's last <revision> user."""
@@ -22,6 +24,10 @@ SHOW = {RUNNING: "show running-config", STARTUP: "show startup-config"}
 COMMANDS = {text.IOS: SHOW, text.NXOS: SHOW, text.ASA: SHOW, text.ARUBA: {RUNNING: "show running-config"},
             text.OTHER: {RUNNING: "show running-config"}}
 PFSENSE_COMMAND = "cat /conf/config.xml"
+PANOS_SETUP = ("set cli pager off", "set cli config-output-format set")
+PANOS_COMMAND = "show config running"
+PANOS_TIMEOUT = 300  # A big firewall's rules take a while
+PANOS_CONFIG = re.compile(r"\bdeviceconfig\b")  # In every format PAN-OS shows its configuration in
 EXEC_TIMEOUT = 60
 REFUSED = re.compile(r"%\s*(?:Permission denied|Authorization failed)|Command authorization failed|"
                      r"not authorized|startup-config is not present|No configuration present", re.IGNORECASE)
@@ -86,6 +92,8 @@ def pull_device(pusher, address, names=(), platform="", which=(RUNNING,), keep=F
         result.problem = f"Couldn't log in: {pusher.problems.get(address) or 'no reason given'}"
         return result
     try:
+        if platform == text.PANOS or (platform in ("", text.OTHER) and panos_prompt(shell)):
+            return read_panos(shell, result)
         if platform == text.ARUBA:
             shell.run("no paging")
         commands = COMMANDS.get(platform) or SHOW
@@ -114,6 +122,26 @@ def pull_device(pusher, address, names=(), platform="", which=(RUNNING,), keep=F
     finally:
         if not keep:
             pusher.forget(address)
+    return result
+
+
+def panos_prompt(shell):
+    """Whether a shell's prompt is PAN-OS's user@host> (Cisco hostnames can't hold an @)."""
+    from ..netmap.configpush import NO_ENABLE_PROMPT
+    return bool(NO_ENABLE_PROMPT.match(getattr(shell, "prompt", "") or ""))
+
+
+def read_panos(shell, result):
+    """A Palo Alto's running configuration as set commands (XML if it won't give those), into result."""
+    result.platform = text.PANOS
+    for setup in PANOS_SETUP:
+        shell.run(setup)
+    output = shell.run(PANOS_COMMAND, timeout=PANOS_TIMEOUT)
+    if not PANOS_CONFIG.search(output or ""):
+        result.problem = ("It wouldn't show its configuration (show config running): the login's admin role needs "
+                          "to be allowed the CLI and configuration.")
+        return result
+    result.texts[RUNNING] = clean(output)
     return result
 
 
