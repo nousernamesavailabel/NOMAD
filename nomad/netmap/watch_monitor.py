@@ -35,7 +35,7 @@ OLDER_HISTORY_META = "older_history_taken"
 DISCOVER_EVERY = 600  # Seconds between looks over the routers for NOMAD's IP SLA probes
 ACCESS_RETRY = 900  # Seconds before a device no credential answered is asked again
 STEP_SECONDS = 2
-MONITOR_DEFAULTS = {"enabled": True, "interval": 60, "counter_interval": 300, "sweep_hours": 4,
+MONITOR_DEFAULTS = {"enabled": True, "interval": 60, "counter_interval": 300, "sweep_hours": 1,
                     "sweep_max_prefix": 22}
 INTERVALS = [30, 60, 120, 300, 600]  # Seconds between pings, on offer
 COUNTER_INTERVALS = [60, 120, 300, 600, 900]  # Seconds between counter reads, on offer

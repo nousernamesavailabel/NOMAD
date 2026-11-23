@@ -170,4 +170,4 @@ def test_sweeps_record_what_answered_in_the_tribe(tmp_path):
 def test_monitor_settings_are_kept_in_bounds():
     settings = watch_monitor.monitor_settings({"monitor": {"interval": 1, "sweep_max_prefix": 8,
                                                            "sweep_hours": "x"}})
-    assert settings["interval"] == 10 and settings["sweep_max_prefix"] == 16 and settings["sweep_hours"] == 4
+    assert settings["interval"] == 10 and settings["sweep_max_prefix"] == 16 and settings["sweep_hours"] == 1

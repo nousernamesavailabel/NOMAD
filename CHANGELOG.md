@@ -6,6 +6,11 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.10.1] - 2026-11-22
+
+### Changed
+- **The Map Watcher sweeps every hour by default instead of every 4 hours.** The dashboard's **Hosts seen** (and the Hosts page) count addresses seen in the last hour, so hosts found only by a sweep dropped out for three hours of every four unless someone swept by hand. A Watcher whose settings were saved with another interval keeps it (`MONITOR_DEFAULTS["sweep_hours"]`).
+
 ## [2.10.0] - 2026-11-22
 
 ### Added

@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.10.1] - 2026-11-22
+
+- **Changed:** the Map Watcher now sweeps the maps' subnets every hour by default, so the NOMAD Dashboard's **Hosts seen** count no longer drops between sweeps. If you already set a sweep interval, it is kept. Change it under the Map Watcher's monitoring settings.
+
 ## [2.10.0] - 2026-11-22
 
 - **New:** right-click devices in the Editor's **Archive** list that are no longer on a map for **Merge Into...**, which moves their saved configurations to another device, or **Forget...**, which removes them. Update the tribe server to use these on a tribe.

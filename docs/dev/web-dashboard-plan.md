@@ -68,7 +68,7 @@ collected, and from the tribe.
     are pruned, because the dashboard keeps its own history.
   - `MonitorRunner`: a thread of its own, so a long crawl doesn't hold up pings. It pings every
     `monitor_interval` (default 60 s) and reads counters every `counter_interval` (default 300 s).
-  - `SweepRunner`: a thread of its own. Every `sweep_hours` (default 4, 0 is off) it sweeps the IPv4 subnets of each
+  - `SweepRunner`: a thread of its own. Every `sweep_hours` (default 1, 0 is off) it sweeps the IPv4 subnets of each
     watched map's IPAM network that are no larger than `/sweep_max_prefix` (default /22). It pings without name
     lookups, with ARP only on directly connected subnets and only for hosts that answered ping (so proxy ARP can't
     fake a host). It saves results through a `TeamStore` copy in the watcher's folder (`record_sightings` +
