@@ -100,6 +100,8 @@ class DashboardServer:
             return views.devices(snapshot)
         if name == "events":
             return views.events(snapshot, engine.history)
+        if name == "syslog":
+            return views.syslog(snapshot, query.get("level", ""))
         if name == "traffic":
             return views.traffic(snapshot)
         if name == "vpns":

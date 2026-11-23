@@ -4,6 +4,11 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.10.2] - 2026-11-22
+
+- **New:** every count at the top of the NOMAD Dashboard's Overview can now be clicked, as **Hosts seen** could. **Down**, **Up**, **Checking / can't check** and **Not monitored** open the Devices page showing just those devices. **Syslog errors** opens the new Syslog page, and **NetFlow** opens the Traffic page at its NetFlow top talkers. Update the NOMAD Dashboard service to get it.
+- **New:** the NOMAD Dashboard has a **Syslog** page. It shows how many messages each device sent in the last day, as the Events page did, and you can choose to show only the devices that sent an error or a warning.
+
 ## [2.10.1] - 2026-11-22
 
 - **Changed:** the Map Watcher now sweeps the maps' subnets every hour by default, so the NOMAD Dashboard's **Hosts seen** count no longer drops between sweeps. If you already set a sweep interval, it is kept. Change it under the Map Watcher's monitoring settings.

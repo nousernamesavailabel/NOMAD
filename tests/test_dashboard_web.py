@@ -87,7 +87,7 @@ def test_signing_in_needs_the_header_and_the_right_password(dashboard):
 def test_pages_exports_and_the_stream_once_signed_in(dashboard):
     _, headers, _ = sign_in(dashboard)
     cookie = {"Cookie": cookie_of(headers)}
-    for page in ("overview", "devices", "events", "traffic", "vpns", "ipam", "hosts", "sites", "map", "trends"):
+    for page in ("overview", "devices", "events", "syslog", "traffic", "vpns", "ipam", "hosts", "sites", "map", "trends"):
         status, headers, body = ask(dashboard, "GET", f"/api/page/{page}", headers=cookie)
         assert status == 200, page
         assert headers["Cache-Control"] == "no-store"

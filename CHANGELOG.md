@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.10.2] - 2026-11-22
+
+### Added
+- **Every count at the top of the dashboard's Overview opens what's behind it, as Hosts seen already did.** Down, Up and Not monitored open the Devices page filtered to that status. Checking / can't check opens it with a new **Checking or can't check** filter that shows both, so the list matches the count (`status=unknown,cant`). Syslog errors opens the new Syslog page at **Error or worse**, and NetFlow opens the Traffic page scrolled to its NetFlow section (`#traffic?at=netflow`, `state.jump`).
+- **A Syslog page on the NOMAD Dashboard.** The per-sender syslog counts moved off the Events page onto their own page, with a severity choice: every sender, Warning or worse, or Error or worse. Error or worse lists exactly the senders behind the Overview's Syslog errors count. The CSV follows the choice. Counts only, as before. `views.syslog`, `syslog_rows(level)`, `syslog_severe`, `SYSLOG_LEVELS`; `/api/page/syslog?level=`, `/export/syslog.csv?level=`.
+
 ## [2.10.1] - 2026-11-22
 
 ### Changed

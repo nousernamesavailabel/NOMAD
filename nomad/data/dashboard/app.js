@@ -368,6 +368,7 @@
   // ----------------------------------------------------------------- Pages
 
   const DEVICE_STATUS_ORDER = {down: 0, cant: 1, unknown: 2, up: 3, unmonitored: 4};
+  const CHECKING = "unknown,cant";  // The Devices filter for the Overview's Checking / can't check count
   const deviceColumns = [
     {key: "status", label: "Status", render: (r) => status(r.status, r.status_text), value: (r) => DEVICE_STATUS_ORDER[r.status]},
     {key: "name", label: "Name"},
@@ -391,13 +392,15 @@
         ...notices(data.freshness),
         head("Overview", `${data.total} devices on ${data.maps.length} tribe map${data.maps.length === 1 ? "" : "s"}`),
         h("div", {class: "stats"},
-          stat("Down", c.down, c.down ? "down" : "up"),
-          stat("Up", c.up, "up"),
-          stat("Checking / can't check", c.unknown + c.cant, c.unknown + c.cant ? "warn" : ""),
-          stat("Not monitored", c.unmonitored),
+          stat("Down", c.down, c.down ? "down" : "up", "#devices?status=down"),
+          stat("Up", c.up, "up", "#devices?status=up"),
+          stat("Checking / can't check", c.unknown + c.cant, c.unknown + c.cant ? "warn" : "",
+            `#devices?status=${CHECKING}`),
+          stat("Not monitored", c.unmonitored, "", "#devices?status=unmonitored"),
           stat(`Hosts seen (last ${data.hosts.window})`, data.hosts.total, "accent", `#hosts?window=${data.hosts.window}`),
-          stat("Syslog errors (24 h)", data.syslog_severe, data.syslog_severe ? "warn" : ""),
-          stat("NetFlow (last hour)", data.flows.available ? fmtBytes(data.flows.bytes) : "–", "accent")),
+          stat("Syslog errors (24 h)", data.syslog_severe, data.syslog_severe ? "warn" : "", "#syslog?level=error"),
+          stat("NetFlow (last hour)", data.flows.available ? fmtBytes(data.flows.bytes) : "–", "accent",
+            "#traffic?at=netflow")),
         stacks(
           panel("Down now", data.down.length ? table("ov-down", deviceColumns.slice(0, 7), data.down) :
             empty("Nothing is down.")),
@@ -509,11 +512,13 @@
 
     devices(data) {
       const filter = state.params.status || "";
-      const rows = filter ? data.devices.filter((row) => row.status === filter) : data.devices;
+      const wanted = filter.split(",");
+      const rows = filter ? data.devices.filter((row) => wanted.includes(row.status)) : data.devices;
       const choose = h("select", {"aria-label": "Status", onchange: () => {
         location.hash = choose.value ? `#devices?status=${choose.value}` : "#devices";
-      }}, [["", "Every status"], ["down", "Down"], ["up", "Up"], ["unknown", "Checking"], ["cant", "Can't check"],
-        ["unmonitored", "Not monitored"]].map(([value, label]) => h("option", {value, selected: value === filter}, label)));
+      }}, [["", "Every status"], ["down", "Down"], ["up", "Up"], [CHECKING, "Checking or can't check"],
+        ["unknown", "Checking"], ["cant", "Can't check"], ["unmonitored", "Not monitored"]]
+        .map(([value, label]) => h("option", {value, selected: value === filter}, label)));
       return [...notices(data.freshness),
         head("Devices", `${rows.length} of ${data.devices.length}`, choose, csvLink("devices")),
         table("devices", deviceColumns, rows, {rowClass: (r) => r.status === "down" ? "row-down" : ""})];
@@ -529,9 +534,20 @@
           {key: "kind", label: "Kind", render: (r) => h("span", {class: `pill ${r.kind}`}, r.kind)},
           {key: "map", label: "Map"},
           {key: "text", label: "What happened"},
-        ], data.events, {empty: "Nothing has happened in the last day."}),
-        h("div", {class: "page-head"}, h("h2", {}, "Syslog in the last day (counts only)"), csvLink("syslog")),
-        data.syslog_available ? table("syslog", [
+        ], data.events, {empty: "Nothing has happened in the last day."})];
+    },
+
+    syslog(data) {
+      const levels = [["", "Every sender"], ["warning", "Warning or worse"], ["error", "Error or worse"]];
+      const choose = h("select", {"aria-label": "Severity", onchange: () => {
+        location.hash = choose.value ? `#syslog?level=${choose.value}` : "#syslog";
+      }}, levels.map(([value, label]) => h("option", {value, selected: value === data.level}, label)));
+      const senders = `${data.senders.length} sender${data.senders.length === 1 ? "" : "s"}`;
+      return [...notices(data.freshness),
+        head("Syslog", `How many messages each device sent in the last day, by severity (counts only): ${senders}, `
+             + `${data.severe} message${data.severe === 1 ? "" : "s"} from Emergency to Error`,
+          choose, csvLink("syslog", data.level ? {level: data.level} : {})),
+        data.available ? table("syslog", [
           {key: "source", label: "Sender", render: (r) => h("span", {class: "mono"}, r.source)},
           {key: "name", label: "Device"},
           {key: "emergency", label: "Emerg", number: true}, {key: "alert", label: "Alert", number: true},
@@ -539,7 +555,8 @@
           {key: "warning", label: "Warn", number: true}, {key: "notice", label: "Notice", number: true},
           {key: "info", label: "Info", number: true}, {key: "debug", label: "Debug", number: true},
           {key: "total", label: "Total", number: true},
-        ], data.syslog, {empty: "No syslog in the last day."}) :
+        ], data.senders, {empty: data.level ? "No sender has sent a message that bad in the last day." :
+          "No syslog in the last day."}) :
           empty("The Syslog Collector isn't answering on the dashboard's computer.")];
     },
 
@@ -562,7 +579,7 @@
           {key: "peak_percent", label: "Peak today", number: true, render: (r) => fmtPercent(r.peak_percent)},
           {key: "at", label: "Read", render: (r) => fmtTime(r.at)},
         ], data.links, {empty: "No traffic read yet: the Map Watcher reads the ports at the ends of links every few minutes."}),
-        h("h2", {class: "section"}, `NetFlow, last ${Math.round((flows.span || 3600) / 60)} min`),
+        h("h2", {class: "section", id: "at-netflow"}, `NetFlow, last ${Math.round((flows.span || 3600) / 60)} min`),
         flows.available ? h("div", {class: "grid two"},
           top("f-src", "Top sources", flows.sources, "Source"), top("f-dst", "Top destinations", flows.destinations, "Destination"),
           top("f-app", "Top applications", flows.applications, "Application"),
@@ -785,6 +802,13 @@
     closePicker();
     main.replaceChildren(...builder(data));
     window.scrollTo(0, scroll);
+    if (state.jump) {  // Opened at a section (#traffic?at=netflow): once, so updates don't pull the page back there
+      const target = document.getElementById(`at-${state.jump}`);
+      state.jump = "";
+      // Just below the sticky header; only the window scrolls
+      const header = document.querySelector("header.top");
+      if (target) window.scrollTo(0, target.getBoundingClientRect().top + window.scrollY - (header ? header.offsetHeight : 0) - 12);
+    }
     if (focused) {
       const input = document.getElementById(focused);
       if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
@@ -826,6 +850,7 @@
     const changed = page !== state.page;
     state.page = pages[page] ? page : "overview";
     state.params = params;
+    state.jump = params.at || "";
     if (changed) { state.selected = null; main.replaceChildren(h("p", {class: "muted"}, "Loading...")); }
     for (const link of document.querySelectorAll("#nav a")) {
       link.classList.toggle("current", link.dataset.page === state.page);

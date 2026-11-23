@@ -391,6 +391,23 @@ def test_syslog_rows_name_the_sender_and_never_carry_text():
     assert (row["name"], row["error"], row["info"], row["total"]) == ("R1", 4, 1, 5)
 
 
+def test_syslog_page_level_lists_the_senders_behind_the_overview_count():
+    counts = [["10.0.0.1", 3, 4], ["10.0.0.1", 6, 1], ["10.0.0.2", 4, 2], ["10.0.0.3", 7, 9], ["10.0.0.4", 0, 1]]
+    snapshot = snapshot_of(small_map(), syslog={"available": True, "counts": counts})
+    every = views.syslog(snapshot)
+    assert every["level"] == "" and len(every["senders"]) == 4
+    errors = views.syslog(snapshot, "error")
+    assert [row["source"] for row in errors["senders"]] == ["10.0.0.1", "10.0.0.4"]
+    severe = sum(row[name] for row in errors["senders"] for name in ("emergency", "alert", "critical", "error"))
+    assert severe == errors["severe"] == views.overview(snapshot)["syslog_severe"] == 5
+    assert {row["source"] for row in views.syslog(snapshot, "warning")["senders"]} == {"10.0.0.1", "10.0.0.2",
+                                                                                     "10.0.0.4"}
+    assert views.syslog(snapshot, "nonsense")["level"] == ""
+    assert "syslog" not in views.events(snapshot)
+    _, text = views.csv_table("syslog", snapshot, query={"level": "error"})
+    assert "10.0.0.4" in text and "10.0.0.3" not in text
+
+
 # --------------------------------------------------------------------- The engine
 
 class FakeReader:

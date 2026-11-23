@@ -21,7 +21,10 @@ OVERVIEW_WINDOW = "1h"  # The Overview's host count: the Hosts page's for the sa
 SPANS = traffic_history.SPANS  # NOMAD's Traffic Graphs page offers the same
 STALE_WATCHER = monitor_record.STALE_SECONDS  # Seconds without a poll before the watcher counts as stopped
 KIND_WEIGHTS = {FIREWALL: 3, ROUTER: 2, SWITCH: 1, WLC: 1}
-PAGES = ("overview", "devices", "events", "traffic", "vpns", "ipam", "hosts", "sites", "map", "trends")
+PAGES = ("overview", "devices", "events", "syslog", "traffic", "vpns", "ipam", "hosts", "sites", "map", "trends")
+# The Syslog page's choice: the least severe level a sender's messages must reach to be listed ("" lists every sender).
+# "error" lists the senders the Overview's Syslog errors count comes from
+SYSLOG_LEVELS = {"error": 3, "warning": 4}
 
 
 # --------------------------------------------------------------------- Bits
@@ -159,7 +162,7 @@ def overview(snapshot, history=None, now=None, engine=None):
     on_maps = map_subnet_hosts(snapshot.tribe, seen["subnets"])
     for item in maps:
         item["hosts"] = sum(row["total"] for row in on_maps if row["map_id"] == item["id"])
-    severe = sum(count for _source, severity, count in snapshot.syslog.get("counts", []) if severity <= 3)
+    severe = syslog_severe(snapshot)
     fullest = sorted((subnet_row(subnet) for subnet in snapshot.tribe.subnets if subnet.size >= 4),
                      key=lambda row: -row["percent"])[:8]
     busiest = sorted(link_rows(snapshot), key=lambda row: -(row["percent"] or 0))[:8]
@@ -269,8 +272,9 @@ def event_rows(snapshot, history=None, now=None, since=86400):
     return events
 
 
-def syslog_rows(snapshot):
-    """Messages per sender in the last day, by severity (counts only)."""
+def syslog_rows(snapshot, level=""):
+    """Messages per sender in the last day, by severity (counts only). With a level (SYSLOG_LEVELS), only the senders
+    with a message that bad or worse."""
     senders = {}
     for source, severity, count in snapshot.syslog.get("counts", []):
         row = senders.setdefault(source, {"source": source, "name": "", "total": 0,
@@ -285,14 +289,29 @@ def syslog_rows(snapshot):
                     by_address.setdefault(address, device.label)
     for row in senders.values():
         row["name"] = by_address.get(row["source"], "")
-    return sorted(senders.values(), key=lambda row: (-(row["emergency"] + row["alert"] + row["critical"] +
-                                                       row["error"]), -row["total"]))
+    rows = senders.values()
+    if level in SYSLOG_LEVELS:
+        names = [name.lower() for name in SEVERITIES[:SYSLOG_LEVELS[level] + 1]]
+        rows = [row for row in rows if any(row[name] for name in names)]
+    return sorted(rows, key=lambda row: (-(row["emergency"] + row["alert"] + row["critical"] + row["error"]),
+                                         -row["total"]))
+
+
+def syslog_severe(snapshot):
+    """Messages from Emergency to Error in the last day: the Overview's Syslog errors count."""
+    return sum(count for _source, severity, count in snapshot.syslog.get("counts", []) if severity <= 3)
 
 
 def events(snapshot, history=None, now=None):
     now = time.time() if now is None else now
-    return {"events": event_rows(snapshot, history, now), "syslog": syslog_rows(snapshot),
-            "syslog_available": snapshot.syslog.get("available", False), "freshness": freshness(snapshot, now)}
+    return {"events": event_rows(snapshot, history, now), "freshness": freshness(snapshot, now)}
+
+
+def syslog(snapshot, level="", now=None):
+    now = time.time() if now is None else now
+    level = level if level in SYSLOG_LEVELS else ""
+    return {"senders": syslog_rows(snapshot, level), "level": level, "severe": syslog_severe(snapshot),
+            "available": snapshot.syslog.get("available", False), "freshness": freshness(snapshot, now)}
 
 
 def _iso_time(text):
@@ -636,7 +655,7 @@ def csv_table(name, snapshot, history=None, engine=None, query=None):
     elif name == "syslog":
         header = ["Sender", "Name", "Total"] + SEVERITIES
         body = [[row["source"], row["name"], row["total"]] + [row[severity.lower()] for severity in SEVERITIES]
-                for row in syslog_rows(snapshot)]
+                for row in syslog_rows(snapshot, query.get("level", ""))]
     elif name == "traffic":
         header = ["Map", "Device", "Port", "Linked to", "In (b/s)", "Out (b/s)", "Speed (Mb/s)", "Use %",
                   "Peak today %", "Read"]
@@ -678,5 +697,5 @@ def _safe_cell(value):
     return value
 
 
-__all__ = ["PAGES", "overview", "devices", "events", "traffic", "vpns", "ipam", "hosts", "sites", "topology",
+__all__ = ["PAGES", "overview", "devices", "events", "syslog", "traffic", "vpns", "ipam", "hosts", "sites", "topology",
            "trends", "series", "csv_table", "NETWORK_KINDS"]
