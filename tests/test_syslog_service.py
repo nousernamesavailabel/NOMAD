@@ -191,6 +191,52 @@ def test_feed_starts_from_now_or_with_a_backlog_and_follows():
     assert got[-1].message == "again"
 
 
+class ZeroStatusSource(FakeSource):
+    """A Syslog Collector before the fix: latest_id 0 in its status until a message came in since it started."""
+
+    def status(self):
+        self.check()
+        return {"latest_id": 0}
+
+
+def test_a_service_saying_0_doesnt_get_its_messages_handed_over_again():
+    source = ZeroStatusSource()
+    for text in ("<14>one", "<14>two", "<14>three"):
+        source.add(text)
+    got = []
+    page_feed = feed.ServiceFeed(got.append, backlog=2000, source=source)
+    page_feed.poll()
+    assert [item.message for item in got] == ["one", "two", "three"]
+    for _ in range(feed.RESTART_CHECK_POLLS * 4):  # Two minutes of nothing new
+        page_feed.poll()
+    assert len(got) == 3  # Not the same three again every 30 s
+    source.add("<14>four")
+    for _ in range(feed.RESTART_CHECK_POLLS):
+        page_feed.poll()
+    assert [item.message for item in got] == ["one", "two", "three", "four"]
+
+    watched = []  # The Map Watcher's: from now on only
+    watcher_feed = feed.ServiceFeed(watched.append, source=source)
+    for _ in range(feed.RESTART_CHECK_POLLS * 2):
+        watcher_feed.poll()
+    assert watched == []
+    source.add("<14>five")
+    watcher_feed.poll()
+    assert [item.message for item in watched] == ["five"]
+
+
+def test_the_collector_says_the_newest_kept_id_from_the_start(tmp_path):
+    kept = store.SyslogStore(tmp_path / "syslog.db")
+    kept.add([message("<14>one"), message("<14>two")])
+    kept.close()
+    restarted = collector.SyslogCollector(tmp_path / "syslog.db", 0)
+    restarted.start()
+    try:
+        assert restarted.status()["latest_id"] == 2
+    finally:
+        restarted.stop()
+
+
 def test_feed_thread_reports_the_service_going_away_and_coming_back(monkeypatch):
     monkeypatch.setattr(feed, "POLL_SECONDS", 0.02)
     source = FakeSource()
@@ -403,3 +449,27 @@ def test_dialog_frees_the_port_for_the_service_and_gives_the_watcher_it_back(app
         assert window.netmap_tab.watcher.calls[-1] == "check"
     finally:
         dialog.deleteLater()
+
+
+def test_a_full_syslog_list_drops_only_the_oldest_rows(app, monkeypatch):
+    from nomad.ui import syslog_tab
+    monkeypatch.setattr(syslog_tab, "MAX_MESSAGES", 5)
+    page = syslog_tab.SyslogTab(Window())
+    try:
+        refills = []
+        original = page.refill
+        monkeypatch.setattr(page, "refill", lambda: (refills.append(1), original()))
+        page.filter_input.setText("keep")
+        for number in range(5):
+            page.on_message(message(f"<14>sw1 app: {'keep' if number % 2 == 0 else 'skip'} {number}"))
+        page.flush()
+        assert page.table.rowCount() == 3  # keep 0, 2, 4
+        page.on_message(message("<14>sw1 app: keep 5"))
+        page.on_message(message("<14>sw1 app: skip 6"))
+        page.flush()  # 0 and 1 fall off the end: only 0 had a row
+        assert [page.table.item(row, 6).text().split()[-2:] for row in range(page.table.rowCount())] == \
+            [["keep", "2"], ["keep", "4"], ["keep", "5"]]
+        assert not refills  # Not filled again from scratch
+        assert len(page.messages) == 5
+    finally:
+        page.shutdown()

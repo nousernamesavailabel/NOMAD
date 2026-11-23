@@ -4,6 +4,7 @@ computer (it has the port), or by listening on the port itself when it doesn't.
 ServiceFeed asks the service every couple of seconds for what came in since last time. SyslogListener is what the
 Map Watcher uses: it picks between the two, and check() moves over when the service is installed or removed.
 """
+import datetime
 import logging
 import threading
 
@@ -33,6 +34,8 @@ class ServiceFeed:
         self.stopping = threading.Event()
         self.thread = None
         self.last_id = None
+        self.last_received = None  # When the newest message handed over came in
+        self.rewound = False  # The service's IDs went back: only messages newer than last_received are new
         self.idle = 0
         self.problem = ""
 
@@ -70,26 +73,36 @@ class ServiceFeed:
                 self.last_id = messages[-1].id if messages else self.source.status().get("latest_id", 0)
                 self.deliver(messages)
             else:
+                self.last_received = datetime.datetime.now()  # Before asking: only what comes in from now is new
                 self.last_id = int(self.source.status().get("latest_id", 0) or 0)
+                self.rewound = True  # A service that says 0 while it keeps messages mustn't hand them all over
             return False
         messages = self.source.since(self.last_id, BATCH)
         if messages:
             self.idle = 0
             self.last_id = messages[-1].id
+            count = len(messages)
+            if self.rewound:
+                if self.last_received is not None:  # Those handed over already aren't new, whatever their IDs
+                    messages = [message for message in messages if message.received > self.last_received]
+                self.rewound = count >= BATCH  # Until caught up
             self.deliver(messages)
-            return len(messages) >= BATCH
+            return count >= BATCH
         self.idle += 1
         if self.idle >= RESTART_CHECK_POLLS:  # Its messages were deleted and it started counting again?
             self.idle = 0
             latest = int(self.source.status().get("latest_id", 0) or 0)
             if latest < self.last_id:
                 self.last_id = latest
+                self.rewound = True
         return False
 
     def deliver(self, messages):
         for message in messages:
             if self.stopping.is_set():
                 return
+            if self.last_received is None or message.received > self.last_received:
+                self.last_received = message.received
             try:
                 self.callback(message)
             except Exception:

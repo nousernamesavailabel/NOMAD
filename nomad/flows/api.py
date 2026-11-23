@@ -111,6 +111,8 @@ class FlowApi:
             return self.queries.summary()
         if path == "/v1/addresses":
             return self.queries.addresses(number("start", 0.0), number("end"))
+        if path == "/v1/senders":
+            return self.queries.addresses(number("start", 0.0), number("end"), senders=True)
         raise KeyError(path)
 
     @staticmethod
@@ -207,6 +209,11 @@ class ServiceSource(FlowSource):
     def addresses(self, start, end=None):
         """[[address, when last seen]] in the raw flows from start to end (store.FlowQueries.addresses)."""
         return self.get("/v1/addresses", start=start, end=end)
+
+    def senders(self, start, end=None):
+        """[[address, when last sent something]] in the raw flows from start to end (an older collector says
+        "No /v1/senders")."""
+        return self.get("/v1/senders", start=start, end=end)
 
 
 class LocalSource(FlowSource):

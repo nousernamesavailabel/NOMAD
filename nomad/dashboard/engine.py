@@ -96,17 +96,26 @@ def map_subnets(entry):
 
 
 def map_host_addresses(entry):
-    """{address} of the hosts on a map (what its switches' tables and controllers say is plugged in)."""
-    return {host.ip for host in entry.network_map.hosts if host.ip}
+    """{address} of the hosts on a map that its switches' tables and controllers listed (hand-added hosts aren't
+    seen by anything, so they never count as seen)."""
+    return {host.ip for host in entry.network_map.hosts if host.ip and not host.manual}
 
 
-def count_hosts(tribe, seen_map, seen_flow, start):
-    """Hosts seen since start in each subnet: [{subnet, network, name, total, map, sweep, flow, size}].
+def device_addresses(tribe):
+    """{address} of the maps' network devices: switches, routers and the like aren't hosts, though they answer
+    sweeps and turn up in NetFlow."""
+    found = set()
+    for entry in tribe.maps:
+        for device in entry.network_map.devices.values():
+            found.update(address for address in [device.mgmt_ip, *device.addresses] if address)
+            found.update(item[0] for item in device.interfaces_l3 if item and item[0])
+    return found
 
-    Subnets are the tribe IPAM's (for the maps of a tribe network, and the sweeps of each network), and for maps with
-    no IPAM network the subnets of their devices' interfaces. An address counts once in its most specific subnet,
-    whatever saw it; map hosts and sweeps count in their own network, flows in every network with a subnet for them."""
-    groups = {}  # Network key -> (SubnetIndex, {cidr: SubnetEntry or None}, name)
+
+def subnet_groups(tribe):
+    """({network key: (SubnetIndex, {cidr: SubnetEntry or None}, name)}, {map id: network key}): the tribe IPAM's
+    networks, and for maps with no IPAM network the subnets of their devices' interfaces."""
+    groups = {}
     for network in tribe.networks:
         subnets = {subnet.cidr: subnet for subnet in tribe.subnets if subnet.network_id == network["id"]}
         groups[network["id"]] = (SubnetIndex(subnets), subnets, network["name"])
@@ -120,15 +129,48 @@ def count_hosts(tribe, seen_map, seen_flow, start):
             key = f"map:{entry.id}"
             groups[key] = (SubnetIndex(cidrs), {cidr: None for cidr in cidrs}, entry.name)
             map_networks[entry.id] = key
+    return groups, map_networks
+
+
+def host_subnets(tribe):
+    """Every subnet hosts can be counted in: [{network, network_name, subnet, name}], as count_hosts names them."""
+    rows = []
+    for key, (_index, subnets, name) in subnet_groups(tribe)[0].items():
+        for cidr, subnet in subnets.items():
+            rows.append({"network": key, "network_name": name, "subnet": cidr,
+                         "name": subnet.name if subnet is not None else ""})
+    rows.sort(key=lambda row: (row["network_name"].lower(), _cidr_order(row["subnet"])))
+    return rows
+
+
+def _cidr_order(cidr):
+    try:
+        network = ipaddress.ip_network(cidr, strict=False)
+        return network.version, int(network.network_address), network.prefixlen
+    except ValueError:
+        return 9, 0, 0
+
+
+def count_hosts(tribe, seen_map, seen_flow, start):
+    """Hosts seen since start in each subnet: [{subnet, network, name, total, map, sweep, flow, size}].
+
+    Subnets are the tribe IPAM's (for the maps of a tribe network, and the sweeps of each network), and for maps with
+    no IPAM network the subnets of their devices' interfaces. An address counts once in its most specific subnet,
+    whatever saw it; map hosts and sweeps count in their own network. A NetFlow address says nothing of its network,
+    so it counts once: in the networks where the maps or sweeps saw it too, else in the one with the most specific
+    subnet for it. The network devices' own addresses aren't hosts and never count."""
+    groups, map_networks = subnet_groups(tribe)
+    infrastructure = device_addresses(tribe)
     found = {}  # (network key, cidr) -> {source: {address}}
+    placed = {}  # address -> {network key} it counted in, from the maps and sweeps
 
     def note(network_key, address, source):
-        index = groups[network_key][0]
-        cidr = index.find(address)
+        cidr = groups[network_key][0].find(address)
         if cidr is not None:
             found.setdefault((network_key, cidr), {}).setdefault(source, set()).add(address)
+            placed.setdefault(address, set()).add(network_key)
 
-    map_addresses = {address for address, when in seen_map.items() if when >= start}
+    map_addresses = {address for address, when in seen_map.items() if when >= start} - infrastructure
     for entry in tribe.maps:
         network_key = map_networks.get(entry.id)
         if network_key is not None:
@@ -137,12 +179,19 @@ def count_hosts(tribe, seen_map, seen_flow, start):
     for network_id, seen in tribe.sightings.items():
         if network_id in groups:
             for address, when in seen.items():
-                if when >= start:
+                if when >= start and address not in infrastructure:
                     note(network_id, address, SWEEP)
     for address, when in seen_flow.items():
-        if when >= start:
-            for network_key in groups:
-                note(network_key, address, FLOW)
+        if when < start or address in infrastructure:
+            continue
+        targets = placed.get(address)
+        if not targets:
+            matches = [(key, cidr) for key in groups for cidr in [groups[key][0].find(address)] if cidr is not None]
+            if not matches:
+                continue
+            targets = [max(matches, key=lambda match: _cidr_order(match[1])[2])[0]]  # First of the most specific
+        for network_key in list(targets):
+            note(network_key, address, FLOW)
     rows = []
     for (network_key, cidr), sources in found.items():
         _, subnets, name = groups[network_key]
@@ -162,11 +211,12 @@ def count_hosts(tribe, seen_map, seen_flow, start):
 
 
 def mac_only_hosts(tribe):
-    """Hosts on the maps with no address, by map and VLAN: [{map, vlan, count}]."""
+    """Hosts on the maps with no address, by map and VLAN: [{map, vlan, count}] (hand-added ones left out, as
+    count_hosts leaves them out)."""
     counts = {}
     for entry in tribe.maps:
         for host in entry.network_map.hosts:
-            if not host.ip:
+            if not host.ip and not host.manual:
                 key = (entry.name, host.vlan or 0)
                 counts[key] = counts.get(key, 0) + 1
     return [{"map": name, "vlan": vlan, "count": count} for (name, vlan), count in sorted(counts.items())]
@@ -241,6 +291,12 @@ class Engine:
         self.settings = dict(settings or {})
         self.clock = clock
         self.history = history_module.HistoryStore(self.directory / history_module.HISTORY_FILE, clock)
+        if not self.history.get("flow_senders_only"):
+            # Up to 2.9.0 every address a flow went to counted as seen, every address a sweep pinged among them:
+            # those go, and the senders of the last week are read again from the Flow Collector
+            self.history.forget_seen(FLOW)
+            self.history.set("flow_addresses_at", clock() - 7 * 86400)
+            self.history.set("flow_senders_only", 1)
         self.reader = status_reader or StatusReader(watcher_dir() / STATUS_FILE)
         self.collectors = collectors or CollectorView(clock=clock)
         self.tribe = tribe or (TribeView(key, self.directory, on_moved, clock) if key is not None else None)
@@ -411,11 +467,12 @@ class Engine:
     def read_collectors(self):
         syslog = self.collectors.read_syslog()
         flows = self.collectors.read_flows()
-        start = float(self.history.get("flow_addresses_at")) or self.clock() - 7200
         now = self.clock()
+        start = max(float(self.history.get("flow_addresses_at")) or now - 7200, now - 7 * 86400)
         seen = self.collectors.flow_addresses(start - 120)
-        self.history.note_seen(FLOW, seen)
-        self.history.set("flow_addresses_at", now)
+        if seen is not None:  # Read again from the same time once the Flow Collector answers (or is updated)
+            self.history.note_seen(FLOW, seen)
+            self.history.set("flow_addresses_at", now)
         self.publish(syslog=syslog, flows=flows)
 
     def note_map_hosts(self, tribe):
@@ -435,7 +492,11 @@ class Engine:
         self.history.add_host_counts(now, rows)
 
     def hosts(self, window):
-        """Hosts per subnet seen in the last `window` seconds (for the Hosts page)."""
+        """Hosts per subnet seen in the last `window` seconds (the Hosts page, the Overview's count and the newest
+        point of a subnet's trend: all the same count)."""
         tribe = self.snapshot.tribe
         start = self.clock() - window
         return count_hosts(tribe, self.history.seen_since(MAP, start), self.history.seen_since(FLOW, start), start)
+
+    def host_subnets(self):
+        return host_subnets(self.snapshot.tribe)

@@ -76,7 +76,8 @@ class ServiceUpdateBanner(QFrame):
         self.update_button.clicked.connect(self.on_update_clicked)
         self.update_button.setVisible(admin)
         layout.addWidget(self.update_button)
-        self.services_button = QPushButton("Services & Firewall...")
+        # "&&" shows one "&", as the Tools menu does: a lone one marks a shortcut key and isn't shown
+        self.services_button = QPushButton("Services && Firewall...")
         self.services_button.clicked.connect(self.on_services_clicked)
         layout.addWidget(self.services_button)
         self.dismiss_button = QPushButton("Dismiss")

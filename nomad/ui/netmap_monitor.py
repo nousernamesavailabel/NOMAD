@@ -25,6 +25,7 @@ from .theme import monospace_font
 LOG_LINES = 20000
 CANT = "cant"  # In counts(): unknown because it can't be checked (its router isn't answering)
 DISCOVER_EVERY = 600  # Seconds between looks for probes others have added or taken away, while monitoring
+CATCH_UP_SECONDS = 300  # At least this long, this computer's newer up/down outranks the Map Watcher's (status())
 
 
 class PollThread(QThread):
@@ -81,6 +82,7 @@ class NetworkMonitor(QObject):
         self.shown = {}  # Key -> DeviceStatus as shown (since from the record, uptimes), after each poll
         self.watcher = {}  # Key -> DeviceStatus as the Map Watcher has it (see set_watcher)
         self.watcher_source = ""
+        self.watcher_interval = float(monitor.DEFAULT_INTERVAL)  # The Map Watcher's seconds between checks
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_now)
 
@@ -185,18 +187,36 @@ class NetworkMonitor(QObject):
         self.shown = self.record.view(0, {key: state for key, state in self.tracker.devices.items()
                                           if key in self.targets})
 
-    def set_watcher(self, states, source=""):
+    def set_watcher(self, states, source="", interval=None):
         """The Map Watcher's monitoring of this map ({key: DeviceStatus}, {} for none): what the map shows of the
-        devices it monitors, so NOMAD and the NOMAD Dashboard show the same."""
+        devices it monitors, so NOMAD and the NOMAD Dashboard show the same. interval: the Watcher's seconds between
+        checks (how long it may take to catch up with a change this computer saw first)."""
         self.watcher, self.watcher_source = dict(states or {}), source
+        self.watcher_interval = float(interval or monitor.DEFAULT_INTERVAL)
         self.statuses_changed.emit()
         self.update_summary()
 
     def status(self, key):
         """The DeviceStatus of a monitored device as shown (the Map Watcher's when it monitors the device, as the
-        NOMAD Dashboard has it; else this computer's while it monitors), or None if neither monitors it."""
+        NOMAD Dashboard has it; else this computer's while it monitors), or None if neither monitors it. While this
+        computer has seen it go down or come back and the Watcher hasn't yet, this computer's: the map says so at
+        once instead of a minute or two later."""
         watcher = self.watcher.get(key)
-        return watcher if watcher is not None else self.own_status(key)
+        if watcher is None:
+            return self.own_status(key)
+        own = self.own_status(key) if self.running else None
+        return own if own is not None and self.ahead_of_watcher(own, watcher) else watcher
+
+    def ahead_of_watcher(self, own, watcher, now=None):
+        """This computer saw the device change (up to down, or back) after the Watcher's last change of it, recently
+        enough that the Watcher just hasn't caught up (it takes FAILS_FOR_DOWN of its checks to call one down). A
+        disagreement that lasts longer than that is a real one (the Watcher can't reach it from where it is): the
+        Watcher's is shown then, as the dashboard has it, and the details pane shows both."""
+        if own.status not in (UP, DOWN) or own.status == watcher.status or not own.exact or not own.since:
+            return False
+        now = time.time() if now is None else now
+        catch_up = max(CATCH_UP_SECONDS, (monitor.FAILS_FOR_DOWN + 2) * self.watcher_interval)
+        return own.since > watcher.since and now - own.since < catch_up
 
     def own_status(self, key):
         """This computer's monitoring of a device (its DeviceStatus while Monitor is on), or None."""
@@ -454,7 +474,9 @@ class NetworkMonitor(QObject):
                     f"in a row.{routers}")
             if self.watcher:
                 text += (f" The map shows {self.watcher_source or 'the Map Watcher'}'s monitoring of the devices it "
-                         "monitors, the same as the NOMAD Dashboard. The details pane shows this computer's too."
+                         "monitors, the same as the NOMAD Dashboard, except for a device this computer has seen go "
+                         "down or come back first: that shows at once, until the Watcher catches up. The details "
+                         "pane shows both."
                          f"{self.watcher_stopped_text()}")
         self.summary_label.setText(text)
 

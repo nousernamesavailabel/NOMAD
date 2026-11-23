@@ -3,6 +3,7 @@
 import datetime
 import logging
 import threading
+from collections import Counter
 
 from PyQt5.QtCore import QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -151,8 +152,9 @@ class ArchivePanel(QWidget):
                     for index in range(self.tree.topLevelItemCount()) if self.tree.topLevelItem(index).isExpanded()}
         selected = {item.data(0, Qt.UserRole) for item in self.tree.selectedItems()}
         self.tree.clear()
+        counts = Counter((device["name"] or device["id"]).lower() for device in devices)
         for device in devices:
-            item = QTreeWidgetItem([device["name"] or device["id"], when_text(device.get("last_ok")),
+            item = QTreeWidgetItem([device_label(device, counts), when_text(device.get("last_ok")),
                                     next_text(device, now), device_status(device, unreviewed, failing, now)])
             item.setData(0, Qt.UserRole, device["id"])
             item.setData(0, Qt.UserRole + 1, "device")
@@ -257,7 +259,16 @@ def device_status(device, unreviewed, failing, now):
         parts.append(f"fails {failing[device['id']]} standard line{'s' if failing[device['id']] != 1 else ''}")
     if device.get("failures"):
         parts.append("couldn't back up")
-    return ", ".join(parts) or ("Scheduled" if device.get("in_scope") else "")
+    return ", ".join(parts) or ("Scheduled" if device.get("in_scope") else "Not on a map")
+
+
+def device_label(device, counts=None):
+    """A device's name in the list, with its address when another device has the same name (an old address of it,
+    say)."""
+    name = device["name"] or device["id"]
+    if counts and counts.get(name.lower(), 0) > 1 and name.lower() != device["id"]:
+        return f"{name} ({device['id']})"
+    return name
 
 
 def next_text(device, now):
@@ -659,6 +670,46 @@ class CheckDialog(QDialog):
 
     def scope(self):
         return ("applies", "every", "selected")[max(self.group.checkedId(), 0)]
+
+
+class MergeDialog(QDialog):
+    """Merge Into...: the device whose copies these become, picked from the archive's others (one on a map with the
+    same name first)."""
+
+    def __init__(self, parent, sources, choices):
+        super().__init__(parent)
+        self.setWindowTitle("Merge Into")
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        names = ", ".join(device_label(device, Counter({(device["name"] or device["id"]).lower(): 2}))
+                          for device in sources[:5]) + \
+            (f" and {len(sources) - 5} more" if len(sources) > 5 else "")
+        note = QLabel(f"Move the saved copies of {names} to another device, and drop "
+                      f"{'them' if len(sources) != 1 else 'it'} from the list. Use this for a device's old address "
+                      f"or a pull made under another address.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        wanted = {(device["name"] or "").lower() for device in sources}
+        choices = sorted(choices, key=lambda device: (not ((device["name"] or "").lower() in wanted and
+                                                           device.get("in_scope")),
+                                                      not device.get("in_scope"), (device["name"] or "").lower(),
+                                                      device["id"]))
+        form = QFormLayout()
+        self.device = QComboBox()
+        self.device.setMaxVisibleItems(20)
+        for device in choices:
+            where = "on a map" if device.get("in_scope") else "not on a map"
+            self.device.addItem(f"{device['name'] or device['id']} ({device['id']}, {where})", device)
+        form.addRow("Merge into:", self.device)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Merge")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def target(self):
+        return self.device.currentData()
 
 
 class PullDialog(QDialog):

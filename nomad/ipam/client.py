@@ -75,6 +75,7 @@ CONFIG_API = 16  # And the config archive
 VIEWER_API = 17  # And viewer keys (the NOMAD Dashboard), and ports graphed on the dashboard
 MONITOR_API = 18  # And the Map Watcher's monitoring of each map, for every NOMAD
 TRAFFIC_API = 19  # And the Map Watcher's readings of the ports' traffic, for every NOMAD's Traffic Graphs
+MERGE_API = 20  # And merging and forgetting devices in the config archive
 SERVER_FEATURES = ((2, "instant sync"), (3, "change history"), (4, "loopback subnets"), (5, "Last Seen sweep results"),
                    (6, "tribe maps"), (VLAN_API, "VLANs"), (PLACEMENT_API, "Subnet Placement"),
                    (ROLES_API, "subnet roles"), (MOVE_API, "moving subnets between networks"), (ASSET_API, "assets"),
@@ -83,7 +84,8 @@ SERVER_FEATURES = ((2, "instant sync"), (3, "change history"), (4, "loopback sub
                    (CONFIG_API, "the config archive and scheduled backups"),
                    (VIEWER_API, "viewer keys for the NOMAD Dashboard"),
                    (MONITOR_API, "the Map Watcher's monitoring on every NOMAD's map"),
-                   (TRAFFIC_API, "the Map Watcher's traffic history on every NOMAD's Traffic Graphs"))
+                   (TRAFFIC_API, "the Map Watcher's traffic history on every NOMAD's Traffic Graphs"),
+                   (MERGE_API, "merging and forgetting devices in the config archive"))
 
 
 @dataclass
@@ -517,7 +519,7 @@ class TeamClient:
         return self.request("GET", "/api/configs/runners")["runners"]
 
     def config_request(self, action, **body):
-        """claim, report, upload, review, exclude, standard, settings or due."""
+        """claim, report, upload, review, exclude, merge, forget, standard, settings or due."""
         return self.request("POST", f"/api/configs/{action}", body)
 
     def import_networks(self, plans):

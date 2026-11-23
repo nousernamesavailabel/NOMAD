@@ -632,3 +632,24 @@ def test_no_map_watcher_here_leaves_the_backup_logins_alone(page, monkeypatch):
     watch_service.save_config({"maps": []})  # Installed, without backups
     page.backup_sync.update_service(ask=True)
     assert "backups" not in watch_service.load_config()
+
+
+def test_old_addresses_left_out_of_pull_and_merged_from_the_list(page, app, monkeypatch):
+    from nomad.ui import editor_panels
+    page.update_local_scope()
+    # R1's old address, pulled by hand
+    page.configs.upload("192.168.5.7", "running", CONFIG, "x", name="R1", address="192.168.5.7")
+    page.configs.upload("10.0.0.99", "running", CONFIG, "x", name="Lab", address="10.0.0.99")
+    assert [target["address"] for target in page.device_choices()] == ["10.0.0.99", "10.0.0.1"]
+    page.refresh_views()
+    labels = sorted(page.archive_panel.tree.topLevelItem(index).text(0)
+                    for index in range(page.archive_panel.tree.topLevelItemCount()))
+    assert labels == ["Lab", "R1 (10.0.0.1)", "R1 (192.168.5.7)"]
+    monkeypatch.setattr(editor_panels.MergeDialog, "exec_", lambda self: editor_panels.MergeDialog.Accepted)
+    page.merge_devices(["192.168.5.7"])
+    settle(app)
+    assert page.configs.store.device("192.168.5.7") is None and len(page.history_of("10.0.0.1")) == 1
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+    page.forget_devices(["10.0.0.99"])
+    settle(app)
+    assert page.configs.store.device("10.0.0.99") is None

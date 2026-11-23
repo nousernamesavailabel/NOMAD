@@ -146,6 +146,22 @@ def uptimes(before, during, start, end, current=None, gaps=()):
     return result
 
 
+def with_known_start(changes):
+    """Changes [(device, status, at, lasted)] in order, as [(device, status, at)] with each device's status before its
+    first change put in where that change says how long it had lasted. A device answering the first check isn't
+    noted (it isn't news), so a device up for 22 h that then goes down had only the change to down: without this the
+    22 h up was unknown and its uptime went straight to 0%."""
+    seen, result = set(), []
+    for device, status, at, lasted in changes:
+        if device not in seen:
+            seen.add(device)
+            if status in (UP, DOWN) and lasted:
+                result.append((device, DOWN if status == UP else UP, float(at) - float(lasted)))
+        result.append((device, status, float(at)))
+    result.sort(key=lambda change: change[2])  # Stable: changes at the same moment keep their order
+    return result
+
+
 def restore(tracker, rows):
     """Put a record's saved statuses [{key, status, since, checked, rtt, via, problem, exact}] back in a
     monitor.StatusTracker, so monitoring carries on from them. A device down stays down until it answers."""
@@ -373,21 +389,18 @@ class RecordStore:
         if cached is not None and now - cached[0] < UPTIME_SECONDS:
             return cached[1]
         longest = max(UPTIME_SPANS.values())
-        rows = self.rows("SELECT key, status, at FROM changes WHERE map_id = ? AND at >= ? ORDER BY at, id",
-                         (int(map_id), now - longest))
-        earlier = self.rows("SELECT key, status FROM changes WHERE map_id = ? AND at < ? ORDER BY at, id",
-                            (int(map_id), now - longest))
+        changes = with_known_start([(row["key"], row["status"], row["at"], row["lasted"]) for row in self.rows(
+            "SELECT key, status, at, lasted FROM changes WHERE map_id = ? ORDER BY at, id", (int(map_id),))])
         gaps = self.gaps(now - longest)
         result = {}
         for name, span in UPTIME_SPANS.items():
             start = now - span
-            before = {row["key"]: row["status"] for row in earlier}
-            during = []
-            for row in rows:
-                if row["at"] < start:
-                    before[row["key"]] = row["status"]
+            before, during = {}, []
+            for key, status, at in changes:
+                if at < start:
+                    before[key] = status
                 else:
-                    during.append((row["key"], row["at"], row["status"]))
+                    during.append((key, at, status))
             for key, value in uptimes(before, during, start, now, current, gaps).items():
                 result.setdefault(key, {})[name] = value
         self.uptime_cache[int(map_id)] = (now, result)

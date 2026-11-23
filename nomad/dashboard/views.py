@@ -17,6 +17,7 @@ UP, DOWN, UNKNOWN, CANT, UNMONITORED = "up", "down", "unknown", "cant", "unmonit
 STATUS_TEXT = {UP: "Up", DOWN: "Down", UNKNOWN: "Checking", CANT: "Can't check", UNMONITORED: "Not monitored"}
 SEVERITIES = ["Emergency", "Alert", "Critical", "Error", "Warning", "Notice", "Info", "Debug"]
 WINDOWS = {"15m": 900, "1h": 3600, "24h": 86400, "7d": 7 * 86400}
+OVERVIEW_WINDOW = "1h"  # The Overview's host count: the Hosts page's for the same window, and a trend's newest point
 SPANS = traffic_history.SPANS  # NOMAD's Traffic Graphs page offers the same
 STALE_WATCHER = monitor_record.STALE_SECONDS  # Seconds without a poll before the watcher counts as stopped
 KIND_WEIGHTS = {FIREWALL: 3, ROUTER: 2, SWITCH: 1, WLC: 1}
@@ -145,7 +146,7 @@ def sites(snapshot, now=None):
     return {"sites": result, "freshness": freshness(snapshot, now)}
 
 
-def overview(snapshot, history=None, now=None):
+def overview(snapshot, history=None, now=None, engine=None):
     now = time.time() if now is None else now
     rows = device_rows(snapshot)
     tally = counts(rows)
@@ -154,6 +155,10 @@ def overview(snapshot, history=None, now=None):
         mine = [row for row in rows if row["map_id"] == entry.id]
         maps.append({"id": entry.id, "name": entry.name, "counts": counts(mine), "total": len(mine),
                      "hosts": len(entry.network_map.hosts), "monitored": entry.id in monitored_maps(snapshot)})
+    seen = active_hosts(snapshot, engine, OVERVIEW_WINDOW)
+    on_maps = map_subnet_hosts(snapshot.tribe, seen["subnets"])
+    for item in maps:
+        item["hosts"] = sum(row["total"] for row in on_maps if row["map_id"] == item["id"])
     severe = sum(count for _source, severity, count in snapshot.syslog.get("counts", []) if severity <= 3)
     fullest = sorted((subnet_row(subnet) for subnet in snapshot.tribe.subnets if subnet.size >= 4),
                      key=lambda row: -row["percent"])[:8]
@@ -162,7 +167,55 @@ def overview(snapshot, history=None, now=None):
             "maps": maps, "events": event_rows(snapshot, history, now)[:12], "syslog_severe": severe,
             "flows": {"available": snapshot.flows.get("available", False),
                       "bytes": (snapshot.flows.get("total") or [0])[0], "span": snapshot.flows.get("span", 3600)},
-            "fullest": fullest, "busiest": busiest, "freshness": freshness(snapshot, now)}
+            "fullest": fullest, "busiest": busiest, "freshness": freshness(snapshot, now),
+            "hosts": {"window": OVERVIEW_WINDOW, "total": seen["total"], "mac_only": seen["mac_only_total"]},
+            "map_subnets": on_maps}
+
+
+def map_subnet_hosts(tribe, rows):
+    """The hosts seen in each subnet on each map: [{map_id, map, network, subnet, name, total, size, percent}].
+
+    A map's subnets are the ones its devices have addresses in (point-to-point links left out). For a map of an IPAM
+    network they're that network's IPAM subnets inside them, or the most specific one round a subnet with none
+    inside. rows: count_hosts's (with percent), whose counts these are, so they add up the same way."""
+    from .engine import map_subnets, subnet_groups
+    groups, map_networks = subnet_groups(tribe)
+    counted = {(row["network"], row["subnet"]): row for row in rows}
+    found = []
+    for entry in tribe.maps:
+        key = map_networks.get(entry.id)
+        if key is None:
+            continue
+        index, subnets, _name = groups[key]
+        known = {}
+        for cidr in subnets:
+            try:
+                known[cidr] = ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                pass
+        chosen = set()
+        for cidr in map_subnets(entry):
+            block = ipaddress.ip_network(cidr, strict=False)
+            if block.prefixlen >= 30:
+                continue
+            inside = {name for name, network in known.items()
+                      if network.version == block.version and network.subnet_of(block)}
+            if not inside:
+                around = index.find(str(block.network_address))
+                if around is not None and block.subnet_of(known[around]):
+                    inside = {around}
+            chosen |= inside
+        for cidr in chosen:
+            row = counted.get((key, cidr))
+            subnet = subnets.get(cidr)
+            size = row["size"] if row else subnet.size if subnet is not None else \
+                max(1, known[cidr].num_addresses - 2)
+            total = row["total"] if row else 0
+            found.append({"map_id": entry.id, "map": entry.name, "network": key, "subnet": cidr,
+                          "name": subnet.name if subnet is not None else "", "total": total, "size": size,
+                          "percent": round(100.0 * total / max(1, size), 1)})
+    found.sort(key=lambda row: (row["map"].lower(), _sort_cidr(row["subnet"])))
+    return found
 
 
 # --------------------------------------------------------------------- Events
@@ -349,15 +402,23 @@ def _sort_cidr(cidr):
 
 # --------------------------------------------------------------------- Hosts per subnet
 
-def hosts(snapshot, engine, window="1h", now=None):
+def active_hosts(snapshot, engine, window="1h"):
+    """The one count of hosts the pages show (the Hosts page, the Overview, a subnet's trend): addresses seen in the
+    window on the maps' switch tables, in sweeps or in NetFlow, once per network, network devices left out; and the
+    hosts the maps list with no address."""
     from .engine import mac_only_hosts
-    now = time.time() if now is None else now
-    seconds = WINDOWS.get(window, 3600)
-    rows = engine.hosts(seconds) if engine is not None else []
+    rows = engine.hosts(WINDOWS.get(window, 3600)) if engine is not None else []
     for row in rows:
         row["percent"] = round(100.0 * row["total"] / max(1, row["size"]), 1)
-    return {"window": window if window in WINDOWS else "1h", "windows": list(WINDOWS), "subnets": rows,
-            "total": sum(row["total"] for row in rows), "mac_only": mac_only_hosts(snapshot.tribe),
+    mac_only = mac_only_hosts(snapshot.tribe)
+    return {"subnets": rows, "total": sum(row["total"] for row in rows), "mac_only": mac_only,
+            "mac_only_total": sum(row["count"] for row in mac_only)}
+
+
+def hosts(snapshot, engine, window="1h", now=None):
+    now = time.time() if now is None else now
+    window = window if window in WINDOWS else "1h"
+    return {"window": window, "windows": list(WINDOWS), **active_hosts(snapshot, engine, window),
             "freshness": freshness(snapshot, now)}
 
 
@@ -515,12 +576,14 @@ def group_boxes(network_map, positions):
 # --------------------------------------------------------------------- Trends
 
 def trends(snapshot, now=None):
-    """What can be graphed: the ports with traffic, the subnets with hosts, and each device's uptime."""
+    """What can be graphed: the ports with traffic, the subnets hosts are counted in (as the Hosts page names them),
+    and each device's uptime."""
+    from .engine import host_subnets
     now = time.time() if now is None else now
     ports = [{"map_id": row["map_id"], "device": row["device"], "name": row["name"], "port": row["port"],
               "to": row["to"], "map": row["map"]} for row in link_rows(snapshot)]
     ports.sort(key=lambda row: (row["map"].lower(), row["name"].lower(), row["port"]))
-    subnets = [{"subnet": subnet.cidr, "name": subnet.name} for subnet in snapshot.tribe.subnets]
+    subnets = host_subnets(snapshot.tribe)
     uptime = [{"map": row["map"], "name": row["name"], "status": row["status"], "uptime_24h": row["uptime_24h"],
                "uptime_7d": row["uptime_7d"], "uptime_30d": row["uptime_30d"]}
               for row in device_rows(snapshot) if row["status"] != UNMONITORED]
@@ -529,7 +592,7 @@ def trends(snapshot, now=None):
             "freshness": freshness(snapshot, now)}
 
 
-def series(history, kind, query, now=None):
+def series(history, kind, query, now=None, engine=None):
     now = time.time() if now is None else now
     span = SPANS.get(query.get("span", "24h"), 86400)
     if kind == "port":
@@ -537,7 +600,14 @@ def series(history, kind, query, now=None):
                                      now - span, now)
         return {"kind": "port", "span": query.get("span", "24h"), "points": points}
     if kind == "subnet":
-        points = history.host_series(query.get("subnet", ""), now - span, now)
+        subnet, network = query.get("subnet", ""), query.get("network") or None
+        points = history.host_series(subnet, now - span, now, network=network)
+        if engine is not None and network is not None and (not points or points[-1][0] < now - 60) and \
+                span <= 3 * 86400:  # Raw samples (every few minutes): end on the count the Hosts page has now
+            from .engine import HOST_TREND_WINDOW
+            live = next((row["total"] for row in engine.hosts(HOST_TREND_WINDOW)
+                         if row["subnet"] == subnet and row["network"] == network), 0)
+            points.append([now, live, live])
         return {"kind": "subnet", "span": query.get("span", "24h"), "points": points}
     raise KeyError(kind)
 

@@ -368,6 +368,39 @@ def test_keep_its_history_ticks_the_port_on_the_map(page):
     assert page.chosen() == ("r1", "Gi0/3") and page.keep_check.isChecked()
 
 
+def test_live_readings_of_a_port_not_kept_stay_after_leaving_the_page(page):
+    page.show_port("r1", "Gi0/3")  # Not at a link's end, not ticked to keep
+    page.show()
+    assert page.chosen() == ("r1", "Gi0/3")
+    settle(lambda: page.history_of is not None)
+    assert "only read while this page shows it" in page.source_label.text()
+    page.live_where = ("r1", "gi0/3")
+    now = time.time()
+    page.on_live_sample((now - 5, 1000, 2000, 1000))
+    page.on_live_sample((now, 1000 + 625, 2000 + 1250, 1000))  # 1000 b/s in, 2000 b/s out
+    points = traffic_history.own_store().points("map-test", "r1", "Gi0/3", now - 60, now + 1)
+    assert [point[1:3] for point in points] == [[1000.0, 2000.0]]
+    page.hide()
+    page.show()  # The live readings are forgotten; the kept one is read back
+    settle(lambda: page.history_of is not None)
+    assert [point[1:3] for point in page.graph.own] == [[1000.0, 2000.0]]
+
+
+def test_live_readings_the_monitor_keeps_already_arent_kept_twice(page):
+    class Counters:
+        port_names = {("r1", "gi0/0"): "Gi0/0"}
+
+    page.window.netmap_tab.counters = Counters()
+    page.show_port("r1", "Gi0/0")
+    page.show()
+    page.live_where = ("r1", "gi0/0")
+    now = time.time()
+    page.on_live_sample((now - 5, 0, 0, 1000))
+    page.on_live_sample((now, 5000, 5000, 1000))
+    assert page.live  # Drawn live
+    assert traffic_history.own_store().points("map-test", "r1", "Gi0/0", now - 60, now + 1) == []
+
+
 def test_a_span_choice_is_remembered(page):
     settings = QSettings("NOMAD-test-traffic-span", "none")
     button = next(button for button, code in page.span_buttons.items() if code == "7d")

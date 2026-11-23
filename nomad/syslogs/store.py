@@ -100,6 +100,11 @@ class SyslogStore:
                 [(source, first, last, count, host) for source, (first, last, count, host) in senders.items()])
             return self.connection.execute("SELECT max(id) FROM messages").fetchone()[0]
 
+    def latest_id(self):
+        """The ID of the newest message kept (0: none)."""
+        with self.lock:
+            return self.connection.execute("SELECT max(id) FROM messages").fetchone()[0] or 0
+
     def used_bytes(self):
         """What the messages take in the file (pages in use, not the free ones it will reuse)."""
         page_size = self.connection.execute("PRAGMA page_size").fetchone()[0]

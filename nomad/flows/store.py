@@ -449,14 +449,19 @@ class FlowQueries:
                     break
         return found
 
-    def addresses(self, start, end=None):
+    def addresses(self, start, end=None, senders=False):
         """[[address, when last seen]] of every address in the raw flows (as source or destination) ending between
-        start and end: who's been on the network lately (for the NOMAD Dashboard's hosts per subnet)."""
+        start and end. senders: only the addresses that sent something, which is who's been on the network lately
+        (the NOMAD Dashboard's hosts per subnet): a sweep pings every address in a subnet, so every address turns up
+        as a destination, there or not."""
         end = time.time() + 60 if end is None else float(end)
         seen = {}
-        for address, last in self.rows("SELECT src, MAX(end) FROM flows WHERE end BETWEEN ? AND ? GROUP BY src "
-                                       "UNION ALL SELECT dst, MAX(end) FROM flows WHERE end BETWEEN ? AND ? GROUP BY "
-                                       "dst", (float(start), end, float(start), end)):
+        sql = "SELECT src, MAX(end) FROM flows WHERE end BETWEEN ? AND ? GROUP BY src"
+        parameters = (float(start), end)
+        if not senders:
+            sql += " UNION ALL SELECT dst, MAX(end) FROM flows WHERE end BETWEEN ? AND ? GROUP BY dst"
+            parameters *= 2
+        for address, last in self.rows(sql, parameters):
             if address and (address not in seen or last > seen[address]):
                 seen[address] = last
         return [[address, last] for address, last in sorted(seen.items())]

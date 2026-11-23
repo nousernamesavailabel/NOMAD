@@ -75,6 +75,24 @@ def save(chosen, path=None):
     write(data, path)
 
 
+def move_devices(sources, target, path=None):
+    """Devices merged into target (target None: forgotten): a source's own login goes to target when target has
+    none, and the sources' are dropped. Returns whether the file changed."""
+    data = read(path)
+    devices = data["devices"]
+    moved = False
+    for source in sources:
+        credential = devices.pop(source, None)
+        if credential is None:
+            continue
+        moved = True
+        if target is not None:
+            devices.setdefault(target, credential)
+    if moved:
+        write(data, path)
+    return moved
+
+
 def save_usual(credential_id, path=None):
     data = read(path)
     data["usual"] = credential_id or ""

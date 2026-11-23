@@ -24,6 +24,21 @@ def test_uptime_leaves_out_the_gaps_and_counts_only_known_time():
     assert monitor_record.merge_gaps([(5, 10), (8, 12), (20, 21), (30, 30)]) == [(5.0, 12.0), (20.0, 21.0)]
 
 
+def test_a_device_up_since_first_seen_that_goes_down_keeps_its_uptime(tmp_path):
+    """ISPRTR28: up 22 h (answering the first check isn't noted), then down: its uptime went straight to 0%."""
+    clock = [100000.0]
+    record = LocalRecord(tmp_path / "map.db", clock=lambda: clock[0])
+    went_down = 100000.0 - 600  # Down for the last 10 minutes, after 22 h up
+    record.add_changes(0, [(Change("r1", DOWN, went_down, 22 * 3600.0), "R1", "R1 is down"),
+                           (Change("r2", DOWN, went_down, None), "R2", "R2 is down")])  # Down when first seen
+    uptime = record.uptimes(0)
+    assert uptime["r1"]["24h"] == pytest.approx(22 * 3600 / (22 * 3600 + 600))
+    assert uptime["r2"]["24h"] == 0.0  # Nothing known before it: still all down
+    assert monitor_record.with_known_start([("a", UP, 50.0, 30.0), ("a", DOWN, 60.0, 10.0), ("b", UNKNOWN, 40.0, 5.0)]) \
+        == [("a", DOWN, 20.0), ("b", UNKNOWN, 40.0), ("a", UP, 50.0), ("a", DOWN, 60.0)]
+    record.close()
+
+
 def test_a_run_of_the_same_status_counts_once_and_says_whether_its_start_is_known():
     changes = [("s1", DOWN, 100.0, 50.0), ("s1", DOWN, 500.0, None),  # Noted again after a restart
                ("r1", DOWN, 200.0, None), ("ap", UP, 300.0, 60.0)]

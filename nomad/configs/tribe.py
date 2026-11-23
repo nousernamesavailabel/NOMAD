@@ -6,6 +6,8 @@ from ..system import log_dir
 from . import archive
 
 COPY_FILE = "tribe-configs.db"
+COPY_FORMAT = "2"  # 2: drops the devices the server notes as gone (merged or forgotten). A copy from before read past
+# those notes, so it reads everything once more (absorb's whole), which drops the ones it kept
 
 
 def copy_path():
@@ -27,6 +29,9 @@ class TribeConfigs:
                         self.store.db.execute(f"DELETE FROM {table}")
             with self.store.db:
                 self.store.set_meta("server_id", server_id)
+                if self.store.meta("copy_format") != COPY_FORMAT:
+                    self.store.set_meta("revision", 0)
+                    self.store.set_meta("copy_format", COPY_FORMAT)
 
     @property
     def lock(self):
@@ -49,9 +54,10 @@ class TribeConfigs:
             self.online = False
             raise
         with self.lock:
-            self.store.absorb(changes, revision)
+            self.store.absorb(changes, revision, whole=not since)
         self.online = True
-        return any(changes.get(name) for name in ("devices", "versions", "standards", "compliance", "settings"))
+        return any(changes.get(name) for name in ("devices", "versions", "standards", "compliance", "settings",
+                                                  "gone"))
 
     def send_waiting(self):
         with self.lock:
@@ -116,6 +122,19 @@ class TribeConfigs:
 
     def set_excluded(self, device_id, excluded):
         return self.client.config_request("exclude", device_id=device_id, excluded=bool(excluded))
+
+    def merge_devices(self, sources, target):
+        return self._needs_merge("merge", sources=list(sources), target=target)
+
+    def forget_devices(self, device_ids):
+        return self._needs_merge("forget", device_ids=list(device_ids))
+
+    def _needs_merge(self, action, **body):
+        try:
+            return self.client.config_request(action, **body)
+        except OldServerError:
+            raise OldServerError("The tribe server is running an older NOMAD that can't merge or forget devices in "
+                                 "the config archive: update it first.") from None
 
     def save_standard(self, name, source, user):
         return self.client.config_request("standard", name=name, text=source)

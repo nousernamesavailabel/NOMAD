@@ -196,9 +196,10 @@ class CollectorView:
                 "at": now}
 
     def flow_addresses(self, start):
-        """{address: when last seen} in the flows since start ({} if the Flow Collector can't be read)."""
+        """{address: when it last sent something} in the flows since start (None if the Flow Collector can't be
+        read, or is too old to tell senders apart: an address only sent to, by a sweep say, isn't a host)."""
         try:
-            return {address: when for address, when in self.flows().addresses(start)}
+            return {address: when for address, when in self.flows().senders(start)}
         except Exception as error:
             log.debug("No flow addresses: %s", error)
-            return {}
+            return None

@@ -137,6 +137,55 @@ def test_the_updater_updates_in_order_and_frees_the_syslog_port(app, monkeypatch
     assert calls == ["free 514", "update syslog", "update watcher", "back"] and finished == [[]]
 
 
+def test_the_services_button_shows_its_ampersand(app):
+    banner = ServiceUpdateBanner(admin=True, finder=lambda: [])
+    assert banner.services_button.text().replace("&&", "&") == "Services & Firewall..."
+    assert "&&" in banner.services_button.text()  # A lone & would be taken as a shortcut key and not shown
+    banner.deleteLater()
+
+
+def test_update_now_shows_each_service_in_a_progress_window(app, monkeypatch):
+    from nomad import services_catalog
+    from nomad.ui import service_updates
+    from nomad.ui.service_update_dialog import ServiceUpdateDialog
+    from nomad.ui.tribe_steps import DONE, FAILED
+
+    def refused():
+        raise OSError("access denied")
+
+    entries = [SimpleNamespace(key="watcher", title="Map Watcher", update=lambda: None),
+               SimpleNamespace(key="dashboard", title="NOMAD Dashboard", update=refused)]
+    monkeypatch.setattr(services_catalog, "SERVICES", entries)
+    later = []
+    monkeypatch.setattr(service_updates, "run_in_background", lambda job, done, failed: later.append((job, done)))
+    updater = service_updates.ServiceUpdater(SimpleNamespace())
+    dialog = ServiceUpdateDialog(None, entries, updater)
+    assert dialog.headline.text() == "Updating the Map Watcher and NOMAD Dashboard"
+    assert dialog.close_button.text() == "Hide"
+    assert updater.update(entries)
+    job, done = later[0]
+    done(job())
+    assert dialog.states == {"watcher": DONE, "dashboard": FAILED}
+    assert dialog.notes["dashboard"].text() == "access denied"
+    assert dialog.headline.text() == "Some services weren't updated"
+    assert dialog.close_button.text() == "Close"
+    dialog.deleteLater()
+
+
+def test_the_progress_window_says_when_all_are_up_to_date(app, monkeypatch):
+    from nomad import services_catalog
+    from nomad.ui import service_updates
+    from nomad.ui.service_update_dialog import ServiceUpdateDialog
+    entries = [SimpleNamespace(key="watcher", title="Map Watcher", update=lambda: None)]
+    monkeypatch.setattr(services_catalog, "SERVICES", entries)
+    monkeypatch.setattr(service_updates, "run_in_background", lambda job, done, failed: done(job()))
+    updater = service_updates.ServiceUpdater(SimpleNamespace())
+    dialog = ServiceUpdateDialog(None, entries, updater)
+    assert updater.update(entries)
+    assert dialog.headline.text() == "The Map Watcher is up to date"
+    dialog.deleteLater()
+
+
 def test_the_watcher_drops_the_summaries_of_maps_it_no_longer_monitors(tmp_path):
     monitor_record.write_shared("map-a", {"version": 1}, tmp_path)
     monitor_record.write_shared("map-b", {"version": 1}, tmp_path)

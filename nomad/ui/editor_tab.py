@@ -854,6 +854,12 @@ class EditorTab(QWidget):
             action.setChecked(excluded)
             actions[action] = lambda: self.set_excluded(device_id, not excluded)
             actions[menu.addAction("Log In With...")] = lambda: self.edit_device_logins([device_id])
+        rows = [self.device_row(device_id) or {} for device_id in devices]
+        if rows and not any(row.get("in_scope") for row in rows):  # None on a map any more (one would come back)
+            menu.addSeparator()
+            these = "It" if len(devices) == 1 else f"These {len(devices)}"
+            actions[menu.addAction(f"Merge {these} Into...")] = lambda: self.merge_devices(list(devices))
+            actions[menu.addAction(f"Forget {these}...")] = lambda: self.forget_devices(list(devices))
         if not menu.actions():
             return
         chosen = menu.exec_(position)
@@ -910,6 +916,56 @@ class EditorTab(QWidget):
         self.run_job(lambda: self.configs.set_excluded(device_id, excluded),
                      lambda _: (self.status("Left out of scheduled backups." if excluded else
                                             "Back in scheduled backups.", "success"), self.poke_sync()))
+
+    def merge_devices(self, sources):
+        """Merge Into...: fold devices no longer on a map (an old address, a pull by hand) into another device."""
+        from .editor_panels import MergeDialog
+        with self.configs.lock:
+            devices = self.configs.store.devices()
+        picked = [device for device in devices if device["id"] in sources]
+        choices = [device for device in devices if device["id"] not in sources]
+        if not picked or not choices:
+            self.status("There's no other device in the archive to merge into.", "warning")
+            return
+        dialog = MergeDialog(self, picked, choices)
+        if dialog.exec_() != MergeDialog.Accepted or dialog.target() is None:
+            return
+        target = dialog.target()
+        ids = [device["id"] for device in picked]
+        self.run_job(lambda: self.configs.merge_devices(ids, target["id"]),
+                     lambda _: self.devices_merged(ids, target),
+                     busy=f"Merging into {target['name'] or target['id']}...")
+
+    def devices_merged(self, ids, target):
+        backup_logins.move_devices(ids, target["id"])
+        self.status(f"Merged {len(ids)} device{'s' if len(ids) != 1 else ''} into {target['name'] or target['id']}.",
+                    "success")
+        self.poke_sync()
+        self.schedule_refresh()
+
+    def forget_devices(self, device_ids):
+        """Forget: drop devices no longer on a map, with every copy of their configurations (asked first)."""
+        rows = [self.device_row(device_id) or {"id": device_id} for device_id in device_ids]
+        copies = sum(len(self.history_of(device_id)) for device_id in device_ids)
+        names = ", ".join(f"{row.get('name') or row['id']} ({row['id']})" for row in rows[:5]) + \
+            (f" and {len(rows) - 5} more" if len(rows) > 5 else "")
+        answer = QMessageBox.question(
+            self, "Forget Devices",
+            f"Forget {names}?\n\nThis removes {copies} saved cop{'ies' if copies != 1 else 'y'} of "
+            f"{'their' if len(rows) != 1 else 'its'} configuration from the archive"
+            f"{' for the whole tribe' if getattr(self.configs, 'is_tribe', False) else ''}, and can't be undone. "
+            f"To keep the copies under another device, use Merge Into... instead.",
+            QMessageBox.Yes | QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        self.run_job(lambda: self.configs.forget_devices(list(device_ids)),
+                     lambda _: self.devices_forgotten(list(device_ids)), busy="Forgetting...")
+
+    def devices_forgotten(self, device_ids):
+        backup_logins.move_devices(device_ids, None)
+        self.status(f"Forgot {len(device_ids)} device{'s' if len(device_ids) != 1 else ''}.", "success")
+        self.poke_sync()
+        self.schedule_refresh()
 
     # ----------------------------------------------------------------- Fix commands, sending
 
@@ -1005,7 +1061,8 @@ class EditorTab(QWidget):
 
     def device_choices(self):
         """The devices to pick from when pulling: the open map's routers, switches, firewalls and WLCs, the
-        archive's, and the saved SSH sessions (each once), by name."""
+        archive's, and the saved SSH sessions (each once), by name. An archive device no longer on a map is left out
+        when one that is has its name (an old address of it)."""
         from ..netmap import model
         from ..terminal.sessions import SSH
         found = {}
@@ -1019,9 +1076,15 @@ class EditorTab(QWidget):
         if self.configs is not None:
             with self.configs.lock:
                 devices = self.configs.store.devices()
+            mapped = {(target["name"] or "").lower() for target in found.values()} | \
+                {(device.get("name") or "").lower() for device in devices if device.get("in_scope")}
+            mapped.discard("")
             for device in devices:
-                if device.get("address") and device["id"] not in found:
-                    found[device["id"]] = self.target_of(device["id"])
+                if not device.get("address") or device["id"] in found:
+                    continue
+                if not device.get("in_scope") and (device.get("name") or "").lower() in mapped:
+                    continue
+                found[device["id"]] = self.target_of(device["id"])
         store = getattr(self.window, "session_store", None)
         for session in (store.sessions if store is not None else ()):
             host = (session.host or "").strip()

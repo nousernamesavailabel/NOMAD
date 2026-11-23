@@ -3,7 +3,7 @@
 "use strict";
 (function () {
   const main = document.getElementById("main");
-  const state = {page: "", params: {}, sort: {}, filters: {}, map: null, mapKeep: {}, refreshTimer: null,
+  const state = {page: "", params: {}, sort: {}, filters: {}, picks: {}, picker: null, map: null, mapKeep: {}, refreshTimer: null,
     kiosk: null, loading: false, selected: null, mapFull: false, browserFull: false,
     detailsHidden: readPref("map-details-hidden") === "1", detailsCache: null};
 
@@ -80,10 +80,20 @@
     return h("div", {class: "bar-cell"}, h("div", {class: `bar ${value >= 90 ? "full" : value >= 70 ? "hot" : ""}`},
       span), h("span", {class: "number small"}, fmtPercent(percent)));
   }
-  function stat(label, value, tone) {
-    return h("div", {class: `stat ${tone || ""}`}, h("div", {class: "value"}, value), h("div", {class: "label"}, label));
+  function stat(label, value, tone, href) {
+    return h(href ? "a" : "div", {class: `stat ${tone || ""}`, href}, h("div", {class: "value"}, value),
+      h("div", {class: "label"}, label));
+  }
+  function hostCount(total, macOnly) {
+    return `${total} host${total === 1 ? "" : "s"}` + (macOnly ? ` (and ${macOnly} with no address)` : "");
   }
   function panel(title, ...body) { return h("section", {class: "panel"}, title ? h("h2", {}, title) : null, ...body); }
+  // Panels in two columns, each column stacked on its own so a short panel doesn't leave a gap under it.
+  // Given in reading order (left, right, left, ...); one column on a narrow screen keeps that order.
+  function stacks(...panels) {
+    return h("div", {class: "grid two"}, [0, 1].map((side) =>
+      h("div", {class: "stack"}, panels.filter((_, index) => index % 2 === side))));
+  }
   function empty(text) { return h("p", {class: "empty"}, text); }
   function head(title, subtitle, ...tools) {
     return h("div", {class: "page-head"}, h("div", {}, h("h1", {}, title), subtitle ? h("div", {class: "muted"},
@@ -101,62 +111,210 @@
     return items.map((text) => h("div", {class: "notice"}, text));
   }
 
-  // A sortable, filterable table. columns: [{key, label, number, render(row), value(row)}]
+  // A table as NOMAD's: click a header to sort, click its funnel (or right-click the header) for an Excel-style list
+  // of the column's values to tick, and type in the box above to show only rows with every word. Filters on several
+  // columns combine, and are kept by the values ticked, so they carry over when the page is drawn again.
+  // columns: [{key, label, number, render(row), value(row)}]: value sorts, the text shown filters.
+  const BLANK = "(Blanks)";
+  function compareValues(x, y) {
+    if (x === y) return 0;
+    if (x === null || x === undefined || x === "") return 1;
+    if (y === null || y === undefined || y === "") return -1;
+    return typeof x === "number" && typeof y === "number" ? x - y :
+      String(x).localeCompare(String(y), undefined, {numeric: true, sensitivity: "base"});
+  }
+  function funnelIcon() {
+    const SVG = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(SVG, "svg");
+    svg.setAttribute("viewBox", "0 0 10 10");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS(SVG, "path");
+    path.setAttribute("d", "M0.5 1h9L6 5.2V9L4 8V5.2z");
+    svg.appendChild(path);
+    return svg;
+  }
   function table(id, columns, rows, options) {
     options = options || {};
     const sort = state.sort[id] || options.sort || null;
-    const filter = (state.filters[id] || "").toLowerCase();
-    let shown = rows;
-    if (filter) {
-      shown = rows.filter((row) => columns.some((column) => {
-        const value = column.value ? column.value(row) : row[column.key];
-        return value !== null && value !== undefined && String(value).toLowerCase().includes(filter);
-      }));
-    }
+    const picks = state.picks[id] || (state.picks[id] = {});  // Column key -> Set of the texts shown
+    for (const key of Object.keys(picks)) if (!columns.some((column) => column.key === key)) delete picks[key];
+    const words = (state.filters[id] || "").toLowerCase().split(/\s+/).filter(Boolean);
+    // Each cell drawn once: its node to show and its text to filter on
+    const cells = rows.map((row) => columns.map((column) => {
+      const shown = column.render ? column.render(row) : (row[column.key] ?? "");
+      return {shown, text: shown instanceof Node ? shown.textContent.trim() : String(shown ?? "").trim()};
+    }));
+    const passes = (index, skip) => {
+      for (const [place, column] of columns.entries()) {
+        const allowed = picks[column.key];
+        if (allowed && column.key !== skip && !allowed.has(cells[index][place].text)) return false;
+      }
+      if (!words.length) return true;
+      const line = cells[index].map((cell) => cell.text).concat(columns.map((column) => {
+        const value = column.value ? column.value(rows[index]) : rows[index][column.key];
+        return value === null || value === undefined || typeof value === "object" ? "" : String(value);
+      })).join(" ").toLowerCase();
+      return words.every((word) => line.includes(word));
+    };
+    let order = rows.map((_, index) => index).filter((index) => passes(index));
     if (sort) {
       const column = columns.find((item) => item.key === sort.key);
       if (column) {
-        const value = (row) => column.value ? column.value(row) : row[column.key];
-        shown = [...shown].sort((a, b) => {
-          const x = value(a), y = value(b);
-          if (x === y) return 0;
-          if (x === null || x === undefined || x === "") return 1;
-          if (y === null || y === undefined || y === "") return -1;
-          const order = typeof x === "number" && typeof y === "number" ? x - y :
-            String(x).localeCompare(String(y), undefined, {numeric: true, sensitivity: "base"});
-          return sort.down ? -order : order;
-        });
+        const value = (index) => column.value ? column.value(rows[index]) : rows[index][column.key];
+        order = order.map((index) => [index, value(index)]).sort((a, b) => {
+          const result = compareValues(a[1], b[1]);
+          return sort.down ? -result : result;
+        }).map((pair) => pair[0]);
       }
     }
-    const header = h("tr", {}, columns.map((column) => h("th", {
-      class: `${column.number ? "number" : ""} ${sort && sort.key === column.key ? (sort.down ? "sorted-down" :
-        "sorted-up") : ""}`,
-      onclick: () => {
-        const now = state.sort[id];
-        state.sort[id] = {key: column.key, down: now && now.key === column.key ? !now.down : !!column.number};
-        render(state.data);
-      }}, column.label)));
-    const body = shown.map((row) => h("tr", {class: options.rowClass ? options.rowClass(row) : ""},
-      columns.map((column) => h("td", {class: column.number ? "number" : ""},
-        column.render ? column.render(row) : (row[column.key] ?? "")))));
+    const filtered = Object.keys(picks).length > 0;
+    const header = h("tr", {}, columns.map((column) => {
+      const open = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openPicker(id, columns, column, cells, passes, event.currentTarget.closest("th"));
+      };
+      return h("th", {
+        class: `${column.number ? "number" : ""} ${sort && sort.key === column.key ? (sort.down ? "sorted-down" :
+          "sorted-up") : ""}`,
+        oncontextmenu: open,
+        onclick: () => {
+          const now = state.sort[id];
+          state.sort[id] = {key: column.key, down: now && now.key === column.key ? !now.down : !!column.number};
+          render(state.data);
+        }},
+      h("button", {type: "button", class: `funnel ${picks[column.key] ? "active" : ""}`, onclick: open,
+        title: picks[column.key] ? `Filtered: choose which ${column.label} to show` : `Filter by ${column.label}`,
+        "aria-label": `Filter by ${column.label}`}, funnelIcon()),
+      column.label);
+    }));
+    const body = order.map((index) => h("tr", {class: options.rowClass ? options.rowClass(rows[index]) : ""},
+      columns.map((column, place) => h("td", {class: column.number ? "number" : ""}, cells[index][place].shown))));
+    if (!body.length && rows.length) {
+      body.push(h("tr", {}, h("td", {class: "muted", colspan: columns.length}, "No rows match the filters.")));
+    }
+    const countText = order.length === rows.length ? `${rows.length} row${rows.length === 1 ? "" : "s"}` :
+      `${order.length} of ${rows.length} rows`;
+    const wrap = h("div", {class: "table-wrap", id: `table-${id}`},
+      rows.length ? h("table", {}, h("thead", {}, header), h("tbody", {}, body)) :
+        empty(options.empty || "Nothing to show."));
+    if (options.filterOnly) {
+      const count = document.getElementById(`count-${id}`);
+      if (count) count.textContent = countText;
+      return wrap;
+    }
     const parts = [];
-    if (options.filter !== false && rows.length > 8) {
+    if (rows.length > 8 || words.length || filtered) {
       const input = h("input", {class: "filter", id: `filter-${id}`, type: "search", placeholder: "Filter",
         value: state.filters[id] || "", "aria-label": "Filter the table"});
       input.addEventListener("input", () => {
         state.filters[id] = input.value;
-        const wrap = document.getElementById(`table-${id}`);
-        const fresh = table(id, columns, rows, {...options, filterOnly: true});
-        wrap.replaceWith(fresh);
+        document.getElementById(`table-${id}`).replaceWith(table(id, columns, rows, {...options, filterOnly: true}));
       });
-      if (!options.filterOnly) parts.push(h("div", {class: "page-head"}, input,
-        h("span", {class: "muted small"}, `${rows.length} rows`)));
+      parts.push(h("div", {class: "page-head table-tools"}, input,
+        h("span", {class: "muted small", id: `count-${id}`}, countText),
+        filtered ? h("button", {type: "button", class: "plain small", onclick: () => {
+          state.picks[id] = {};
+          render(state.data);
+        }}, "Clear Column Filters") : null));
     }
-    const wrap = h("div", {class: "table-wrap", id: `table-${id}`},
-      shown.length ? h("table", {}, h("thead", {}, header), h("tbody", {}, body)) :
-        empty(options.empty || "Nothing to show."));
-    if (options.filterOnly) return wrap;
     return h("div", {}, ...parts, wrap);
+  }
+
+  // The funnel's drop-down: the column's values (over the rows the other columns' filters let through, as Excel
+  // does) to tick, a search box that ticks what it matches, and sorting
+  function closePicker() {
+    if (!state.picker) return;
+    state.picker.remove();
+    state.picker = null;
+    document.removeEventListener("mousedown", pickerOutside, true);
+    document.removeEventListener("keydown", pickerKey, true);
+  }
+  function pickerOutside(event) { if (state.picker && !state.picker.contains(event.target)) closePicker(); }
+  function pickerKey(event) { if (event.key === "Escape") closePicker(); }
+  function openPicker(id, columns, column, cells, passes, anchor) {
+    closePicker();
+    const place = columns.indexOf(column);
+    const counts = new Map();
+    cells.forEach((row, index) => {
+      if (passes(index, column.key)) counts.set(row[place].text, (counts.get(row[place].text) || 0) + 1);
+    });
+    const values = [...counts.keys()].sort(compareValues);
+    const picks = state.picks[id];
+    const allowed = picks[column.key];
+    const items = values.map((text) => {
+      const box = h("input", {type: "checkbox"});
+      box.checked = !allowed || allowed.has(text);
+      const label = h("label", {}, box, h("span", {class: text ? "" : "muted"}, text || BLANK),
+        h("span", {class: "count"}, counts.get(text)));
+      return {text, box, label};
+    });
+    const all = h("input", {type: "checkbox"});
+    const updateAll = () => {
+      const shown = items.filter((item) => !item.label.hidden);
+      const ticked = shown.filter((item) => item.box.checked).length;
+      all.checked = shown.length > 0 && ticked === shown.length;
+      all.indeterminate = ticked > 0 && ticked < shown.length;
+    };
+    all.addEventListener("change", () => {
+      for (const item of items) if (!item.label.hidden) item.box.checked = all.checked;
+      updateAll();
+    });
+    for (const item of items) item.box.addEventListener("change", updateAll);
+    const search = h("input", {type: "search", placeholder: "Search", "aria-label": "Search the values"});
+    search.addEventListener("input", () => {
+      const text = search.value.trim().toLowerCase();
+      for (const item of items) {
+        item.label.hidden = !!text && !(item.text || BLANK).toLowerCase().includes(text);
+        if (text) item.box.checked = !item.label.hidden;  // As in Excel: searching ticks what matches
+      }
+      updateAll();
+    });
+    const apply = () => {
+      const chosen = new Set(items.filter((item) => item.box.checked && !item.label.hidden).map((item) => item.text));
+      if (chosen.size === items.length) delete picks[column.key];  // Everything ticked: no filter, as in NOMAD
+      else picks[column.key] = chosen;
+      closePicker();
+      render(state.data);
+    };
+    search.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); apply(); } });
+    const act = (text, action) => h("button", {type: "button", class: "plain", onclick: () => {
+      closePicker();
+      action();
+      render(state.data);
+    }}, text);
+    const others = Object.keys(picks).some((key) => key !== column.key);
+    const popup = h("div", {class: "picker", role: "dialog", "aria-label": `Filter by ${column.label}`},
+      h("div", {class: "picker-title"}, `Show rows where ${column.label} is:`),
+      search,
+      h("div", {class: "picker-list"}, h("label", {}, all, h("span", {}, "(Select All)")),
+        items.map((item) => item.label)),
+      h("div", {class: "picker-buttons"},
+        h("button", {type: "button", onclick: apply}, "OK"),
+        h("button", {type: "button", class: "plain", onclick: closePicker}, "Cancel")),
+      h("div", {class: "picker-menu"},
+        allowed ? act(`Clear Filter from "${column.label}"`, () => { delete picks[column.key]; }) : null,
+        others ? act("Clear All Filters", () => { state.picks[id] = {}; }) : null,
+        act(column.number ? "Sort Smallest to Largest" : "Sort A to Z", () => {
+          state.sort[id] = {key: column.key, down: false};
+        }),
+        act(column.number ? "Sort Largest to Smallest" : "Sort Z to A", () => {
+          state.sort[id] = {key: column.key, down: true};
+        })));
+    updateAll();
+    document.body.appendChild(popup);
+    state.picker = popup;
+    // Under the header cell (above it if there's no room below), kept on the screen
+    const rect = anchor.getBoundingClientRect();
+    const width = popup.offsetWidth, height = popup.offsetHeight;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    const top = rect.bottom + height + 8 > window.innerHeight && rect.top - height - 4 > 0 ?
+      rect.top - height - 4 : rect.bottom + 2;
+    popup.style.left = `${left + window.scrollX}px`;
+    popup.style.top = `${top + window.scrollY}px`;
+    document.addEventListener("mousedown", pickerOutside, true);
+    document.addEventListener("keydown", pickerKey, true);
+    search.focus();
   }
 
   // A line chart: points [[time, a, b, peakA, peakB]]
@@ -237,10 +395,11 @@
           stat("Up", c.up, "up"),
           stat("Checking / can't check", c.unknown + c.cant, c.unknown + c.cant ? "warn" : ""),
           stat("Not monitored", c.unmonitored),
+          stat(`Hosts seen (last ${data.hosts.window})`, data.hosts.total, "accent", `#hosts?window=${data.hosts.window}`),
           stat("Syslog errors (24 h)", data.syslog_severe, data.syslog_severe ? "warn" : ""),
           stat("NetFlow (last hour)", data.flows.available ? fmtBytes(data.flows.bytes) : "–", "accent")),
-        h("div", {class: "grid two"},
-          panel("Down now", data.down.length ? table("ov-down", deviceColumns.slice(0, 7), data.down, {filter: false}) :
+        stacks(
+          panel("Down now", data.down.length ? table("ov-down", deviceColumns.slice(0, 7), data.down) :
             empty("Nothing is down.")),
           panel("Recent events", data.events.length ? h("div", {}, data.events.map((event) => h("div", {class: "event"},
             h("span", {class: `pill ${event.kind}`}, event.kind), " ", h("span", {class: "muted small"}, fmtTime(event.at)),
@@ -251,18 +410,26 @@
             {key: "down", label: "Down", number: true, value: (r) => r.counts.down,
               render: (r) => r.counts.down ? status("down", String(r.counts.down)) : "0"},
             {key: "up", label: "Up", number: true, value: (r) => r.counts.up, render: (r) => r.counts.up},
-            {key: "hosts", label: "Hosts", number: true},
+            {key: "hosts", label: `Hosts (${data.hosts.window})`, number: true},
             {key: "monitored", label: "Monitored", render: (r) => r.monitored ? "Yes" : h("span", {class: "muted"}, "No")},
-          ], data.maps, {filter: false, empty: "No tribe maps yet."})),
+          ], data.maps, {empty: "No tribe maps yet."})),
+          panel(`Hosts per subnet on the maps (last ${data.hosts.window})`, data.map_subnets.length ? table("ov-subnets", [
+            {key: "map", label: "Map"},
+            {key: "subnet", label: "Subnet", render: (r) => h("a", {class: "mono",
+              href: `#trends?${new URLSearchParams({subnet: r.subnet, network: r.network})}`}, r.subnet)},
+            {key: "name", label: "Name"},
+            {key: "total", label: "Hosts", number: true},
+            {key: "percent", label: "Of the subnet", number: true, render: (r) => bar(r.percent)},
+          ], data.map_subnets) : empty("No subnets on the maps yet: they come from the devices' interface addresses.")),
           panel("Busiest links", data.busiest.length ? table("ov-busy", [
             {key: "name", label: "Device"}, {key: "port", label: "Port"}, {key: "to", label: "To"},
             {key: "percent", label: "Use", number: true, render: (r) => bar(r.percent)},
-          ], data.busiest, {filter: false}) : empty("No link traffic read yet.")),
+          ], data.busiest) : empty("No link traffic read yet.")),
           panel("Fullest subnets", data.fullest.length ? table("ov-full", [
             {key: "subnet", label: "Subnet", render: (r) => h("span", {class: "mono"}, r.subnet)},
             {key: "name", label: "Name"}, {key: "network", label: "Network"},
             {key: "percent", label: "Used", number: true, render: (r) => bar(r.percent)},
-          ], data.fullest, {filter: false}) : empty("No IPAM subnets yet."))),
+          ], data.fullest) : empty("No IPAM subnets yet."))),
       ];
     },
 
@@ -289,7 +456,10 @@
       const maps = data.maps || [];
       const id = Number(state.params.id || (maps[0] && maps[0].id) || 0);
       if (!state.params.id && id) {
-        history.replaceState(null, "", `#map?id=${id}&view=${state.params.view || "l2"}`);
+        // Not in kiosk mode: its address has to stay #kiosk... so the wall screen comes back to it after a reload
+        if (!document.body.classList.contains("kiosk")) {
+          history.replaceState(null, "", `#map?id=${id}&view=${state.params.view || "l2"}`);
+        }
         state.params.id = String(id);
         load();
         return [h("p", {class: "muted"}, "Loading...")];
@@ -379,7 +549,7 @@
         {key: "0", label, render: (r) => h("span", {class: "mono"}, r[0]), value: (r) => r[0]},
         {key: "1", label: "Bytes", number: true, render: (r) => fmtBytes(r[1]), value: (r) => r[1]},
         {key: "3", label: "Flows", number: true, value: (r) => r[3], render: (r) => r[3]},
-      ], rows, {filter: false}) : empty("None."));
+      ], rows) : empty("None."));
       return [...notices(data.freshness),
         head("Traffic", "Links and graphed ports, as the Map Watcher last read them", csvLink("traffic")),
         table("links", [
@@ -435,11 +605,13 @@
       const windowButtons = data.windows.map((code) => h("button", {class: `plain ${data.window === code ? "active" : ""}`,
         onclick: () => { location.hash = `#hosts?window=${code}`; }}, `Last ${code}`));
       return [...notices(data.freshness),
-        head("Hosts per subnet", `${data.total} hosts seen in the last ${data.window} (on the maps, in sweeps or in NetFlow)`,
+        head("Hosts per subnet", `${hostCount(data.total, data.mac_only_total)} seen in the last ${data.window}: on the `
+             + "maps' switch tables, in sweeps or in NetFlow, network devices left out",
           ...windowButtons, csvLink("hosts", {window: data.window})),
         table("hosts", [
           {key: "network_name", label: "Network"},
-          {key: "subnet", label: "Subnet", render: (r) => h("a", {class: "mono", href: `#trends?subnet=${encodeURIComponent(r.subnet)}`}, r.subnet)},
+          {key: "subnet", label: "Subnet", render: (r) => h("a", {class: "mono",
+            href: `#trends?${new URLSearchParams({subnet: r.subnet, network: r.network})}`}, r.subnet)},
           {key: "name", label: "Name"},
           {key: "total", label: "Hosts", number: true},
           {key: "map", label: "On the map", number: true}, {key: "sweep", label: "Sweeps", number: true},
@@ -448,7 +620,7 @@
         ], data.subnets, {empty: "No hosts seen in this time."}),
         data.mac_only.length ? h("div", {}, h("h2", {class: "section"}, "Hosts on the maps with no address, by VLAN"),
           table("mac-only", [{key: "map", label: "Map"}, {key: "vlan", label: "VLAN", number: true},
-            {key: "count", label: "Hosts", number: true}], data.mac_only, {filter: false})) : null];
+            {key: "count", label: "Hosts", number: true}], data.mac_only)) : null];
     },
 
     trends(data) {
@@ -463,10 +635,17 @@
           return h("option", {value, selected: value === portKey}, `${item.name} ${item.port}${item.to ? " to " + item.to : ""} (${item.map})`);
         }));
       const subnet = state.params.subnet || "";
-      const subnetSelect = h("select", {"aria-label": "Subnet", onchange: () => setParam("subnet", subnetSelect.value)},
+      const network = state.params.network || (data.subnets.find((item) => item.subnet === subnet) || {}).network || "";
+      const subnetSelect = h("select", {"aria-label": "Subnet", onchange: () => {
+        const [chosenNetwork, chosen] = subnetSelect.value ? JSON.parse(subnetSelect.value) : ["", ""];
+        const params = {...state.params, subnet: chosen, network: chosenNetwork};
+        for (const name of ["subnet", "network"]) if (!params[name]) delete params[name];
+        location.hash = `#trends?${new URLSearchParams(params)}`;
+      }},
         h("option", {value: ""}, "Choose a subnet..."),
-        data.subnets.map((item) => h("option", {value: item.subnet, selected: item.subnet === subnet},
-          `${item.subnet}${item.name ? " " + item.name : ""}`)));
+        data.subnets.map((item) => h("option", {value: JSON.stringify([item.network, item.subnet]),
+          selected: item.subnet === subnet && item.network === network},
+          `${item.subnet}${item.name ? " " + item.name : ""} (${item.network_name})`)));
       const portBox = h("div", {}), subnetBox = h("div", {});
       if (portKey) {
         const [map, device, port] = portKey.split("|");
@@ -477,7 +656,7 @@
         }).catch((error) => portBox.replaceChildren(empty(error.message)));
       } else portBox.appendChild(empty("Choose a port to see its traffic."));
       if (subnet) {
-        api(`/api/series/subnet?${new URLSearchParams({subnet, span})}`).then((series) => {
+        api(`/api/series/subnet?${new URLSearchParams({subnet, network, span})}`).then((series) => {
           subnetBox.replaceChildren(chart(series.points, {series: [1, 2], classes: ["series-a", "series-peak"],
             format: (v) => String(Math.round(v))}), h("div", {class: "chart-legend"}, h("span", {class: "a"},
             "Hosts seen in the hour"), h("span", {class: "p"}, "Peak")));
@@ -603,6 +782,7 @@
     const active = document.activeElement;
     const focused = active && active.classList.contains("filter") ? active.id : "";
     if (state.map && state.mapKeepKey) state.mapKeep[state.mapKeepKey] = state.map.state();
+    closePicker();
     main.replaceChildren(...builder(data));
     window.scrollTo(0, scroll);
     if (focused) {
@@ -656,7 +836,10 @@
 
   function refreshSoon() {
     clearTimeout(state.refreshTimer);
-    state.refreshTimer = setTimeout(() => { if (!state.loading && !document.hidden) load(); }, 1200);
+    state.refreshTimer = setTimeout(() => {
+      if (state.picker) refreshSoon();  // Not while a column's filter list is open: its counts would go stale
+      else if (!state.loading && !document.hidden) load();
+    }, 1200);
   }
 
   function listen() {
@@ -678,9 +861,13 @@
   function startKiosk(params) {
     document.body.classList.add("kiosk");
     const list = (params.pages || "overview,sites,devices").split(",").filter((name) => pages[name]);
+    // every=0 (or off, or a single page) stays on the first page: it still updates itself, without being drawn
+    // afresh on a timer, so a device clicked on the map stays selected
+    const still = list.length < 2 || ["0", "off", "no"].includes(String(params.every || "").toLowerCase());
     const every = Math.max(10, Number(params.every) || 30) * 1000;
     let index = 0;
     const show = () => {
+      if (state.picker) return;  // Someone is choosing a column's filter: stay on this page until they're done
       state.page = list[index % list.length];
       state.params = state.page === "map" && params.map ? {id: params.map} : {};
       state.selected = null;
@@ -688,7 +875,7 @@
       index++;
     };
     clearInterval(state.kiosk);
-    state.kiosk = setInterval(show, every);
+    state.kiosk = still ? null : setInterval(show, every);
     show();
   }
 

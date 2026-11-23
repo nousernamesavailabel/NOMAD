@@ -1,4 +1,5 @@
 """Widgets and helpers shared by the tabs."""
+import contextlib
 import logging
 import socket
 import threading
@@ -101,6 +102,12 @@ class SortableTableItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
+def fitting_held(view):
+    """ColumnFitter.held for a view with one, else nothing."""
+    fitter = getattr(view, "column_fitter", None)
+    return fitter.held() if fitter is not None else contextlib.nullcontext()
+
+
 def read_only_table(columns):
     """A table of results: rows are selected whole, one at a time, and can't be edited."""
     table = QTableWidget(0, len(columns))
@@ -142,11 +149,29 @@ class ColumnFitter(QObject):
             view.viewport().installEventFilter(self)  # Its resizes: the stretch column fills the room again
         header.sectionResized.connect(self.on_resized)
         header.sectionHandleDoubleClicked.connect(self.on_double_clicked)
-        model = view.model()
-        for signal in (model.rowsInserted, model.rowsRemoved, model.dataChanged, model.modelReset,
-                       model.layoutChanged, model.columnsInserted, model.headerDataChanged):
+        for signal in self.model_signals(view):
             signal.connect(self.schedule)
         self.schedule()
+
+    @staticmethod
+    def model_signals(view):
+        model = view.model()
+        return (model.rowsInserted, model.rowsRemoved, model.dataChanged, model.modelReset, model.layoutChanged,
+                model.columnsInserted, model.headerDataChanged)
+
+    @contextlib.contextmanager
+    def held(self):
+        """Many cells set at once: fit once afterwards. Each cell set is otherwise a signal into Python (thousands of
+        rows took seconds)."""
+        signals = self.model_signals(self.view)
+        for signal in signals:
+            signal.disconnect(self.schedule)
+        try:
+            yield
+        finally:
+            for signal in signals:
+                signal.connect(self.schedule)
+            self.schedule()
 
     @property
     def header(self):

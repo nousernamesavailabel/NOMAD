@@ -165,6 +165,7 @@ class MainWindow(QMainWindow):
         self.service_banner.open_services.connect(self.show_services)
         self.service_banner.update_wanted.connect(self.update_services)
         self.service_updater = None  # service_updates.ServiceUpdater, made when first needed
+        self.service_update_dialog = None  # The window Update Now last opened
         layout.addWidget(self.service_banner)
 
         # App-wide adapter picker used by the Interfaces, MTU, Ping, Sweep and other pages
@@ -815,14 +816,23 @@ class MainWindow(QMainWindow):
         self.service_banner.check()  # It may have updated some
 
     def update_services(self, keys):
-        """The banner's Update Now: update these services with the settings they have, no window opened."""
+        """The banner's Update Now: update these services with the settings they have (no service's own window),
+        showing each one's progress in a window."""
         from .. import services_catalog
+        from .service_update_dialog import ServiceUpdateDialog
         from .service_updates import ServiceUpdater
         if self.service_updater is None:
             self.service_updater = ServiceUpdater(self, self)
             self.service_updater.finished.connect(self.services_updated)
         entries = [entry for entry in services_catalog.SERVICES if entry.key in keys]
-        if entries and self.service_updater.update(entries):
+        if not entries or self.service_updater.running:
+            return
+        if self.service_update_dialog is not None:  # The last one's, still open
+            self.service_update_dialog.close()
+            self.service_update_dialog.deleteLater()
+        self.service_update_dialog = ServiceUpdateDialog(self, entries, self.service_updater)
+        self.service_update_dialog.show()
+        if self.service_updater.update(entries):
             self.service_banner.set_updating(True)
 
     def services_updated(self, problems):

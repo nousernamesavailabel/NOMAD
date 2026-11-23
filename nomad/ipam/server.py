@@ -53,7 +53,8 @@ Tribe maps (network maps shared by everyone; see nomad/netmap/shared.py), kept i
 
 The config archive (API 16; see nomad/configs/archive.py), kept in configs.db: every change to each device's
 configuration, scheduled backups handed out device by device, and standards checked as copies arrive:
-    GET  /api/configs/changes?since=N devices, versions (without their texts), standards and results after revision N
+    GET  /api/configs/changes?since=N devices, versions (without their texts), standards and results after revision N,
+                                      and (API 20) the devices gone since: [{"device_id", "into_id"}]
     GET  /api/configs/version?id=N    one version, with its text
     POST /api/configs/claim           {"holder", "kind", "limit", "status"}: due devices for this computer to back up
                                       (status: how its last round went)
@@ -65,6 +66,8 @@ configuration, scheduled backups handed out device by device, and standards chec
                                       "platform"}: a configuration pulled (kept when it changed)
     POST /api/configs/review          {"version_id"}: a change seen
     POST /api/configs/exclude         {"device_id", "excluded"}: left out of scheduled backups
+    POST /api/configs/merge           {"sources", "target"}: devices no longer on a map folded into another (API 20)
+    POST /api/configs/forget          {"device_ids"}: devices no longer on a map dropped with their copies (API 20)
     POST /api/configs/standard        {"name", "text"} saves a standard ({"name", "delete": true} removes it)
     POST /api/configs/settings        {"values": {"interval_hours"}}
     /api/wait also takes configs_since.
@@ -124,12 +127,13 @@ VIEWER_RECHECK_SECONDS = 5
 STOP_WAIT_SECONDS = 10  # How long stop() waits for the listener to close
 HANDSHAKE_SECONDS = 15  # A connection that hasn't finished its TLS handshake by then is dropped
 IDLE_SECONDS = MAX_WAIT_SECONDS + 30  # A connection that sends nothing for this long is closed (past /api/wait's)
-API_LEVEL = 19  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
+API_LEVEL = 20  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
 # 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks, 11 assets,
 # 12 software targets, 13 wireless controller assets, 14 map icons locked in place, 15 taking a laptop's whole network,
 # 16 the config archive, 17 viewer keys (the NOMAD Dashboard) and ports graphed on the dashboard (a map section),
 # 18 the Map Watcher's monitoring of each map (/api/maps/monitoring), for every NOMAD to show, 19 the Map Watcher's
-# readings of the ports' traffic (/api/maps/traffic, kept in traffic.db), for every NOMAD's Traffic Graphs.
+# readings of the ports' traffic (/api/maps/traffic, kept in traffic.db), for every NOMAD's Traffic Graphs, 20 merging
+# and forgetting config archive devices (/api/configs/merge and /forget; changes name the devices gone).
 # Clients cope with servers below this, and recommend updating them (add each new level to client.SERVER_FEATURES)
 
 
@@ -651,6 +655,14 @@ class IpamServer:
                 revision = self.configs.review(request["version_id"], user)
             elif action == "exclude":
                 revision = self.configs.set_excluded(request["device_id"], bool(request.get("excluded")))
+            elif action == "merge":
+                target = _clean(request.get("target"), 200)
+                revision = self.configs.merge_devices([_clean(item, 200) for item in request.get("sources") or []],
+                                                      target)
+                config_checks.recheck(self.configs, target)
+            elif action == "forget":
+                revision = self.configs.forget_devices([_clean(item, 200) for item in
+                                                        request.get("device_ids") or []])
             elif action == "standard":
                 name = _clean(request.get("name"), 200)
                 if request.get("delete"):

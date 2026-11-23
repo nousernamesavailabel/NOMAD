@@ -69,7 +69,8 @@ log = logging.getLogger(__name__)
 MAP_FILTER = f"Network maps (*{store.EXTENSION})"
 KIND_WEIGHTS = {FIREWALL: 3, ROUTER: 2, SWITCH: 1, WLC: 1}  # Breaks ties when choosing the top device
 SAVE_DELAY_MS = 1000
-WATCHER_REFRESH_MS = 60000  # How often the Map Watcher's monitoring of the map open is read again
+WATCHER_REFRESH_MS = 5000  # How often the Map Watcher's monitoring of the map open is read again on this computer
+WATCHER_FETCH_SECONDS = 60  # How often it's fetched from the tribe (a tribe map the Watcher here doesn't monitor)
 UNDO_LIMIT = 100  # Layout changes Undo can go back through
 DEFAULTS = {"max_hops": 6, "max_devices": 500, "timeout": 2000}
 ALIGNMENTS = [("Align Left", LEFT), ("Align Center", CENTER), ("Align Right", RIGHT), None, ("Align Top", TOP),
@@ -212,6 +213,7 @@ class NetworkMapTab(QWidget):
         self.watcher = MapWatcher(self)
         self.record_shown = None  # The name of the monitoring record the Monitor is keeping (monitor_record)
         self.watcher_wanted = None  # The record name the Map Watcher's monitoring is being fetched for
+        self.watcher_applied = None  # (record name, the summary's "updated" or None if fetched, when) shown last
         self.watcher_timer = QTimer(self)
         self.watcher_timer.setInterval(WATCHER_REFRESH_MS)
         self.watcher_timer.timeout.connect(self.refresh_watcher)
@@ -1084,6 +1086,7 @@ class NetworkMapTab(QWidget):
         self.record_shown = None
         self.monitor.set_record(None)
         self.monitor.set_watcher({})
+        self.watcher_applied = None
         self.watcher_timer.stop()
         self.show_details(None)
         self.update_tribe_label()
@@ -2745,9 +2748,14 @@ class NetworkMapTab(QWidget):
             self.set_details(group_html(network_map, selection[1], self.monitor.status), selection)
         elif selection[0] == "device":
             key = selection[1]
-            own = self.monitor.own_status(key) if self.monitor.watcher_status(key) is not None else None
-            self.set_details(device_html(network_map, key, self.monitor.status(key), self.counters.live, own),
-                             selection)
+            shown, watcher = self.monitor.status(key), self.monitor.watcher_status(key)
+            if watcher is None:
+                other = None
+            elif shown is watcher:  # The Watcher's, and this computer's too while it monitors the device
+                other = self.monitor.own_status(key)
+            else:  # This computer has seen a change the Watcher hasn't caught up with yet
+                other = watcher
+            self.set_details(device_html(network_map, key, shown, self.counters.live, other), selection)
         elif selection[0] == "node":
             node = self.l3_nodes.get(selection[1])
             if node is not None:
@@ -4133,13 +4141,15 @@ class NetworkMapTab(QWidget):
                 record = None
             self.monitor.set_record(record, network_map.status_log)
             self.monitor.set_watcher({})
+            self.watcher_applied = None
             self.refresh_watcher()
         if not self.watcher_timer.isActive():
             self.watcher_timer.start()
 
     def refresh_watcher(self):
-        """The Map Watcher's monitoring of the map open: from this computer when the Watcher runs here, else from
-        the tribe for a tribe map (in the background)."""
+        """The Map Watcher's monitoring of the map open: from this computer when the Watcher runs here (read every
+        WATCHER_REFRESH_MS, shown again when it has written a new round), else from the tribe for a tribe map (in the
+        background, every WATCHER_FETCH_SECONDS)."""
         name = self.record_shown
         if name is None or self.network_map is None:
             return
@@ -4147,29 +4157,43 @@ class NetworkMapTab(QWidget):
         states = monitor_record.from_summary(summary)
         maps = self.tribe.maps if self.tribe_map_id is not None else None
         if states or maps is None:
-            self.monitor.set_watcher(states, (summary or {}).get("source", "") if states else "")
+            self.apply_watcher(name, summary, states)
             return
         if self.watcher_wanted == name:
             return  # Still being fetched
+        if self.watcher_applied is not None and self.watcher_applied[0] == name and self.watcher_applied[1] is None \
+                and time.time() - self.watcher_applied[2] < WATCHER_FETCH_SECONDS:
+            return  # Fetched from the tribe a moment ago
         self.watcher_wanted = name
         map_id = self.tribe_map_id
         run_in_background(lambda: (name, maps.fetch_monitoring(map_id)), self.on_watcher_fetched,
                           self.on_watcher_fetch_failed)
 
+    def apply_watcher(self, name, summary, states, fetched=False):
+        """Show the Watcher's monitoring: a summary read from this computer only when it's a new one (or a minute
+        has passed, so a Watcher that stopped is grayed), not on every read."""
+        updated = (summary or {}).get("updated") if not fetched else None
+        now = time.time()
+        if (not fetched and self.watcher_applied is not None and self.watcher_applied[:2] == (name, updated)
+                and now - self.watcher_applied[2] < WATCHER_FETCH_SECONDS):
+            return
+        self.watcher_applied = (name, updated, now)
+        self.monitor.set_watcher(states, (summary or {}).get("source", "") if states else "",
+                                 (summary or {}).get("interval"))
+
     def on_watcher_fetched(self, result):
         name, summary = result
         self.watcher_wanted = None
         if name == self.record_shown:
-            states = monitor_record.from_summary(summary)
-            self.monitor.set_watcher(states, (summary or {}).get("source", "") if states else "")
+            self.apply_watcher(name, summary, monitor_record.from_summary(summary), fetched=True)
 
     def on_watcher_fetch_failed(self, _error):
         """Offline, or a tribe server before API 18: the copy fetched last, while it's fresh enough."""
         self.watcher_wanted = None
         maps = self.tribe.maps if self.tribe_map_id is not None else None
         summary = maps.kept_monitoring(self.tribe_map_id) if maps is not None else None
-        states = monitor_record.from_summary(summary)
-        self.monitor.set_watcher(states, (summary or {}).get("source", "") if states else "")
+        if self.record_shown is not None:
+            self.apply_watcher(self.record_shown, summary, monitor_record.from_summary(summary), fetched=True)
 
     # ----------------------------------------------------------------- Comparing
 
@@ -4782,30 +4806,35 @@ def blocks_html(blocks):
     return "".join(parts)
 
 
-def device_html(network_map, key, state=None, live=None, own=None):
-    """state: the device's monitor.DeviceStatus while it's monitored (the Map Watcher's when it monitors it, else this
-    computer's); live: the tunnels as monitoring last read them; own: this computer's DeviceStatus too, while it
-    monitors a device the Map Watcher shows."""
-    return details_html(device_details(network_map, key, monitor_status_text(state), monitor_rows(state, own),
+def device_html(network_map, key, state=None, live=None, other=None):
+    """state: the device's monitor.DeviceStatus while it's monitored, as the map shows it (the Map Watcher's when it
+    monitors it, else this computer's); live: the tunnels as monitoring last read them; other: the other one's
+    DeviceStatus while both monitor it (this computer's under the Watcher's, or the Watcher's when this computer has
+    seen a change it hasn't caught up with yet)."""
+    return details_html(device_details(network_map, key, monitor_status_text(state), monitor_rows(state, other),
                                        live=live))
 
 
-def monitor_rows(state, own=None, now=None):
-    """The details pane's rows on monitoring, after Status: who monitors it (when it's the Map Watcher), its uptime,
-    when it was last checked, and this computer's own status and uptime when it monitors the device too."""
+def monitor_rows(state, other=None, now=None):
+    """The details pane's rows on monitoring, after Status: who monitors it, its uptime, when it was last checked,
+    and the other monitoring's status and uptime when both monitor the device: this computer's under the Map
+    Watcher's, or the Watcher's under this computer's while the Watcher hasn't caught up with a change yet."""
     now = time.time() if now is None else now
     rows = []
     if state is not None:
         if state.source:
             rows.append(("Monitored by", state.source[0].upper() + state.source[1:]))
+        elif other is not None and other.source:
+            rows.append(("Monitored by", f"This computer ({other.source} hasn't caught up yet)"))
         if state.uptime:
             rows.append(("Uptime", monitor_record.uptime_text(state.uptime)))
         if state.checked:
             rows.append(("Last checked", f"{monitor.duration_text(now - state.checked)} ago"))
-    if own is not None:
-        rows.append(("This computer", monitor_status_text(own)))
-        if own.uptime:
-            rows.append(("Uptime (this computer)", monitor_record.uptime_text(own.uptime)))
+    if other is not None:
+        name = other.source[0].upper() + other.source[1:] if other.source else "This computer"
+        rows.append((name, monitor_status_text(other)))
+        if other.uptime:
+            rows.append((f"Uptime ({other.source or 'this computer'})", monitor_record.uptime_text(other.uptime)))
     return rows
 
 

@@ -36,8 +36,8 @@ CREATE TABLE IF NOT EXISTS host_counts (subnet TEXT, network TEXT, at REAL, tota
     flow INTEGER);
 CREATE INDEX IF NOT EXISTS host_counts_subnet ON host_counts(subnet, at);
 CREATE INDEX IF NOT EXISTS host_counts_at ON host_counts(at);
-CREATE TABLE IF NOT EXISTS host_counts_hourly (subnet TEXT, hour INTEGER, sum_total REAL, max_total INTEGER,
-    samples INTEGER, PRIMARY KEY (subnet, hour)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS subnet_hosts_hourly (network TEXT, subnet TEXT, hour INTEGER, sum_total REAL,
+    max_total INTEGER, samples INTEGER, PRIMARY KEY (network, subnet, hour)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS ip_seen (ip TEXT, source TEXT, last_seen REAL, PRIMARY KEY (ip, source)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS gaps (start_at REAL, end_at REAL, PRIMARY KEY (start_at, end_at)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS ip_seen_when ON ip_seen(source, last_seen);
@@ -53,6 +53,12 @@ def connect(path, readonly=False):
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
         connection.executescript(SCHEMA)
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'host_counts_hourly'").fetchone():
+            # 2.8.0-2.9.0 kept a subnet's hours whatever network it was in: kept, with no network
+            with connection:
+                connection.execute("INSERT OR IGNORE INTO subnet_hosts_hourly SELECT '', subnet, hour, sum_total, "
+                                   "max_total, samples FROM host_counts_hourly")
+                connection.execute("DROP TABLE host_counts_hourly")
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -128,9 +134,10 @@ class HistoryStore:
                                 [dict(count, at=float(at)) for count in counts])
             for count in counts:
                 self.db.execute(
-                    "INSERT INTO host_counts_hourly VALUES (?, ?, ?, ?, 1) ON CONFLICT(subnet, hour) DO UPDATE SET "
-                    "sum_total = sum_total + excluded.sum_total, max_total = max(max_total, excluded.max_total), "
-                    "samples = samples + 1", (count["subnet"], hour, count["total"], count["total"]))
+                    "INSERT INTO subnet_hosts_hourly VALUES (?, ?, ?, ?, ?, 1) ON CONFLICT(network, subnet, hour) DO "
+                    "UPDATE SET sum_total = sum_total + excluded.sum_total, max_total = max(max_total, "
+                    "excluded.max_total), samples = samples + 1",
+                    (count["network"], count["subnet"], hour, count["total"], count["total"]))
 
     def note_seen(self, source, seen):
         """{address: when last seen} by a source ("map" or "flow")."""
@@ -139,6 +146,10 @@ class HistoryStore:
                 self.db.executemany(
                     "INSERT INTO ip_seen VALUES (?, ?, ?) ON CONFLICT(ip, source) DO UPDATE SET last_seen = "
                     "max(last_seen, excluded.last_seen)", [(ip, source, float(when)) for ip, when in seen.items()])
+
+    def forget_seen(self, source):
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM ip_seen WHERE source = ?", (source,))
 
     # ----------------------------------------------------------------- Reading
 
@@ -185,18 +196,26 @@ class HistoryStore:
                                      "max(speed) AS speed FROM rates_hourly WHERE hour >= ? GROUP BY map_id, device, "
                                      "port", (int(start // 3600),))}
 
-    def host_series(self, subnet, start, end=None, hourly=None):
-        """[[time, hosts]] of a subnet."""
+    def host_series(self, subnet, start, end=None, hourly=None, network=None):
+        """[[time, hosts, peak]] of a subnet in a network (the same subnet can be in two networks: two sites both
+        with 10.0.0.0/24). Hours kept before networks were (network "") count with every network."""
         end = self.clock() if end is None else end
         if hourly is None:
             hourly = end - start > 3 * 86400
+        where, parameters = "subnet = ?", [subnet]
+        if network is not None:
+            where, parameters = where + " AND network IN (?, '')", parameters + [network]
         if hourly:
             return [[row["hour"] * 3600, round(row["sum_total"] / row["samples"], 1), row["max_total"]]
-                    for row in self.rows("SELECT * FROM host_counts_hourly WHERE subnet = ? AND hour BETWEEN ? AND ? "
-                                         "ORDER BY hour", (subnet, int(start // 3600), int(end // 3600)))]
+                    for row in self.rows(
+                        f"SELECT hour, sum(sum_total) AS sum_total, sum(samples) AS samples, max(max_total) AS "
+                        f"max_total FROM subnet_hosts_hourly WHERE {where} AND hour BETWEEN ? AND ? GROUP BY hour "
+                        "ORDER BY hour", (*parameters, int(start // 3600), int(end // 3600)))]
+        if network is not None:
+            where = "subnet = ? AND network = ?"
         return [[row["at"], row["total"], row["total"]] for row in self.rows(
-            "SELECT at, total FROM host_counts WHERE subnet = ? AND at BETWEEN ? AND ? ORDER BY at",
-            (subnet, float(start), float(end)))]
+            f"SELECT at, total FROM host_counts WHERE {where} AND at BETWEEN ? AND ? ORDER BY at",
+            (*parameters, float(start), float(end)))]
 
     # ----------------------------------------------------------------- Keeping it in bounds
 
@@ -213,7 +232,7 @@ class HistoryStore:
             self.db.execute("DELETE FROM rates WHERE at < ?", (raw_start,))
             self.db.execute("DELETE FROM host_counts WHERE at < ?", (raw_start,))
             self.db.execute("DELETE FROM rates_hourly WHERE hour < ?", (int(hourly_start // 3600),))
-            self.db.execute("DELETE FROM host_counts_hourly WHERE hour < ?", (int(hourly_start // 3600),))
+            self.db.execute("DELETE FROM subnet_hosts_hourly WHERE hour < ?", (int(hourly_start // 3600),))
             self.db.execute("DELETE FROM changes WHERE at < ?", (hourly_start,))
             self.db.execute("DELETE FROM ip_seen WHERE last_seen < ?", (now - 30 * 86400,))
             self.db.execute("DELETE FROM gaps WHERE end_at < ?", (hourly_start,))

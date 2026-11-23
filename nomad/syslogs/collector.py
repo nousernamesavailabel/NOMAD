@@ -54,6 +54,9 @@ class SyslogCollector:
     def start(self):
         """Raises OSError if the port can't be listened on."""
         self.store = SyslogStore(self.path, self.keep_days, self.max_bytes, self.clock)
+        # What's kept already: status() says 0 otherwise until a message comes in, and a feed that had read up to the
+        # newest took 0 as the messages deleted and handed them all over again (every 30 s)
+        self.latest_id = self.store.latest_id()
         receiver = self.receiver_class(self.on_message, self.address, self.port, self.tcp, exclusive=True)
         try:
             receiver.start()

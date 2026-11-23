@@ -73,6 +73,16 @@ class LocalConfigs:
         with self.lock:
             return self.store.set_excluded(device_id, excluded)
 
+    def merge_devices(self, sources, target):
+        with self.lock:
+            revision = self.store.merge_devices(sources, target)
+            checks.recheck(self.store, target)
+            return revision
+
+    def forget_devices(self, device_ids):
+        with self.lock:
+            return self.store.forget_devices(device_ids)
+
     def save_standard(self, name, source, user):
         with self.lock:
             self.store.save_standard(name, source, user, time.time())

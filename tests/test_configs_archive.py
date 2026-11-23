@@ -513,3 +513,182 @@ def test_server_results_from_every_computer(server, tmp_path):
     assert found == [("alice (PC2)", False, "Authentication failed."), ("alice (PC1)", True, "first copy")]
     one.close()
     two.close()
+
+
+# ----------------------------------------------------------------- A device's old address: folded, merged, forgotten
+
+def mapped(device_id, name, *addresses):
+    return {"id": device_id, "name": name, "address": device_id, "names": [name, *addresses], "platform": "ios",
+            "kind": "router", "facts": {"hostname": name, "kind": "router"}}
+
+
+def test_new_address_folds_the_old_row_in(store):
+    store.sync_devices([mapped("192.168.5.102", "EVE-PER")], now=0)
+    old = store.upload("192.168.5.102", "running", CONFIG, "x", archive.SCHEDULED, now=10)
+    store.set_excluded("192.168.5.102", True)
+    changed = store.sync_devices([mapped("10.18.0.1", "EVE-PER", "172.18.0.1")], now=20)
+    assert changed == {"192.168.5.102", "10.18.0.1"}
+    assert [device["id"] for device in store.devices()] == ["10.18.0.1"]
+    device = store.device("10.18.0.1")
+    assert device["last_ok"] == 10 and device["created"] == 0 and device["in_scope"] and device["excluded"]
+    assert [item["id"] for item in store.history("10.18.0.1")] == [old["version_id"]]
+    assert [item["device_id"] for item in store.results()] == ["10.18.0.1"]
+    # The next copy is compared with the old address's
+    assert not store.upload("10.18.0.1", "running", CONFIG, "x", now=30)["stored"]
+
+
+def test_old_rows_fold_by_name_or_address_only_when_unambiguous(store):
+    store.upload("192.168.5.125", "running", CONFIG, "x", name="EVE-PER", now=1)  # Same name
+    store.upload("192.168.5.103", "running", CONFIG, "x", name="eve-per.lab", now=2)  # Still one of its addresses
+    store.upload("10.0.0.7", "running", CONFIG, "x", name="10.0.0.7", now=3)  # Only an address: left alone
+    store.upload("10.0.0.8", "running", CONFIG, "x", name="SW", now=4)  # Two mapped devices called SW
+    store.sync_devices([mapped("10.18.0.1", "EVE-PER", "192.168.5.103"), mapped("10.0.0.20", "SW"),
+                        mapped("10.0.0.21", "SW")], now=5)
+    assert sorted(device["id"] for device in store.devices()) == ["10.0.0.20", "10.0.0.21", "10.0.0.7", "10.0.0.8",
+                                                                  "10.18.0.1"]
+    assert len(store.history("10.18.0.1")) == 2
+
+
+def test_merge_and_forget_by_hand(store):
+    store.sync_devices(rows("a"), now=0)
+    store.upload("old", "running", CONFIG, "x", name="Old name", now=1)
+    store.upload("junk", "running", CONFIG, "x", name="Junk", now=2)
+    with pytest.raises(ArchiveError, match="still on a map"):
+        store.merge_devices(["a"], "old")
+    with pytest.raises(ArchiveError, match="still on a map"):
+        store.forget_devices(["a"])
+    store.merge_devices(["old"], "a")
+    assert store.device("old") is None and len(store.history("a")) == 1
+    store.forget_devices(["junk"])
+    assert store.device("junk") is None and store.history("junk") == []
+    # A device made again under an id that went is back
+    store.upload("junk", "running", CONFIG, "x", now=3)
+    assert store.device("junk") is not None
+    assert "junk" not in {item["device_id"] for item in store.changes_since(1)[0]["gone"]}
+
+
+def test_copy_drops_devices_gone(store, tmp_path):
+    copy = ConfigStore(tmp_path / "copy.db")
+    store.sync_devices(rows("a"), now=0)
+    first = store.upload("old", "running", CONFIG, "x", name="Old", now=1)
+    store.upload("junk", "running", CONFIG, "x", now=2)
+    copy.absorb(*store.changes_since(0))
+    copy.store_text(first["version_id"], CONFIG)
+    since = copy.revision()
+    store.merge_devices(["old"], "a")
+    store.forget_devices(["junk"])
+    copy.absorb(*store.changes_since(since))
+    assert [device["id"] for device in copy.devices()] == ["a"]
+    [version] = copy.history("a")
+    assert version["id"] == first["version_id"] and copy.has_text(version["id"])  # The text it had is kept
+    assert copy.history("junk") == []
+    copy.close()
+
+
+def test_local_merge_checks_standards_again(tmp_path):
+    configs = local.LocalConfigs(tmp_path / "local.db")
+    configs.set_scope(rows("r1"))
+    configs.save_standard("NTP", STANDARD, "alice")
+    configs.upload("old", "running", CONFIG, "alice", name="Old")
+    configs.merge_devices(["old"], "r1")
+    [row] = configs.store.compliance("r1")
+    assert row["failed"] == 1
+    configs.close()
+
+
+def test_server_merge_and_forget(server, tmp_path):
+    share_map(server)
+    laptop, _ = team(server, tmp_path, "PC1")
+    laptop.upload("192.168.5.9", "running", CONFIG, "alice", name="Old R1")
+    laptop.upload("192.168.5.10", "running", CONFIG, "alice", name="Junk")
+    laptop.sync()
+    assert {device["id"] for device in laptop.store.devices()} == {"10.0.0.1", "10.0.0.2", "192.168.5.9",
+                                                                  "192.168.5.10"}
+    with pytest.raises(Exception, match="still on a map"):
+        laptop.forget_devices(["10.0.0.1"])
+    laptop.merge_devices(["192.168.5.9"], "10.0.0.1")
+    laptop.forget_devices(["192.168.5.10"])
+    laptop.sync()
+    assert {device["id"] for device in laptop.store.devices()} == {"10.0.0.1", "10.0.0.2"}
+    assert len(laptop.store.history("10.0.0.1")) == 1
+    laptop.close()
+
+
+def test_merging_a_device_already_gone_tells_copies_again(store, tmp_path):
+    # A copy that read past the gone notes (a NOMAD from before them) still shows the old row: merging or forgetting
+    # it again works, and sends the note once more
+    copy = ConfigStore(tmp_path / "copy.db")
+    store.sync_devices(rows("a"), now=0)
+    store.upload("old", "running", CONFIG, "x", name="Old", now=1)
+    store.upload("junk", "running", CONFIG, "x", now=2)
+    copy.absorb(*store.changes_since(0))
+    store.merge_devices(["old"], "a")
+    store.forget_devices(["junk"])
+    changes, revision = store.changes_since(copy.revision())
+    copy.absorb(dict(changes, gone=[]), revision)  # Missed them
+    assert {device["id"] for device in copy.devices()} == {"a", "old", "junk"}
+    since = copy.revision()
+    store.merge_devices(["old"], "a")
+    store.forget_devices(["junk"])
+    copy.absorb(*store.changes_since(since))
+    assert [device["id"] for device in copy.devices()] == ["a"]
+    assert len(store.history("a")) == 1
+    with pytest.raises(ArchiveError, match="isn't in the config archive"):
+        store.merge_devices(["never"], "a")
+    copy.close()
+
+
+def test_whole_absorb_drops_devices_the_server_doesnt_keep(store, tmp_path):
+    copy = ConfigStore(tmp_path / "copy.db")
+    store.sync_devices(rows("a"), now=0)
+    store.upload("old", "running", CONFIG, "x", name="Old", now=1)
+    copy.absorb(*store.changes_since(0))
+    store.merge_devices(["old"], "a")
+    changes, revision = store.changes_since(copy.revision())
+    copy.absorb(dict(changes, gone=[]), revision)
+    assert {device["id"] for device in copy.devices()} == {"a", "old"}
+    copy.absorb(*store.changes_since(0), whole=True)
+    assert [device["id"] for device in copy.devices()] == ["a"]
+    assert len(copy.history("a")) == 1
+    copy.close()
+
+
+def test_copy_from_before_gone_notes_reads_everything_again(tmp_path):
+    path = tmp_path / "copy.db"
+    first = tribe.TribeConfigs("one", None, path)
+    with first.lock, first.store.db:
+        first.store.set_meta("revision", 42)
+        first.store.db.execute("DELETE FROM meta WHERE name = 'copy_format'")  # As an older NOMAD left it
+    first.close()
+    again = tribe.TribeConfigs("one", None, path)
+    assert again.store.revision() == 0 and again.store.meta("copy_format") == tribe.COPY_FORMAT
+    with again.lock, again.store.db:
+        again.store.set_meta("revision", 42)
+    again.close()
+    later = tribe.TribeConfigs("one", None, path)
+    assert later.store.revision() == 42  # Only once
+    later.close()
+
+
+def test_old_server_cant_merge(tmp_path):
+    class OldClient:
+        def config_request(self, *args, **kwargs):
+            raise OldServerError("old")
+
+    laptop = tribe.TribeConfigs("x", OldClient(), tmp_path / "old.db")
+    with pytest.raises(OldServerError, match="update it first"):
+        laptop.merge_devices(["a"], "b")
+    laptop.close()
+
+
+def test_moving_device_logins(tmp_path):
+    from nomad.configs import logins
+    path = str(tmp_path / "logins.json")
+    logins.save({"old": "c1", "junk": "c2", "kept": "c3"}, path)
+    assert logins.move_devices(["old"], "new", path)
+    assert logins.move_devices(["junk"], None, path)
+    assert not logins.move_devices(["none"], "new", path)
+    assert logins.load(path) == {"new": "c1", "kept": "c3"}
+    logins.save({"old": "c1", "new": "c9"}, path)
+    logins.move_devices(["old"], "new", path)
+    assert logins.load(path) == {"new": "c9"}  # Its own login wins

@@ -6,9 +6,11 @@ Where the readings come from (traffic_history.py):
   them on its computer and on the tribe server: the same readings as the NOMAD Dashboard's graph (solid lines);
 - this computer, which keeps the same ports' readings while the Network Map's Monitor is on (dashed, where the Watcher
   has none);
-- and any port read live every few seconds while the page shows it (dashed, at the right-hand end).
+- and any port read live every few seconds while the page shows it (dashed): kept in this computer's history too,
+  unless the Monitor is keeping that port already, so coming back to the page still shows what was read.
 """
 import collections
+import logging
 import time
 
 from PyQt5.QtCore import QTimer, pyqtSignal
@@ -22,6 +24,7 @@ from .graph_ports_dialog import device_ports
 from .theme import COLORS
 from .traffic_graph import TrafficGraph, format_rate
 
+log = logging.getLogger(__name__)
 LIVE_SECONDS = 5
 LIVE_KEPT = 4320  # Six hours of live readings
 REFRESH_MS = 60000
@@ -98,8 +101,8 @@ class TrafficTab(QWidget):
         intro = QLabel("The traffic on a port of a switch, router or firewall on the Network Map, over time, from its "
                        "SNMP counters (no NetFlow needed). The Map Watcher keeps the ports at the ends of links all "
                        "the time, the same as the NOMAD Dashboard shows; this computer keeps them while the map's "
-                       "Monitor is on; and the port chosen here is read live while the page shows. Tick Keep Its "
-                       "History to keep any other port's too.")
+                       "Monitor is on; and the port chosen here is read live while the page shows (kept on this "
+                       "computer too). Tick Keep Its History to keep any other port's all the time.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -383,12 +386,14 @@ class TrafficTab(QWidget):
             parts.append("The Map Watcher has no readings of this port in this time (is it watching this map, with "
                          "monitoring on?).")
         else:
-            parts.append("The Map Watcher keeps the ports at the ends of links and those ticked Keep Its History: "
-                         "tick it to keep this one's.")
+            parts.append("This port is only read while this page shows it: the Map Watcher and the Monitor keep "
+                         "the ports at the ends of links and those ticked Keep Its History. Tick it to keep this "
+                         "one's all the time.")
+            kind = "warning"
         monitoring = page is not None and getattr(page.monitor, "running", False)
         if history.own:
-            parts.append("Dashed: this computer's readings where the Map Watcher has none (kept while Monitor is on), "
-                         "and the live readings.")
+            parts.append("Dashed: this computer's readings where the Map Watcher has none (kept while Monitor is on, "
+                         "and while this page shows the port), and the live readings.")
         elif kept and not monitoring:
             parts.append("Tick Monitor on the Network Map to keep this computer's readings too.")
         set_hint(self.source_label, " ".join(parts), kind)
@@ -450,9 +455,36 @@ class TrafficTab(QWidget):
         self.live_note = ""
         if before is not None and when > before[0] and in_octets >= before[1] and out_octets >= before[2]:
             seconds = when - before[0]
-            self.live.append((when, (in_octets - before[1]) * 8 / seconds, (out_octets - before[2]) * 8 / seconds))
+            point = (when, (in_octets - before[1]) * 8 / seconds, (out_octets - before[2]) * 8 / seconds)
+            self.live.append(point)
+            self.keep_live(point, speed)
             self.redraw()
         self.update_rate_label()
+
+    def keep_live(self, point, speed):
+        """Keep a live reading in this computer's traffic history, under the map's record, so it's still there after
+        leaving the page; not when the Monitor is keeping the port's readings already (they'd count twice in the
+        hour)."""
+        key, port = self.chosen()
+        page = self.map_page()
+        name = getattr(page, "record_shown", None)
+        if key is None or not name or self.live_where != (key, port_key(port)) or page.network_map is not self.map_seen:
+            return
+        link_counters = getattr(page, "counters", None)
+        monitor = getattr(page, "monitor", None)
+        if (getattr(monitor, "running", False) and link_counters is not None
+                and (key, port_key(port)) in link_counters.port_names):
+            return
+        store = traffic_history.own_store()
+        if store is None:
+            return
+        when, rate_in, rate_out = point
+        try:
+            store.add(name, [{"device": key, "port": port, "at": when, "in_bps": rate_in, "out_bps": rate_out,
+                              "speed": speed}])
+            store.prune()
+        except Exception as error:  # The graph still shows it: the history just misses this reading
+            log.warning("Couldn't keep the port's live traffic: %s", error)
 
     def on_live_failed(self, message):
         self.live_note = f"No live readings: SNMP didn't answer ({message})."

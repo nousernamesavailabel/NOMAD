@@ -1103,6 +1103,58 @@ def test_the_map_shows_the_map_watchers_monitoring_from_this_computer(tab, crawl
     assert tab.monitor.status_text("rtr1").startswith("Down (not checked since ")
 
 
+def test_the_map_shows_a_change_this_computer_saw_before_the_watcher(tab, crawled):
+    """ISPRTR28: this computer's Monitor had it down while the Watcher (30 s, two misses, read a minute later)
+    still had it up, so the icon stayed green for up to two minutes."""
+    import time as time_module
+    from nomad.netmap import monitor_record
+    from nomad.netmap.monitor import DOWN, UP
+    from nomad.ui import netmap_monitor
+    answers = {"10.0.0.1": 3, "10.0.0.11": 5, "10.0.0.12": 2, "10.0.0.5": 1, "10.0.0.254": 4}
+    tab.monitor.pinger = answers.get
+    tab.on_crawled(crawled)
+    name = tab.record_shown
+    now = time_module.time()
+
+    def watcher_says(status, since, updated):
+        monitor_record.write_shared(name, {
+            "version": 1, "source": "the Map Watcher on PC1", "updated": updated, "interval": 30,
+            "devices": {"rtr1": {"status": status, "since": since, "exact": True, "rtt": None, "checked": updated,
+                                 "via": "", "problem": "", "uptime": {}}}})
+        tab.refresh_watcher()
+
+    watcher_says(UP, now - 7200, now)
+    tab.monitor_check.setChecked(True)
+    def poll():
+        tab.monitor.on_results({key: answers[address] for key, address in tab.monitor.targets.items()})
+    poll()
+    assert tab.monitor.status("rtr1").source == "the Map Watcher on PC1"  # Both up: the Watcher's
+    answers["10.0.0.254"] = None
+    poll()
+    poll()  # Down here; the Watcher hasn't noticed
+    state = tab.monitor.status("rtr1")
+    assert state.status == DOWN and state.source == ""
+    assert tab.view.items_by_key["rtr1"].monitor_state.status == DOWN  # The icon turns red at once
+    tab.show_details(("device", "rtr1"))
+    pane = tab.details.toPlainText()
+    assert "This computer (the Map Watcher on PC1 hasn't caught up yet)" in pane
+    assert "The Map Watcher on PC1" in pane and "Up for" in pane
+    # The Watcher catches up: its again (the same as the dashboard)
+    watcher_says(DOWN, time_module.time(), time_module.time())
+    assert tab.monitor.status("rtr1").source == "the Map Watcher on PC1"
+    assert tab.monitor.status("rtr1").status == DOWN
+    # A disagreement that lasts (the Watcher can't reach it from where it is) is a real one: the Watcher's again
+    watcher_says(UP, now - 7200, time_module.time())
+    own = tab.monitor.own_status("rtr1")
+    watcher = tab.monitor.watcher_status("rtr1")
+    assert tab.monitor.ahead_of_watcher(own, watcher)
+    assert not tab.monitor.ahead_of_watcher(own, watcher, own.since + netmap_monitor.CATCH_UP_SECONDS + 1)
+    # The same Watcher round read again isn't shown again (it's read every few seconds)
+    before = tab.watcher_applied
+    tab.refresh_watcher()
+    assert tab.watcher_applied is before
+
+
 def test_the_map_watcher_dialog_takes_a_map_on_this_computer(tab, crawled, monkeypatch, tmp_path):
     import time
     from nomad.netmap import watch_service

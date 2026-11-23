@@ -86,7 +86,7 @@ The service restarts with the new certificate. **Use Self-Signed** goes back to 
 
 | Page | What it shows |
 | --- | --- |
-| **Overview** | Counts of devices up, down, being checked and not monitored, what's down now, recent events, each map, the busiest links and the fullest subnets. |
+| **Overview** | Counts of devices up, down, being checked and not monitored, the hosts seen in the last hour (the same number as the Hosts page), what's down now, recent events, each map, the hosts in each subnet on each map, the busiest links and the fullest subnets. A map's subnets are the ones its devices have addresses in. |
 | **Sites** | A tile for each site on each map. A site with a device down is red and lists the devices. Click a tile to open its map. |
 | **Map** | The tribe map as NOMAD lays it out and draws it, in Physical (L2) or Logical (L3). Each device's outline shows its status once it's monitored. Its box shows its address and response time, how long it has been up or down, and its uptime over the last 24 hours. Links are colored by how busy they are. Tunnels are dashed. Drag to move around, use the mouse wheel to zoom, and click a device for its details. They are the same details NOMAD's Network Map shows, with the Map Watcher's status, the uptime over 24 hours, 7 days and 30 days, and when it was last checked. On the Logical (L3) view, click a subnet to see the devices and hosts in it. **Hide Details** gives the map the whole width. **Full Screen** gives it the whole screen; press Esc or **Exit Full Screen** to come back. |
 | **Devices** | Every device with its status, how long it has been that way, its response time, where it's checked from, and its uptime over 24 hours, 7 days and 30 days. |
@@ -94,12 +94,24 @@ The service restarts with the new certificate. **Use Self-Signed** goes back to 
 | **Traffic** | The traffic on each link and graphed port, as the Map Watcher last read it, and the NetFlow top talkers. |
 | **VPNs** | Each tunnel and whether it's up, and the devices checked from routers with IP SLA. |
 | **IPAM** | How full each subnet is, and when it was last swept. |
-| **Hosts** | How many hosts each subnet has, from the maps, the sweeps and NetFlow. Choose the last 15 minutes, hour, day or week. Each host counts once, however many of these saw it. |
-| **Trends** | Graphs of a port's traffic and a subnet's hosts over time, and each device's uptime. |
+| **Hosts** | How many hosts each subnet has, from the maps, the sweeps and NetFlow. Choose the last 15 minutes, hour, day or week. Each host counts once, however many of these saw it. Switches, routers and other network devices on the maps don't count as hosts, and neither do hosts added to a map by hand. NetFlow only counts an address that sent something, so the addresses a sweep pings don't count unless they answer. |
+| **Trends** | Graphs of a port's traffic and a subnet's hosts over time, and each device's uptime. A subnet's graph ends on the number the Hosts page shows for the last hour. |
 
 The dashboard updates itself within a few seconds of anything changing.
 
 The dots at the top right show where the data comes from: the Map Watcher, the tribe, the Syslog Collector and the Flow Collector. Green is working. Red means it can't be read; hover over the dot to see why.
+
+### Sorting and filtering tables
+
+Every table sorts and filters the same way as the tables in NOMAD.
+
+- Click a column's header to sort by it. Click it again to sort the other way.
+- To show only some of a column's values, click the funnel at the left of its header, or right-click the header. Untick the values you don't want and click **OK**. Typing in the list's **Search** box ticks only the values that match. The list also has **Sort A to Z** and **Sort Z to A**, **Clear Filter**, and **Clear All Filters**.
+- A filtered column's funnel is green. Filters on several columns work together, and each column's list only offers the values the other filters leave showing.
+- A table with more than a few rows also has a **Filter** box above it. It shows only the rows that have every word you type, in any column.
+- **Clear Column Filters** above the table removes all of the column filters at once.
+
+Filters stay in place while the page updates itself, until you change them or reload the page.
 
 ### Downloading and printing
 
@@ -127,6 +139,10 @@ Kiosk mode hides the menus and goes through chosen pages in turn.
 3. Change the address to `https://<computer name>:8444/#kiosk?pages=overview,sites,map&every=30`.
 
 `pages` lists the pages to show, and `every` is how many seconds each one stays up. To show one map in the rotation, add `&map=<number>`, using the number from the map page's address.
+
+To keep one page up without switching, list only that page. For example, `#kiosk?pages=map&map=<number>` shows just that map. Without `&map=`, it shows the first map. The page still updates itself as things change, and a device you click stays selected. To stop the switching with more than one page listed, use `every=0`, and only the first page is shown.
+
+The tables can still be sorted and filtered in kiosk mode. While a column's filter list is open, the page stays up until the list is closed.
 
 ## History
 

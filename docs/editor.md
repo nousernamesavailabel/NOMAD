@@ -79,6 +79,21 @@ The **Archive** tab lists the devices. Open a device to see its versions. Double
 - **Commands to Put This Version Back** writes the commands that take the device back to that version.
 - **Pull Config Now** and **Running vs Startup** read the device over SSH.
 - **Leave Out of Scheduled Backups** leaves the device out.
+- **Merge Into...** and **Forget...** are there for devices that are no longer on a map. See [Old addresses](#old-addresses).
+
+When two devices in the list have the same name, the address is shown after the name. A device that's no longer on a map shows **Not on a map** in the Status column.
+
+### Old addresses
+
+The archive keeps each device under its management address. When that address changes on the map, for example a DHCP address that changed or a move to the loopback, NOMAD moves the old entry's copies to the new one. It does this when the old entry has the same name as the device on the map, or its address is still one of that device's addresses.
+
+To clean up an entry by hand:
+
+1. Right-click it in the **Archive** list. Select several to do them together.
+2. Choose **Merge Into...** to move the saved copies to another device. A device on the map with the same name is offered first.
+3. Or choose **Forget...** to remove the entry and its copies. This can't be undone.
+
+Both only work on devices that are no longer on a map. A device on a map would come straight back. With a tribe, the tribe server needs this version of NOMAD.
 
 **Pull Config...** reads a device. Pick it from the list (the open map's routers, switches, firewalls and WLCs, the archive's devices and your saved SSH sessions), or type its address or name. NOMAD logs in with the device's saved SSH session, or the login on the **Backups** tab.
 

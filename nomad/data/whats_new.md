@@ -4,6 +4,24 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-11-22
+
+- **New:** right-click devices in the Editor's **Archive** list that are no longer on a map for **Merge Into...**, which moves their saved configurations to another device, or **Forget...**, which removes them. Update the tribe server to use these on a tribe.
+- **New:** every table on the NOMAD Dashboard can be filtered the same way as NOMAD's tables. Click the funnel in a column's header (or right-click the header) to pick which values to show, or to sort. Update the NOMAD Dashboard service to get it.
+- **Changed:** the dashboard's kiosk mode can stay on one page, such as the map: list just that page (`#kiosk?pages=map`) or add `every=0`. A device you click on the map stays selected.
+- **Changed:** when a device's management address changes on the map (a DHCP address, or a move to a loopback), the config archive keeps one entry for it instead of one per address. Entries already left behind for an old address are folded in too. An old entry that stayed in the Archive list after the tribe server folded it in now goes away too.
+- **Changed:** **Pull Config** no longer lists a device's old address, and the Archive list shows the address when two entries have the same name.
+- **Changed:** on the **Traffic Graphs** page, what's read live for a port is kept on this computer, so it's still there after you leave the page and come back. A port that isn't at the end of a link is only read while the page shows it: tick **Keep Its History** to keep it all the time.
+- **Changed:** **Update Now** on the service banner opens a window showing each service as it's updated, and says whether any failed and why.
+- **Changed:** the NOMAD Dashboard's Overview no longer stretches short panels such as **Down now** and **Maps** to match the panel beside them. Each panel is only as tall as it needs to be. Update the NOMAD Dashboard service to get it.
+- **Fixed:** the service banner's **Services & Firewall...** button showed its name without the **&**.
+- **Fixed:** the Syslog page no longer fills with copies of the Syslog Collector's messages every 30 seconds, and the Map Watcher no longer re-checks the devices those old messages named. Update the Syslog Collector and Map Watcher services to get the fix there too.
+- **Fixed:** the NOMAD Dashboard's host counts now agree. The Overview shows the hosts seen in the last hour, the same number as the Hosts page, and a subnet's trend ends on it. The Overview also lists the hosts in each subnet on each map.
+- **Fixed:** the dashboard counted every address a sweep pinged as a host, because NetFlow saw the pings. Now an address from NetFlow only counts if it sent something. Hand-added hosts and the network devices' own addresses no longer count as hosts either. Update the NOMAD Dashboard and Flow Collector services to get the fix.
+- **Fixed:** NOMAD no longer freezes for about 20 seconds at a time once the Syslog page holds 20,000 messages. It happened whichever page you were on.
+- **Fixed:** with **Monitor** on and the Map Watcher service monitoring the map, a device that went down no longer stays green for a minute or two. The map shows it down as soon as this computer sees it, until the Map Watcher catches up.
+- **Fixed:** a device's uptime no longer drops to 0% as soon as it goes down. The time it was up before is counted again, including in what's already been recorded. Update the Map Watcher service to fix the uptime on the dashboard too.
+
 ## [2.9.0] - 2026-11-22
 
 - **New:** the **Traffic Graphs** page graphs the traffic on any port of a switch, router or firewall on the Network Map over the last 6 hours to a year, from SNMP. No NetFlow needed. It shows the Map Watcher's readings, the same as the NOMAD Dashboard, and this computer's own while **Monitor** is on. Right-click a device, link or port > **Graph Traffic**, or click **Graph** beside a link in the details pane. Update the tribe server to see the Watcher's readings on other computers.

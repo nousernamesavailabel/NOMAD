@@ -6,6 +6,7 @@ The messages come from one of two places:
 - This NOMAD listening on the port itself (Start Listening), only while it's open.
 """
 import collections
+import itertools
 import logging
 import os
 import threading
@@ -20,7 +21,7 @@ from ..syslog import SEVERITIES, SYSLOG_PORT, format_line, hub
 from ..syslogs.api import SyslogServiceSource, SyslogSourceError
 from ..syslogs.feed import ServiceFeed
 from ..system import allow_inbound_port
-from .common import ColumnFitter, SortableTableItem, run_in_background, set_hint
+from .common import ColumnFitter, SortableTableItem, fitting_held, run_in_background, set_hint
 from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
@@ -431,10 +432,14 @@ class SyslogTab(QWidget):
                          "warning")
                 self.close_log_file()
         dropped = max(0, len(self.messages) + len(batch) - MAX_MESSAGES)
-        self.messages.extend(batch)
-        if dropped:
-            self.refill()  # The oldest rows fell off the end
+        if dropped > len(self.messages):  # More came at once than are kept: start again from the newest
+            self.messages.extend(batch)
+            self.refill()
             return
+        gone = list(itertools.islice(self.messages, dropped))
+        self.messages.extend(batch)
+        if gone:
+            self.drop_rows(gone)  # The oldest fell off the end: their rows go, the rest stay
         shown = [message for message in batch if self.matches(message)]
         if shown:
             self.append_rows(shown)
@@ -453,20 +458,34 @@ class SyslogTab(QWidget):
         table = self.table
         at_bottom = table.verticalScrollBar().value() >= table.verticalScrollBar().maximum() - 2
         start = table.rowCount()
-        table.setRowCount(start + len(messages))
-        for offset, message in enumerate(messages):
-            cells = [message.received.strftime("%H:%M:%S"), message.source, message.severity_name,
-                     message.facility, message.host, message.app, message.message]
-            color = SEVERITY_COLORS.get(message.severity)
-            for column, text in enumerate(cells):
-                item = SortableTableItem(text, data=message)
-                if color and column in (2, COL_MESSAGE):
-                    item.setForeground(QColor(color))
-                if column == COL_MESSAGE:
-                    item.setToolTip(message.raw)
-                table.setItem(start + offset, column, item)
+        with fitting_held(table):
+            table.setRowCount(start + len(messages))
+            for offset, message in enumerate(messages):
+                cells = [message.received.strftime("%H:%M:%S"), message.source, message.severity_name,
+                         message.facility, message.host, message.app, message.message]
+                color = SEVERITY_COLORS.get(message.severity)
+                for column, text in enumerate(cells):
+                    item = SortableTableItem(text, data=message)
+                    if color and column in (2, COL_MESSAGE):
+                        item.setForeground(QColor(color))
+                    if column == COL_MESSAGE:
+                        item.setToolTip(message.raw)
+                    table.setItem(start + offset, column, item)
         if self.follow_check.isChecked() and at_bottom:
             table.scrollToBottom()
+
+    def drop_rows(self, gone):
+        """Take the rows of messages no longer kept (the oldest, so at the top) off the table, instead of filling
+        it again: 20,000 rows filled again for each new message froze the window."""
+        gone = {id(message) for message in gone}
+        table, count = self.table, 0
+        while count < table.rowCount():
+            item = table.item(count, 0)
+            if item is None or id(getattr(item, "data_object", None)) not in gone:
+                break
+            count += 1
+        if count:
+            table.model().removeRows(0, count)
 
     def refill(self):
         self.table.setRowCount(0)

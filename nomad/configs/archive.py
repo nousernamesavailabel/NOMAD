@@ -12,6 +12,11 @@ reach a device (or log in to it) reports it, and the device goes to another comp
 on for a while). While a Map Watcher service is asking, NOMAD windows only get devices well overdue, so the service
 does most of it. A device nobody has backed up for two intervals is overdue, with each computer's reason.
 
+A device's id is its management address, so one whose address changes on the map gets a new row. sync_devices folds
+the old row into the new one (merge_into: its copies, results and when it was backed up) when the old one has left the
+maps and has the same name, or its address is one of the new one's; Merge Into... and Forget do it by hand for devices
+no longer on a map. Each row folded away or forgotten leaves a note in gone, so a laptop's copy drops it too.
+
 Use under self.lock from more than one thread."""
 import json
 import sqlite3
@@ -58,6 +63,7 @@ CREATE TABLE IF NOT EXISTS runners (holder TEXT PRIMARY KEY, computer TEXT, kind
 CREATE TABLE IF NOT EXISTS results (id INTEGER PRIMARY KEY, at REAL, by TEXT, device_id TEXT, device_name TEXT,
                                     ok INTEGER, note TEXT);
 CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS gone (device_id TEXT PRIMARY KEY, into_id TEXT, revision INTEGER NOT NULL DEFAULT 0);
 """
 VERSION_FIELDS = ("id", "device_id", "which", "hash", "pulled_at", "pulled_by", "source", "changed_by", "previous_id",
                   "added", "removed", "first", "reviewed_by", "reviewed_at", "revision")
@@ -156,6 +162,7 @@ class ConfigStore:
         now = time.time() if now is None else now
         row = self.db.execute("SELECT id FROM devices WHERE id = ?", (device_id,)).fetchone()
         if row is None:
+            self.db.execute("DELETE FROM gone WHERE device_id = ?", (device_id,))
             self.db.execute("INSERT INTO devices (id, name, address, names, platform, kind, facts, created, "
                             "revision) VALUES (?, ?, ?, '[]', ?, '', '{}', ?, ?)",
                             (device_id, name or device_id, address, platform, now,
@@ -167,7 +174,8 @@ class ConfigStore:
 
     def sync_devices(self, rows, now=None):
         """Put the schedule's devices in scope ([{"id", "name", "address", "names", "platform", "kind", "facts"}]);
-        the others leave it (their copies stay). Returns the ids of the devices that changed (a set)."""
+        the others leave it (their copies stay), and one that's the same device under its old address is folded into
+        the new row (fold_candidates). Returns the ids of the devices that changed (a set; folded rows included)."""
         now = time.time() if now is None else now
         interval = self.interval()
         wanted = {row["id"]: row for row in rows if row.get("id")}
@@ -181,6 +189,7 @@ class ConfigStore:
                 old = current.get(device_id)
                 if old is None:
                     revision = revision or self.next_revision()
+                    self.db.execute("DELETE FROM gone WHERE device_id = ?", (device_id,))
                     self.db.execute("INSERT INTO devices (id, name, address, names, platform, kind, facts, in_scope, "
                                     "created, next_due, revision) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
                                     (device_id, *values, now, now + spread(device_id, interval), revision))
@@ -193,13 +202,101 @@ class ConfigStore:
                                     "facts = ?, in_scope = 1, next_due = ?, revision = ? WHERE id = ?",
                                     (*values, next_due, revision, device_id))
                     changed.add(device_id)
+            folded = fold_candidates(wanted, current)
+            for source, target in folded.items():
+                revision = revision or self.next_revision()
+                self.merge_into(source, target, revision, carry_excluded=target not in current)
+                changed.update((source, target))
             for device_id, old in current.items():
-                if old["in_scope"] and device_id not in wanted:
+                if old["in_scope"] and device_id not in wanted and device_id not in folded:
                     revision = revision or self.next_revision()
                     self.db.execute("UPDATE devices SET in_scope = 0, revision = ? WHERE id = ?",
                                     (revision, device_id))
                     changed.add(device_id)
         return changed
+
+    def merge_into(self, source, target, revision, carry_excluded=False):
+        """Fold one device's row into another's (in the caller's transaction): its copies, scheduled backups'
+        results and when it was backed up go to target; its standards' results and failures are dropped (the caller
+        checks target again); gone notes it for the copies. carry_excluded: target is left out of scheduled backups
+        when source was."""
+        old = self.db.execute("SELECT * FROM devices WHERE id = ?", (source,)).fetchone()
+        new = self.db.execute("SELECT * FROM devices WHERE id = ?", (target,)).fetchone()
+        if old is None or new is None or source == target:
+            return
+        self.db.execute("UPDATE versions SET device_id = ?, revision = ? WHERE device_id = ?",
+                        (target, revision, source))
+        self.db.execute("UPDATE results SET device_id = ? WHERE device_id = ?", (target, source))
+        for table in ("compliance", "failures", "claims"):
+            self.db.execute(f"DELETE FROM {table} WHERE device_id = ?", (source,))
+        created = [value for value in (old["created"], new["created"]) if value is not None]
+        excluded = 1 if new["excluded"] or (carry_excluded and old["excluded"]) else 0
+        self.db.execute("UPDATE devices SET last_ok = ?, last_checked = ?, created = ?, "
+                        "platform = coalesce(nullif(platform, ''), ?), excluded = ?, revision = ? WHERE id = ?",
+                        (newest(old["last_ok"], new["last_ok"]), newest(old["last_checked"], new["last_checked"]),
+                         min(created) if created else None, old["platform"] or "", excluded, revision, target))
+        self.db.execute("DELETE FROM devices WHERE id = ?", (source,))
+        self.db.execute("INSERT OR REPLACE INTO gone (device_id, into_id, revision) VALUES (?, ?, ?)",
+                        (source, target, revision))
+
+    def _not_on_a_map(self, device_ids):
+        """Check each of these is in the archive and no longer on a map (one still on a map would only come
+        back). Returns those already merged or forgotten (a copy that missed the note in gone still shows them)."""
+        gone = []
+        for device_id in device_ids:
+            device = self.device(device_id)
+            if device is None:
+                if self.db.execute("SELECT 1 FROM gone WHERE device_id = ?", (device_id,)).fetchone():
+                    gone.append(device_id)
+                    continue
+                raise ArchiveError(f"{device_id} isn't in the config archive.")
+            if device["in_scope"]:
+                raise ArchiveError(f"{device['name'] or device_id} is still on a map, so it would come straight back: "
+                                   f"only devices no longer on a map can be merged or forgotten.")
+        return gone
+
+    def _note_gone_again(self, device_ids, revision):
+        """Send the gone notes for these once more, so a copy still showing them drops them."""
+        for device_id in device_ids:
+            self.db.execute("UPDATE gone SET revision = ? WHERE device_id = ?", (revision, device_id))
+
+    def merge_devices(self, sources, target):
+        """Merge Into...: fold devices no longer on a map into another device (their copies become its). Returns the
+        revision."""
+        sources = [source for source in dict.fromkeys(sources) if source != target]
+        with self.db:
+            if self.device(target) is None:
+                raise ArchiveError("The device to merge into isn't in the config archive.")
+            if not sources:
+                raise ArchiveError("Pick devices other than the one to merge into.")
+            gone = self._not_on_a_map(sources)
+            revision = self.next_revision()
+            self._note_gone_again(gone, revision)
+            for source in sources:
+                if source not in gone:
+                    self.merge_into(source, target, revision)
+        return revision
+
+    def forget_devices(self, device_ids):
+        """Forget: drop devices no longer on a map, with every copy of their configurations. Returns the revision."""
+        device_ids = list(dict.fromkeys(device_ids))
+        with self.db:
+            gone = self._not_on_a_map(device_ids)
+            revision = self.next_revision()
+            self._note_gone_again(gone, revision)
+            for device_id in device_ids:
+                if device_id in gone:
+                    continue
+                self.drop_device(device_id)
+                self.db.execute("INSERT OR REPLACE INTO gone (device_id, into_id, revision) VALUES (?, NULL, ?)",
+                                (device_id, revision))
+        return revision
+
+    def drop_device(self, device_id):
+        """Delete a device's row and everything kept for it (in the caller's transaction)."""
+        for table in ("versions", "compliance", "failures", "claims"):
+            self.db.execute(f"DELETE FROM {table} WHERE device_id = ?", (device_id,))
+        self.db.execute("DELETE FROM devices WHERE id = ?", (device_id,))
 
     def set_excluded(self, device_id, excluded):
         with self.db:
@@ -490,12 +587,20 @@ class ConfigStore:
         # A standard deleted takes its rows with it: the copy is told which devices and standards are still there
         present = [[row["device_id"], row["standard"]] for row in
                    self.db.execute("SELECT device_id, standard FROM compliance")] if standards else None
+        gone = [dict(row) for row in self.db.execute("SELECT device_id, into_id FROM gone WHERE revision > ?",
+                                                     (since,))] if since else []
         return {"devices": devices, "versions": versions, "standards": standards, "compliance": compliance,
-                "settings": settings, "compliance_present": present}, self.revision()
+                "settings": settings, "compliance_present": present, "gone": gone}, self.revision()
 
-    def absorb(self, changes, revision):
-        """Take the server's changes into a copy (texts come later, as they're opened)."""
+    def absorb(self, changes, revision, whole=False):
+        """Take the server's changes into a copy (texts come later, as they're opened). whole: changes since 0, so
+        every device the server keeps is in them, and the copy's others (gone while it wasn't told) are dropped."""
         with self.db:
+            if whole:
+                keep = {device["id"] for device in changes.get("devices", ())}
+                for row in self.db.execute("SELECT id FROM devices").fetchall():
+                    if row["id"] not in keep:
+                        self.drop_device(row["id"])
             for device in changes.get("devices", ()):
                 failures = device.pop("failures", [])
                 device["names"] = json.dumps(device.get("names") or [])
@@ -534,6 +639,8 @@ class ConfigStore:
             for name, value in changes.get("settings", {}).items():
                 self.db.execute("INSERT OR REPLACE INTO settings (name, value, revision) VALUES (?, ?, ?)",
                                 (name, json.dumps(value), revision))
+            for item in changes.get("gone", ()):  # Merged (its copies came above, under the other id) or forgotten
+                self.drop_device(item["device_id"])
             self.set_meta("revision", revision)
 
     def has_text(self, version_id):
@@ -556,6 +663,35 @@ class ConfigStore:
     def sent_upload(self, outbox_id):
         with self.db:
             self.db.execute("DELETE FROM outbox WHERE id = ?", (outbox_id,))
+
+
+def newest(*values):
+    values = [value for value in values if value]
+    return max(values) if values else None
+
+
+def fold_candidates(wanted, current):
+    """{old id: new id} for rows no longer on a map that are a mapped device under its old address: the same name as
+    exactly one mapped device (not a name that's only its address), or an id that's one of exactly one mapped
+    device's addresses. wanted: the schedule's rows by id; current: the archive's rows by id."""
+    by_name, by_address = {}, {}
+    for device_id, row in wanted.items():
+        name = (row.get("name") or "").strip().lower()
+        if name and name != device_id:
+            by_name.setdefault(name, set()).add(device_id)
+        for other in row.get("names") or ():
+            by_address.setdefault(str(other).strip().lower(), set()).add(device_id)
+    folded = {}
+    for device_id, old in current.items():
+        if device_id in wanted:
+            continue
+        targets = set(by_address.get(device_id, ()))
+        name = (old["name"] or "").strip().lower()
+        if name and name != device_id and len(by_name.get(name, ())) == 1:
+            targets |= by_name[name]
+        if len(targets) == 1:
+            folded[device_id] = targets.pop()
+    return folded
 
 
 DEVICE_COLUMNS = ("id", "name", "address", "names", "platform", "kind", "facts", "in_scope", "excluded", "created",

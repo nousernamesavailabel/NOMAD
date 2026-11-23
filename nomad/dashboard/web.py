@@ -95,7 +95,7 @@ class DashboardServer:
         engine = self.engine
         snapshot = engine.snapshot
         if name == "overview":
-            return views.overview(snapshot, engine.history)
+            return views.overview(snapshot, engine.history, engine=engine)
         if name == "devices":
             return views.devices(snapshot)
         if name == "events":
@@ -226,7 +226,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/details":
                 return self.send(200, views.node_details(self.app.engine.snapshot, int(query["map"]), query["key"]))
             if path.startswith("/api/series/"):
-                return self.send(200, views.series(self.app.engine.history, path[len("/api/series/"):], query))
+                return self.send(200, views.series(self.app.engine.history, path[len("/api/series/"):], query,
+                                                   engine=self.app.engine))
             if path == "/api/stream":
                 return self.stream()
             if path.startswith("/export/") and path.endswith(".csv"):

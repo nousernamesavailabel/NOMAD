@@ -44,25 +44,37 @@ def services_changed(window, keys, released=None):
 
 
 class UpdateJob:
-    """Update each service in turn on a worker thread, carrying on past one that fails. Returns the problems."""
+    """Update each service in turn on a worker thread, carrying on past one that fails. Returns the problems.
+    report(key, error): before each one starts (error None) and once it has (error "" if it went well)."""
 
-    def __init__(self, entries):
+    def __init__(self, entries, report=None):
         self.entries = list(entries)
+        self.report = report
+
+    def tell(self, key, error):
+        if self.report is not None:
+            self.report(key, error)
 
     def __call__(self):
         problems = []
         for entry in self.entries:
+            self.tell(entry.key, None)
             try:
                 log.info("Updating the %s service", entry.title)
                 entry.update()
             except Exception as error:
                 log.warning("Couldn't update the %s service: %s", entry.title, error)
                 problems.append(f"The {entry.title} wasn't updated: {error}")
+                self.tell(entry.key, str(error) or type(error).__name__)
+            else:
+                self.tell(entry.key, "")
         return problems
 
 
 class ServiceUpdater(QObject):
-    """Updates services on a worker thread. finished(problems) once they're all done ([] if all went well)."""
+    """Updates services on a worker thread. progressed(key, error) as each starts (error None) and ends (error "" if
+    it went well), finished(problems) once they're all done ([] if all went well)."""
+    progressed = pyqtSignal(str, object)
     finished = pyqtSignal(list)
 
     def __init__(self, window, parent=None):
@@ -82,7 +94,7 @@ class ServiceUpdater(QObject):
         self.running = True
         self.keys = keys
         self.released = free_ports(self.window, keys)
-        run_in_background(UpdateJob(ordered), self.done, self.failed)
+        run_in_background(UpdateJob(ordered, self.progressed.emit), self.done, self.failed)
         return True
 
     def done(self, problems=None):

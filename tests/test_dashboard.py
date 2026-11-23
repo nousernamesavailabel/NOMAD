@@ -170,8 +170,29 @@ def test_flow_addresses_seen_lately(tmp_path):
     connection.commit()
     queries = store.FlowQueries(tmp_path / "flows.db")
     assert queries.addresses(50, 300) == [["10.0.0.5", 200.0], ["10.0.0.6", 200.0], ["8.8.8.8", 100.0]]
+    # A sweep's pings reach every address: only the ones that sent something are hosts
+    assert queries.addresses(50, 300, senders=True) == [["10.0.0.5", 100.0], ["10.0.0.6", 200.0]]
     queries.close()
     connection.close()
+
+
+def test_the_flow_collector_service_names_the_senders(tmp_path):
+    from nomad.flows import api, store
+    connection = store.connect(tmp_path / "flows.db")
+    connection.executemany("INSERT INTO flows (end, start, exporter, src, dst, bytes) VALUES (?, ?, ?, ?, ?, ?)",
+                           [(100.0, 90.0, "r1", "192.168.5.25", f"10.0.0.{n}", 10) for n in range(1, 255)] +
+                           [(100.0, 90.0, "r1", "10.0.0.9", "192.168.5.25", 10)])
+    connection.commit()
+    queries = store.FlowQueries(tmp_path / "flows.db")
+    server = api.FlowApi(queries, lambda: {}, port=0)
+    server.start()
+    try:
+        source = api.ServiceSource(port=server.port)
+        assert [address for address, _ in source.senders(0)] == ["10.0.0.9", "192.168.5.25"]
+    finally:
+        server.stop()
+        queries.close()
+        connection.close()
 
 
 # --------------------------------------------------------------------- Logins
@@ -284,6 +305,77 @@ def test_hosts_per_subnet_count_each_address_once_from_every_source():
     assert (lan["total"], lan["map"], lan["sweep"], lan["flow"]) == (3, 1, 1, 2)
     assert not [row for row in rows if row["subnet"] == "10.1.0.0/24"]  # Its sighting is too old
     assert mac_only_hosts(snapshot.tribe) == [{"map": "Campus", "vlan": 20, "count": 1}]
+
+
+def test_hosts_count_once_leave_out_network_devices_and_hand_added_hosts():
+    network_map = small_map()
+    network_map.hosts += [Host("cc:cc", "s1", "Gi1/0/7", ip="10.0.0.80", manual=True),
+                          Host("dd:dd", "s2", "Gi1/0/8", manual=True)]
+    snapshot = snapshot_of(network_map)
+    tribe = snapshot.tribe
+    tribe.networks.append({"id": "net2", "name": "Branch"})  # The same subnet at another site
+    tribe.subnets.append(SubnetEntry("net2", "10.0.0.0/24", "Branch LAN", 254, 5))
+    tribe.sightings["net2"] = {"10.0.0.90": 5000.0}
+    tribe.sightings["net1"]["10.0.0.2"] = 5000.0  # S1 answering a sweep isn't a host
+    seen_map = {"10.0.0.50": 5000.0, "10.0.0.80": 5000.0}
+    flows = {"10.0.0.50": 5000.0, "10.0.0.90": 5000.0, "10.0.0.70": 5000.0, "10.0.0.1": 5000.0}
+    rows = {(row["network"], row["subnet"]): row for row in count_hosts(tribe, seen_map, flows, 4000.0)}
+    campus, branch = rows[("net1", "10.0.0.0/24")], rows[("net2", "10.0.0.0/24")]
+    # 10.0.0.50 is Campus's (on its map), 10.0.0.90 Branch's (its sweep), 10.0.0.70 counted once, R1 never
+    assert (campus["total"], campus["map"], campus["sweep"], campus["flow"]) == (3, 1, 1, 2)
+    assert (branch["total"], branch["flow"]) == (1, 1)
+    assert mac_only_hosts(tribe) == [{"map": "Campus", "vlan": 20, "count": 1}]  # The hand-added one isn't seen
+
+
+class FakeHostEngine:
+    def __init__(self, tribe, seen_map, flows):
+        self.tribe, self.seen_map, self.flows = tribe, seen_map, flows
+
+    def hosts(self, window):
+        return count_hosts(self.tribe, self.seen_map, self.flows, 4000.0)
+
+
+def test_the_overview_hosts_page_and_trend_give_the_same_count(tmp_path):
+    snapshot = snapshot_of(small_map())
+    engine = FakeHostEngine(snapshot.tribe, {"10.0.0.50": 5000.0}, {"10.0.0.70": 5000.0})
+    page = views.hosts(snapshot, engine, "1h", now=5000.0)
+    overview = views.overview(snapshot, now=5000.0, engine=engine)
+    assert page["total"] == overview["hosts"]["total"] == 3  # .50 (map), .60 (sweep), .70 (NetFlow)
+    assert page["mac_only_total"] == overview["hosts"]["mac_only"] == 1
+    # The map's subnets (from R1's interfaces), as IPAM has them, with their hosts; the map's count adds them up
+    assert [(row["subnet"], row["name"], row["total"]) for row in overview["map_subnets"]] == \
+        [("10.0.0.0/24", "LAN", 3), ("10.1.0.0/24", "Servers", 0)]
+    assert overview["maps"][0]["hosts"] == 3
+    history = HistoryStore(tmp_path / "history.db", clock=lambda: 5000.0)
+    history.add_host_counts(4800.0, [{"subnet": "10.0.0.0/24", "network": "net1", "total": 2, "map": 1, "sweep": 1,
+                                      "flow": 0}])  # Five minutes ago, before NetFlow saw .70
+    history.add_host_counts(4800.0, [{"subnet": "10.0.0.0/24", "network": "net2", "total": 40, "map": 0, "sweep": 40,
+                                      "flow": 0}])  # The same subnet in another network stays apart
+    points = views.series(history, "subnet", {"subnet": "10.0.0.0/24", "network": "net1", "span": "1h"}, now=5000.0,
+                          engine=engine)["points"]
+    assert [point[1] for point in points] == [2, 3]  # The last sample, then the count now
+    lan = next(row for row in views.trends(snapshot)["subnets"] if row["subnet"] == "10.0.0.0/24")
+    assert lan["network"] == "net1" and lan["network_name"] == "Campus"
+    history.close()
+
+
+def test_hours_kept_before_networks_still_show(tmp_path):
+    import sqlite3
+    path = tmp_path / "history.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE host_counts_hourly (subnet TEXT, hour INTEGER, sum_total REAL, max_total INTEGER, "
+                "samples INTEGER, PRIMARY KEY (subnet, hour)) WITHOUT ROWID")
+    old.execute("INSERT INTO host_counts_hourly VALUES ('10.0.0.0/24', 10, 30, 12, 3)")
+    old.commit()
+    old.close()
+    history = HistoryStore(path, clock=lambda: 20 * 3600.0)
+    history.add_host_counts(11 * 3600.0, [{"subnet": "10.0.0.0/24", "network": "net1", "total": 7, "map": 7,
+                                           "sweep": 0, "flow": 0}])
+    history.add_host_counts(11 * 3600.0, [{"subnet": "10.0.0.0/24", "network": "net2", "total": 50, "map": 50,
+                                           "sweep": 0, "flow": 0}])
+    assert history.host_series("10.0.0.0/24", 0, 20 * 3600.0, hourly=True, network="net1") == \
+        [[36000, 10.0, 12], [39600, 7.0, 7]]
+    history.close()
 
 
 def test_csv_tables_never_start_a_cell_with_a_formula():

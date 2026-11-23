@@ -325,6 +325,8 @@ If the Map Watcher service monitors the map, NOMAD shows the Watcher's statuses 
 
 With Monitor on as well, the boxes still show the Map Watcher's monitoring for the devices it monitors. The details pane shows this computer's status and uptime underneath, under **This computer**.
 
+When this computer sees a device go down or come back before the Map Watcher does, the box shows this computer's status straight away. The Map Watcher can take a minute or two to notice, because it needs two missed checks in a row. Once it agrees, the box shows the Watcher's monitoring again. While this computer's status is showing, the details pane says **Monitored by: This computer** and lists the Watcher's status underneath. If the two still disagree after five minutes, the Watcher probably can't reach the device from where it is, and the box goes back to the Watcher's status.
+
 If the Map Watcher stops checking for ten minutes or more, the devices are grayed and say "Not checked since" and the time it last checked. The dashboard shows them the same way. Check that the Map Watcher service is running.
 
 ### Devices this computer can't reach
@@ -350,9 +352,9 @@ The **Traffic Graphs** page (under **Capture & Logs**) graphs the traffic on any
 2. Choose the **Port** if it isn't the one you want. Ports whose history is kept are listed first.
 3. Choose how far back to look: 6 hours, 24 hours, 7 days, 30 days or a year.
 
-The solid lines are the Map Watcher's readings. They are the same numbers the NOMAD Dashboard graphs. On the Watcher's own computer NOMAD reads them directly, and on other computers a tribe map's readings come through the tribe server, which must be updated to this version. The dashed lines are this computer's readings, shown where the Map Watcher has none. While **Monitor** is on, NOMAD keeps the readings of the same ports for a year. The port you're looking at is also read every 5 seconds while the page shows, so the right-hand end of the graph is live. Over 7 days or more, the graph shows each hour's average, with the hour's peak in a dotted line.
+The solid lines are the Map Watcher's readings. They are the same numbers the NOMAD Dashboard graphs. On the Watcher's own computer NOMAD reads them directly, and on other computers a tribe map's readings come through the tribe server, which must be updated to this version. The dashed lines are this computer's readings, shown where the Map Watcher has none. While **Monitor** is on, NOMAD keeps the readings of the same ports for a year. The port you're looking at is also read every 5 seconds while the page shows, so the right-hand end of the graph is live. These live readings are kept on this computer too, so they're still on the graph when you come back to the page. Over 7 days or more, the graph shows each hour's average, with the hour's peak in a dotted line.
 
-The Map Watcher and Monitor keep the history of the ports at both ends of every link. To keep another port's history, such as a server's port or an internet uplink, tick **Keep Its History** on the Traffic Graphs page. To choose several at once, right-click the device and choose **Tools** > **Ports to Graph...**. The choice is saved with the map, and a tribe map shares it.
+The Map Watcher and Monitor keep the history of the ports at both ends of every link. Any other port, such as a bridge-domain or VLAN interface, is only read while the Traffic Graphs page shows it. To keep another port's history all the time, such as a server's port or an internet uplink, tick **Keep Its History** on the Traffic Graphs page. To choose several at once, right-click the device and choose **Tools** > **Ports to Graph...**. The choice is saved with the map, and a tribe map shares it.
 
 ## Links that are gone
 

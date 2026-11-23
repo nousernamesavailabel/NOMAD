@@ -53,7 +53,7 @@ NOMAD also shows a banner across its window when a service on this computer need
 1. Start NOMAD as administrator.
 2. Click **Update Now** on the banner.
 
-Each service is updated with the settings it has, and no service's window opens. You can also update a service in **Tools** > **Services & Firewall...**: select it and click **Update**, or tick several and click **Install or Update Ticked**.
+Each service is updated with the settings it has, and no service's window opens. A window shows each service as it's updated, and says why if one couldn't be. Click **Hide** to close it while the update carries on. You can also update a service in **Tools** > **Services & Firewall...**: select it and click **Update**, or tick several and click **Install or Update Ticked**.
 
 **Dismiss** hides the banner until another service needs updating.
 
