@@ -65,9 +65,31 @@ class LocalConfigs:
                 checks.recheck(self.store, device_id, now=now)
         return outcome
 
-    def review(self, version_id, user):
+    # ----------------------------------------------------------------- Reviews
+
+    def finish_review(self, version_id, user, verdicts, reason, seconds=0.0, started=None, self_review=False):
         with self.lock:
-            return self.store.review(version_id, user)
+            return self.store.finish_review(version_id, user, verdicts, reason, seconds, started, self_review)
+
+    def close_raised(self, version_id, user, outcome, note):
+        with self.lock:
+            return self.store.close_raised(version_id, user, outcome, note)
+
+    def acknowledge(self, version_ids, user, reason):
+        with self.lock:
+            return self.store.acknowledge(version_ids, user, reason)
+
+    def pushes_for_version(self, version_id):
+        with self.lock:
+            return self.store.pushes_for_version(version_id)
+
+    def record_push(self, user, source, target, names, lines):
+        with self.lock:
+            return self.store.record_push(user, source, target, names, lines)
+
+    def review_log(self, limit=5000):
+        with self.lock:
+            return self.store.review_log(limit)
 
     def set_excluded(self, device_id, excluded):
         with self.lock:

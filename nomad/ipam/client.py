@@ -76,6 +76,7 @@ VIEWER_API = 17  # And viewer keys (the NOMAD Dashboard), and ports graphed on t
 MONITOR_API = 18  # And the Map Watcher's monitoring of each map, for every NOMAD
 TRAFFIC_API = 19  # And the Map Watcher's readings of the ports' traffic, for every NOMAD's Traffic Graphs
 MERGE_API = 20  # And merging and forgetting devices in the config archive
+REVIEW_API = 21  # And reviews that prove someone went through a config change, and NOMAD's pushes kept
 SERVER_FEATURES = ((2, "instant sync"), (3, "change history"), (4, "loopback subnets"), (5, "Last Seen sweep results"),
                    (6, "tribe maps"), (VLAN_API, "VLANs"), (PLACEMENT_API, "Subnet Placement"),
                    (ROLES_API, "subnet roles"), (MOVE_API, "moving subnets between networks"), (ASSET_API, "assets"),
@@ -85,7 +86,8 @@ SERVER_FEATURES = ((2, "instant sync"), (3, "change history"), (4, "loopback sub
                    (VIEWER_API, "viewer keys for the NOMAD Dashboard"),
                    (MONITOR_API, "the Map Watcher's monitoring on every NOMAD's map"),
                    (TRAFFIC_API, "the Map Watcher's traffic history on every NOMAD's Traffic Graphs"),
-                   (MERGE_API, "merging and forgetting devices in the config archive"))
+                   (MERGE_API, "merging and forgetting devices in the config archive"),
+                   (REVIEW_API, "config change reviews (every block checked) and the review log"))
 
 
 @dataclass
@@ -513,13 +515,23 @@ class TeamClient:
         """Scheduled backups' outcomes from every computer, newest first."""
         return self.request("GET", f"/api/configs/results?limit={int(limit)}")["results"]
 
+    def config_reviews(self, limit=200):
+        """The newest changes with their review states, and the review log: {"changes", "reviews", "to_review",
+        "raised", "allow_acknowledge"}."""
+        return self.request("GET", f"/api/configs/reviews?limit={int(limit)}")
+
+    def config_pushes(self, version_id):
+        """NOMAD's pushes to a change's device before it."""
+        return self.request("GET", f"/api/configs/pushes?version_id={int(version_id)}")["pushes"]
+
     def config_runners(self):
         """The computers backing up now: [{"holder", "computer", "kind", "user", "last_seen", "status",
         "working_on"}]."""
         return self.request("GET", "/api/configs/runners")["runners"]
 
     def config_request(self, action, **body):
-        """claim, report, upload, review, exclude, merge, forget, standard, settings or due."""
+        """claim, report, upload, review, review_finish, review_close, acknowledge, push, exclude, merge, forget,
+        standard, settings or due."""
         return self.request("POST", f"/api/configs/{action}", body)
 
     def import_networks(self, plans):

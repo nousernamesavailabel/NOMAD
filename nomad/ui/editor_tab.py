@@ -1,19 +1,22 @@
 """Editor page: a Notepad++-style text editor for configurations (tabs, regular expression find and replace, Cisco
 highlighting and folding), Compare (plain, without noise, or by section; copy changes across), and the config
 archive: every change to each device's configuration, pulled by hand, saved from the Terminal or backed up on a
-schedule; changes to review, standards every copy is checked against, and the commands that fix what differs."""
+schedule; changes to review (config_review.py: every block given a verdict, so opening a change isn't reviewing it),
+standards every copy is checked against, and the commands that fix what differs. NOMAD's pushes from any page are kept
+in the archive (PushRecorder), so a review can see which blocks they typed."""
 import itertools
 import logging
 import os
 import socket
 import time
+import weakref
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMenu, QMessageBox, \
     QPushButton, QShortcut, QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget
 
-from ..configs import apply, archive, checks, diff, fix, pull, scope, standards, text as config_text
+from ..configs import apply, archive, checks, diff, fix, pull, review, scope, standards, text as config_text
 from ..configs import logins as backup_logins
 from ..configs.archive import ArchiveError
 from ..configs.local import LocalConfigs
@@ -23,12 +26,14 @@ from .backup_logins_sync import UPDATE_LINK, BackupLoginSync
 from .code_editor import CISCO, LANGUAGE_NAMES, PLAIN, XML, CodeEditor, FindBar, language_for
 from .common import add_action, release_thread, run_in_background, set_hint
 from .compare_view import CompareView
+from .config_review import AcknowledgeDialog, ReviewController, ReviewSettingsDialog, own_login_names, write_log
 from .config_events import config_events
 from .editor_panels import ArchivePanel, BackupThread, BackupsPanel, ChangesPanel, CheckDialog, ConfigSyncThread, \
     PullDialog, SendDialog, StandardsPanel, when_text
 from .remote_editor import decode, encode, looks_binary
 from .ssh_push import LoginRow
 from .vault_dialog import ensure_unlocked
+from ..netmap import configpush
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +83,24 @@ class Document(QWidget):
         return self.title + (" •" if self.is_modified() else "")
 
 
+class PushRecorder:
+    """Keeps NOMAD's pushes (configpush's listener, on the pushing thread) in the page's config archive. Holds the
+    page weakly, so a page gone (or its archive closed) is simply skipped."""
+
+    def __init__(self, page):
+        self.page = weakref.ref(page)
+
+    def __call__(self, target, names, lines, source):
+        page = self.page()
+        configs = getattr(page, "configs", None) if page is not None else None
+        if configs is None:
+            return
+        try:
+            configs.record_push(page.user, source, target, names, lines)
+        except Exception as error:  # Kept when it can be: a push still goes ahead without it
+            log.info("Couldn't keep a push to %s in the config archive: %s", target, error)
+
+
 class EditorTab(QWidget):
     def __init__(self, window):
         super().__init__(window)
@@ -104,6 +127,8 @@ class EditorTab(QWidget):
         self.refresh_timer.timeout.connect(self.refresh_views)
         config_events().saved.connect(self.on_terminal_config_saved)
         config_events().open_requested.connect(self.open_file)
+        self.push_recorder = PushRecorder(self)
+        configpush.add_push_listener(self.push_recorder)
         self.setup_archive()
 
     # ----------------------------------------------------------------- Layout
@@ -196,7 +221,9 @@ class EditorTab(QWidget):
         self.archive_panel.menu_requested.connect(self.show_archive_menu)
         self.archive_panel.pull_button.clicked.connect(self.pull_dialog)
         self.changes_panel.open_change.connect(self.open_change)
-        self.changes_panel.review_all_button.clicked.connect(self.review_all)
+        self.changes_panel.acknowledge_button.clicked.connect(self.acknowledge_all)
+        self.changes_panel.settings_requested.connect(self.review_settings)
+        self.changes_panel.export_requested.connect(self.export_review_log)
         self.standards_panel.new_button.clicked.connect(self.new_standard)
         self.standards_panel.edit_button.clicked.connect(self.edit_standard)
         self.standards_panel.list.itemDoubleClicked.connect(self.edit_standard)
@@ -369,14 +396,16 @@ class EditorTab(QWidget):
         with configs.lock:
             store = configs.store
             devices = store.devices()
-            unreviewed, failing = store.unreviewed(), store.failing()
+            unreviewed, failing, raised = store.unreviewed(), store.failing(), store.raised()
             recent, overdue = store.recent(200), store.overdue(now)
             standards_rows, compliance = store.standards(), store.compliance()
             interval = store.interval()
+            allow_acknowledge = store.settings().get("allow_acknowledge")
         names = {device["id"]: device["name"] for device in devices}
-        self.archive_panel.fill(devices, unreviewed, failing, now)
+        self.archive_panel.fill(devices, unreviewed, failing, now, raised)
         self.archive_panel.status.setText(self.archive_note)
         self.changes_panel.fill(recent, overdue)
+        self.changes_panel.set_acknowledge_allowed(allow_acknowledge)
         self.standards_panel.fill(standards_rows, compliance, names)
         if not self.backups_panel.interval.hasFocus():
             self.backups_panel.interval.setValue(int(round(interval / 3600)))
@@ -386,11 +415,13 @@ class EditorTab(QWidget):
                                                f"{where} routers, switches, firewalls and WLCs with a management "
                                                f"address (right-click one on the map > Config to leave it out).")
         flags = {}
-        for device_id in set(unreviewed) | set(failing):
+        for device_id in set(unreviewed) | set(failing) | set(raised):
             parts = []
             if unreviewed.get(device_id):
                 parts.append(f"{unreviewed[device_id]} config change{'s' if unreviewed[device_id] != 1 else ''} "
                              f"to review")
+            if raised.get(device_id):
+                parts.append(f"{raised[device_id]} raised change{'s' if raised[device_id] != 1 else ''}")
             if failing.get(device_id):
                 parts.append(f"fails {failing[device_id]} standard line{'s' if failing[device_id] != 1 else ''}")
             flags[device_id] = "Config: " + ", ".join(parts) + " (Editor page)"
@@ -538,6 +569,12 @@ class EditorTab(QWidget):
             if answer == QMessageBox.Cancel:
                 return
             if answer == QMessageBox.Save and not self.save_widget(widget):
+                return
+        controller = getattr(widget, "review", None)
+        if controller is not None and controller.reviewing and controller.state.checked():
+            answer = QMessageBox.question(self, "Close", "Stop this review? The verdicts given so far aren't kept, and "
+                                                         "the change stays to review.", QMessageBox.Yes | QMessageBox.No)
+            if answer != QMessageBox.Yes:
                 return
         self.docs.removeTab(index)
         widget.deleteLater()
@@ -778,42 +815,192 @@ class EditorTab(QWidget):
         self.open_text(text or "", title, Document.VERSION, True, context)
         self.status("")
 
-    def open_change(self, version_id):
-        """A change compared with the copy before it (and marked reviewed)."""
+    def open_change(self, version_id, older_checked=False):
+        """A change compared with the copy before it: reviewed there (every block given a verdict) when nobody has,
+        else with its review shown. Opening it doesn't review it. Changes to one device are reviewed oldest first."""
         version = self.version_row(version_id)
         if version is None:
             return
+        if version.get("first"):
+            self.open_version(version_id)
+            return
+        if not older_checked and review.state_of(version) in (None, review.SEEN):
+            with self.configs.lock:
+                older = self.configs.store.waiting_before(version)
+            if older is not None:
+                answer = QMessageBox.question(
+                    self, "Review the Older Change First",
+                    f"{self.version_title(older['id'])} is an older change to this device, still to review. Changes "
+                    f"to a device are reviewed oldest first. Review that one now?", QMessageBox.Yes | QMessageBox.No)
+                if answer == QMessageBox.Yes:
+                    self.open_change(older["id"], older_checked=True)
+                else:
+                    self.status("Review the older change first: this one is shown without reviewing it.", "warning")
+                    self.show_change(version_id, review_it=False)
+                return
+        self.show_change(version_id)
+
+    def show_change(self, version_id, review_it=True):
+        version = self.version_row(version_id)
         previous = version.get("previous_id")
 
         def work():
-            texts = (self.configs.text(previous) if previous else "", self.configs.text(version_id))
-            if not version.get("reviewed_by"):
-                self.configs.review(version_id, self.user)
-            return texts
-        self.run_job(work, lambda texts: self.change_fetched(version_id, previous, texts),
+            before = self.configs.text(previous) if previous else ""
+            after = self.configs.text(version_id)
+            with self.configs.lock:
+                patterns = self.configs.store.sensitive_patterns()
+                records = self.configs.store.reviews_of(version_id)
+            pushes = self.configs.pushes_for_version(version_id) if review_it else []
+            return before, after, review.blocks(before, after, patterns), pushes, records
+        self.run_job(work, lambda result: self.change_fetched(version_id, previous, result, review_it),
                      busy="Fetching the change...")
 
-    def change_fetched(self, version_id, previous, texts):
+    def change_fetched(self, version_id, previous, result, review_it=True):
+        before, after, blocks, pushes, records = result
+        version = self.version_row(version_id) or {}
         context = self.version_context(version_id)
-        self.open_compare(texts[0], texts[1], self.version_title(previous) if previous else "(nothing before)",
-                          self.version_title(version_id), (True, True), (context, context))
+        view = self.open_compare(before, after, self.version_title(previous) if previous else "(nothing before)",
+                                 self.version_title(version_id), (True, True), (context, context), mode=diff.SECTION)
+        shown = dict(version) if review_it else dict(version, review_state=review.SEEN)
+        if not review_it and review.state_of(version) is None:
+            shown["reviewed_by"] = "nobody yet"
+        device = self.device_row(version.get("device_id")) or {}
+        controller = ReviewController(view, shown, blocks, pushes, records, self.user,
+                                      own_login_names(self.login_row.sessions), device.get("name") or "")
+        if not review_it:
+            controller.reviewing = False
+            controller.timer.stop()
+            controller.bar.set_reviewing(False)
+            controller.show_title()
+        view.review = controller
+        controller.finish_requested.connect(self.finish_review)
+        controller.close_requested.connect(self.close_raised)
+        controller.undo_requested.connect(self.undo_change)
         self.status("")
+
+    def review_view(self):
+        """The CompareView whose review sent the signal being handled."""
+        controller = self.sender()
+        return controller.view if isinstance(controller, ReviewController) else None
+
+    def finish_review(self, payload):
+        controller = self.sender()
+        if not isinstance(controller, ReviewController):
+            return
+        version_id = controller.version["id"]
+        self.run_job(lambda: self.configs.finish_review(version_id, self.user, payload["verdicts"], payload["reason"],
+                                                        payload["seconds"], payload["started"],
+                                                        payload["self_review"]),
+                     lambda result: self.review_kept(controller, version_id, result),
+                     lambda error: self.review_failed(controller, version_id, error),
+                     busy="Keeping the review...")
+
+    def review_kept(self, controller, version_id, result):
+        outcome = (result or {}).get("outcome")
+        flags = [name for name, on in (("self-reviewed", (result or {}).get("self_review")),
+                                       ("marked quick", (result or {}).get("quick"))) if on]
+        self.status(f"{review.STATE_NAMES.get(outcome, 'Reviewed')}" + (f" ({', '.join(flags)})" if flags else "") +
+                    ("." if outcome != review.RAISED else ": it stays flagged until someone closes it."),
+                    "success" if outcome != review.RAISED else "warning")
+        self.after_review(controller, version_id)
+
+    def after_review(self, controller, version_id):
+        """Bring the copy up to date, then show the review's record in the bar."""
+        def work():
+            if getattr(self.configs, "is_tribe", False):
+                try:
+                    self.configs.sync()
+                except IpamError:
+                    pass
+            with self.configs.lock:
+                return self.configs.store.version(version_id, False), self.configs.store.reviews_of(version_id)
+        self.run_job(work, lambda result: self.record_fetched(controller, result))
+
+    def record_fetched(self, controller, result):
+        version, records = result
+        if version is not None:
+            try:
+                controller.finished(version, records)
+            except RuntimeError:  # The tab was closed meanwhile
+                pass
+        self.schedule_refresh()
         self.poke_sync()
 
-    def review_all(self):
+    def review_failed(self, controller, version_id, error):
+        if isinstance(error, OldServerError) and hasattr(self.configs, "mark_seen"):
+            answer = QMessageBox.question(
+                self, "Older Tribe Server",
+                "The tribe server runs an older NOMAD that can't keep reviews. Mark the change reviewed the old way "
+                "(it shows as Seen, with no review kept)? Update the tribe server to keep reviews.",
+                QMessageBox.Yes | QMessageBox.No)
+            if answer == QMessageBox.Yes:
+                self.run_job(lambda: self.configs.mark_seen(version_id),
+                             lambda _: (self.status("Marked Seen on the older tribe server.", "warning"),
+                                        self.after_review(controller, version_id)))
+            return
+        self.status(f"The review wasn't kept: {error}", "error")
+        try:
+            controller.hint(f"Not kept: {error}", "error")
+        except RuntimeError:
+            pass
+
+    def close_raised(self, outcome, note):
+        controller = self.sender()
+        if not isinstance(controller, ReviewController):
+            return
+        version_id = controller.version["id"]
+        self.run_job(lambda: self.configs.close_raised(version_id, self.user, outcome, note),
+                     lambda _: (self.status(f"Closed as {review.STATE_NAMES[outcome]}.", "success"),
+                                self.after_review(controller, version_id)),
+                     busy="Closing it...")
+
+    def undo_change(self):
+        controller = self.sender()
+        if isinstance(controller, ReviewController) and controller.version.get("previous_id"):
+            self.put_back(controller.version["previous_id"])
+
+    def acknowledge_all(self):
         ids = self.changes_panel.unreviewed_ids()
         if not ids:
+            self.status("There are no changes to review.", "info")
             return
+        dialog = AcknowledgeDialog(self, len(ids))
+        if dialog.exec_() != AcknowledgeDialog.Accepted:
+            return
+        reason = dialog.reason()
+        self.run_job(lambda: self.configs.acknowledge(ids, self.user, reason),
+                     self.acknowledged, busy=f"Acknowledging {len(ids)} changes...")
 
-        def work():
-            for version_id in ids:
-                self.configs.review(version_id, self.user)
-            return len(ids)
-        self.run_job(work, self.reviewed, busy=f"Marking {len(ids)} changes reviewed...")
-
-    def reviewed(self, count):
-        self.status(f"Marked {count} change{'s' if count != 1 else ''} reviewed.", "success")
+    def acknowledged(self, count):
+        self.status(f"Acknowledged {count} change{'s' if count != 1 else ''} without a review.", "success")
         self.poke_sync()
+
+    def review_settings(self):
+        with self.configs.lock:
+            settings = self.configs.store.settings()
+        dialog = ReviewSettingsDialog(self, settings, getattr(self.configs, "is_tribe", False))
+        if dialog.exec_() != ReviewSettingsDialog.Accepted:
+            return
+        values = dialog.values()
+        self.run_job(lambda: self.configs.set_settings(values),
+                     lambda _: (self.status("Review settings saved.", "success"), self.poke_sync()))
+
+    def export_review_log(self):
+        from .export_progress import error_text, run_export
+        stamp = time.strftime("%Y-%m-%d")
+        path, chosen = QFileDialog.getSaveFileName(self, "Export Review Log",
+                                                   os.path.join(self.last_folder, f"Config review log {stamp}.xlsx"),
+                                                   "Excel workbooks (*.xlsx);;CSV files (*.csv)")
+        if not path:
+            return
+        if not path.lower().endswith((".xlsx", ".csv")):
+            path += ".csv" if "CSV" in chosen else ".xlsx"
+        rows = self.configs.review_log()
+        self.last_folder = os.path.dirname(path)
+        run_export(self, "Export Review Log", lambda progress: write_log(path, rows, progress),
+                   lambda _: self.status(f"Exported {len(rows)} review log rows to {path}.", "success"),
+                   lambda error: self.status(f"Couldn't export: {error_text(error)}", "error"),
+                   lambda: self.status("Export cancelled: nothing was saved.", "info"))
 
     def show_archive_menu(self, position):
         devices, versions = self.archive_panel.selected()
@@ -826,12 +1013,10 @@ class EditorTab(QWidget):
             actions[menu.addAction("Open")] = lambda: self.open_version(version_id)
             row = self.version_row(version_id) or {}
             if row.get("previous_id"):
-                actions[menu.addAction("Compare with the Copy Before")] = lambda: self.open_change(version_id)
+                label = "Review the Change" if review.needs_attention(row) else "Compare with the Copy Before"
+                actions[menu.addAction(label)] = lambda: self.open_change(version_id)
             actions[menu.addAction("Compare with the Newest")] = lambda: self.compare_with_newest(version_id)
             actions[menu.addAction("Commands to Put This Version Back...")] = lambda: self.put_back(version_id)
-            if not row.get("reviewed_by"):
-                actions[menu.addAction("Mark Reviewed")] = lambda: self.run_job(
-                    lambda: self.configs.review(version_id, self.user), self.reviewed_one)
         if len(devices) > 1:
             actions[menu.addAction(f"Back Up These {len(devices)} Now (Scheduled)")] = \
                 lambda: self.back_up_now(list(devices))
@@ -865,9 +1050,6 @@ class EditorTab(QWidget):
         chosen = menu.exec_(position)
         if chosen in actions:
             actions[chosen]()
-
-    def reviewed_one(self, _):
-        self.poke_sync()
 
     def compare_two_versions(self):
         _, versions = self.archive_panel.selected()
@@ -1777,6 +1959,7 @@ class EditorTab(QWidget):
             self.restart_backups_quietly()
 
     def shutdown(self):
+        configpush.remove_push_listener(self.push_recorder)
         self.unlock_timer.stop()
         self.stop_archive()
 

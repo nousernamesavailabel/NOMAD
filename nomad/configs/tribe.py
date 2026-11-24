@@ -25,7 +25,7 @@ class TribeConfigs:
             if self.store.meta("server_id") not in (None, server_id):  # Another tribe's copy: start again
                 with self.store.db:
                     for table in ("devices", "versions", "claims", "failures", "standards", "compliance", "settings",
-                                  "outbox", "meta"):
+                                  "outbox", "meta", "reviews"):
                         self.store.db.execute(f"DELETE FROM {table}")
             with self.store.db:
                 self.store.set_meta("server_id", server_id)
@@ -57,7 +57,7 @@ class TribeConfigs:
             self.store.absorb(changes, revision, whole=not since)
         self.online = True
         return any(changes.get(name) for name in ("devices", "versions", "standards", "compliance", "settings",
-                                                  "gone"))
+                                                  "gone", "reviews"))
 
     def send_waiting(self):
         with self.lock:
@@ -117,8 +117,46 @@ class TribeConfigs:
 
     # ----------------------------------------------------------------- Changes (need the server)
 
-    def review(self, version_id, user):
+    # ----------------------------------------------------------------- Reviews (need a server at API 21)
+
+    def finish_review(self, version_id, user, verdicts, reason, seconds=0.0, started=None, self_review=False):
+        return self._needs_reviews("review_finish", version_id=int(version_id), verdicts=list(verdicts),
+                                   reason=reason, seconds=seconds, started=started, self_review=bool(self_review))
+
+    def close_raised(self, version_id, user, outcome, note):
+        return self._needs_reviews("review_close", version_id=int(version_id), outcome=outcome, note=note)
+
+    def acknowledge(self, version_ids, user, reason):
+        return self._needs_reviews("acknowledge", version_ids=[int(item) for item in version_ids],
+                                   reason=reason)["count"]
+
+    def pushes_for_version(self, version_id):
+        try:
+            return self.client.config_pushes(int(version_id))
+        except OldServerError:
+            return []
+
+    def record_push(self, user, source, target, names, lines):
+        try:
+            return self.client.config_request("push", source=source, target=target, names=list(names or []),
+                                              lines=list(lines))
+        except OldServerError:
+            return None
+
+    def review_log(self, limit=5000):
+        with self.lock:
+            return self.store.review_log(limit)
+
+    def mark_seen(self, version_id):
+        """An older tribe server, which can't keep reviews: the change marked reviewed its old way."""
         return self.client.config_request("review", version_id=int(version_id))
+
+    def _needs_reviews(self, action, **body):
+        try:
+            return self.client.config_request(action, **body)
+        except OldServerError:
+            raise OldServerError("The tribe server is running an older NOMAD that can't keep reviews: update it "
+                                 "first.") from None
 
     def set_excluded(self, device_id, excluded):
         return self.client.config_request("exclude", device_id=device_id, excluded=bool(excluded))

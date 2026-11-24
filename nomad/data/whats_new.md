@@ -4,6 +4,13 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-11-24
+
+- **New:** reviewing a config change in the Editor now means going through it. Opening a change no longer marks it reviewed. Double-click a change on the **Changes** tab, then mark each block **Expected** (Space) or **Unexpected** (U) while it's on the screen. Blocks that touch sensitive lines, such as users, SNMP communities or the VTY lines, need a note. **Finish Review...** asks for a reason and approves the change, or raises it if something was unexpected. A raised change stays flagged until someone closes it as Explained or Reverted.
+- **New:** when NOMAD itself sent the lines, the review says who sent them and from which page. Reviews of your own changes, and very quick reviews, are labeled in the review log. **Reviews** > **Export Review Log...** saves the log as a workbook.
+- **New:** the NOMAD Dashboard has a **Reviews** page showing each config change, how it was reviewed, and the review log. Update the tribe server and the NOMAD Dashboard service to get it.
+- **Changed:** **Mark All Reviewed** is gone. If your team needs to clear changes after a planned maintenance window, turn on **Acknowledge Without Review** in **Reviews** > **Review Settings...**. Those changes are kept as Acknowledged, not as reviewed. Changes marked reviewed before this version show as **Seen**.
+
 ## [2.10.4] - 2026-11-23
 
 - **Changed:** the NOMAD Dashboard's **Devices** page shows **Site**, **Building** and **Room** in separate columns, so you can filter or sort by each one. The Devices CSV has them as separate columns too. Update the NOMAD Dashboard service to get it.

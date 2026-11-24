@@ -45,14 +45,16 @@ def test_upload_keeps_changes_only(store):
         store.upload("10.0.0.1", "running", "  ", "x")
 
 
-def test_review_clears_unreviewed(store):
+def test_an_older_nomad_opening_a_change_doesnt_review_it(store):
     store.upload("d", "running", CONFIG, "a", now=1)
     version = store.upload("d", "running", CONFIG + "logging host 1.1.1.1\n", "a", now=2)
     assert store.unreviewed() == {"d": 1}
     assert [item["id"] for item in store.recent()] == [version["version_id"]]
-    store.review(version["version_id"], "bob")
-    assert store.unreviewed() == {}
-    assert store.version(version["version_id"])["reviewed_by"] == "bob"
+    store.review(version["version_id"], "bob")  # What an older NOMAD sends as it opens a change
+    assert store.unreviewed() == {"d": 1}
+    assert store.version(version["version_id"])["reviewed_by"] is None
+    [seen] = store.reviews_of(version["version_id"])
+    assert (seen["kind"], seen["outcome"], seen["user"]) == ("seen", "seen", "bob")
 
 
 def test_startup_kept_apart_from_running(store):
@@ -255,9 +257,9 @@ def test_server_archive_round_trip(server, tmp_path):
     assert other.store.has_text(change["id"])
     [row] = other.store.compliance("10.0.0.1")
     assert row["failed"] == 0
-    other.review(second["version_id"], "")
+    other.mark_seen(second["version_id"])  # An older NOMAD's way: only Seen
     laptop.sync()
-    assert laptop.store.unreviewed() == {}
+    assert laptop.store.unreviewed() == {"10.0.0.1": 1}
     assert client.wait_for_configs(0, timeout=1) >= laptop.store.revision()
     laptop.close()
     other.close()

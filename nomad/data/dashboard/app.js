@@ -405,7 +405,10 @@
           stat(`Hosts seen (last ${data.hosts.window})`, data.hosts.total, "accent", `#hosts?window=${data.hosts.window}`),
           stat("Syslog errors (24 h)", data.syslog_severe, data.syslog_severe ? "warn" : "", "#syslog?level=error"),
           stat("NetFlow (last hour)", data.flows.available ? fmtBytes(data.flows.bytes) : "–", "accent",
-            "#traffic?at=netflow")),
+            "#traffic?at=netflow"),
+          data.reviews && data.reviews.available ? stat("Config changes to review",
+            data.reviews.to_review + data.reviews.raised, data.reviews.raised ? "down" :
+              data.reviews.to_review ? "warn" : "up", "#reviews?show=attention") : null),
         stacks(
           panel("Down now", data.down.length ? table("ov-down", downColumns, data.down) :
             empty("Nothing is down.")),
@@ -563,6 +566,61 @@
         ], data.senders, {empty: data.level ? "No sender has sent a message that bad in the last day." :
           "No syslog in the last day."}) :
           empty("The Syslog Collector isn't answering on the dashboard's computer.")];
+    },
+
+    reviews(data) {
+      if (!data.available) {
+        return [...notices(data.freshness), head("Config reviews"),
+          empty("The tribe server doesn't keep config reviews yet: update it to the newest NOMAD.")];
+      }
+      const shows = [["", "Every change"], ["attention", "To review or raised"], ["raised", "Raised"],
+        ["flagged", "Self-reviewed or quick"]];
+      const choose = h("select", {"aria-label": "Show", onchange: () => {
+        location.hash = choose.value ? `#reviews?show=${choose.value}` : "#reviews";
+      }}, shows.map(([value, label]) => h("option", {value, selected: value === data.show}, label)));
+      const c = data.counts;
+      const pillClass = {approved: "up", explained: "up", reverted: "up", raised: "down", to_review: "backup",
+        seen: "", acknowledged: ""};
+      const flags = (r) => [r.self_review ? "self-reviewed" : "", r.quick ? "quick" : ""].filter(Boolean).join(", ");
+      return [...notices(data.freshness),
+        head("Config reviews", `Changes to the devices' configurations and how each was reviewed: every block of a `
+             + `change gets a verdict in NOMAD's Editor. ${c.to_review} to review, ${c.raised} raised`
+             + (data.allow_acknowledge ? ". Acknowledging without a review is allowed." : "."),
+          choose, csvLink("reviews", data.show ? {show: data.show} : {})),
+        h("div", {class: "stats"},
+          stat("To review", c.to_review, c.to_review ? "warn" : "up", "#reviews?show=attention"),
+          stat("Raised", c.raised, c.raised ? "down" : "up", "#reviews?show=raised")),
+        table("review-changes", [
+          {key: "pulled_at", label: "Pulled", render: (r) => fmtTime(r.pulled_at), value: (r) => -(r.pulled_at || 0)},
+          {key: "device", label: "Device"},
+          {key: "which", label: "Config"},
+          {key: "change", label: "Change", render: (r) => h("span", {class: "mono"}, r.change)},
+          {key: "changed_by", label: "Changed by"},
+          {key: "state_text", label: "Review", render: (r) => h("span", {class: `pill ${pillClass[r.state] || ""}`}, r.state_text)},
+          {key: "reviewed_by", label: "By"},
+          {key: "reviewed_at", label: "When", render: (r) => r.reviewed_at ? fmtTime(r.reviewed_at) : "",
+           value: (r) => -(r.reviewed_at || 0)},
+          {key: "reason", label: "Reason"},
+          {key: "blocks", label: "Blocks", number: true, render: (r) => r.blocks === null || r.blocks === undefined ? "" :
+            `${r.blocks}` + (r.unexpected ? ` (${r.unexpected} unexpected)` : "")},
+          {key: "flags", label: "Flags", value: flags, render: (r) => flags(r) ? h("span", {class: "pill backup"}, flags(r)) : ""},
+        ], data.changes, {empty: data.show ? "No change like that." : "No config changes yet.",
+          rowClass: (r) => r.state === "raised" ? "row-down" : ""}),
+        h("h2", {class: "section"}, "Review log"),
+        h("div", {class: "tools"}, csvLink("review-log")),
+        table("review-log", [
+          {key: "at", label: "When", render: (r) => fmtTime(r.at), value: (r) => -(r.at || 0)},
+          {key: "device", label: "Device"},
+          {key: "change", label: "Change", render: (r) => h("span", {class: "mono"}, r.change)},
+          {key: "kind_text", label: "What"},
+          {key: "outcome_text", label: "Outcome"},
+          {key: "user", label: "Who"},
+          {key: "reason", label: "Reason"},
+          {key: "seconds", label: "Time", number: true, render: (r) => r.seconds === null || r.seconds === undefined ? "" :
+            `${Math.round(r.seconds)} s`},
+          {key: "flags", label: "Flags", value: flags, render: (r) => flags(r) ? h("span", {class: "pill backup"}, flags(r)) : ""},
+          {key: "notes", label: "Block notes"},
+        ], data.log, {empty: "Nobody has reviewed a change yet."})];
     },
 
     traffic(data) {

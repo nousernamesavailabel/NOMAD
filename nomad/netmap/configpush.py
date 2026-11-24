@@ -9,6 +9,9 @@ ACL and VPN changes go in guarded (set_up_guarded): `configure terminal revert t
 configuration back by itself after N minutes unless told `configure confirm`, which NOMAD only says from a new login
 made after the change (proof it can still get in). A line refused, or no new login, has NOMAD revert right away.
 
+Every line a device takes is told to the push listeners (add_push_listener), with the page that sent it (Pusher's
+source): the Editor keeps them in the config archive, so a review can see which changes NOMAD made.
+
 Qt-free: the Port Mirroring page runs it on a worker thread.
 """
 import datetime
@@ -37,11 +40,36 @@ NOTHING_PENDING = re.compile(r"no rollback confirmed change pending", re.IGNOREC
 FILE_SYSTEMS = ("bootflash:", "flash:", "unix:", "disk0:", "flash0:", "nvram:")
 ARCHIVE_NAME = "nomad-revert"
 SAVE_TIMEOUT = 90
+PUSH_LISTENERS = []  # f(target, names, lines, source): configuration lines a device took from NOMAD
+
+
+def add_push_listener(listener):
+    if listener not in PUSH_LISTENERS:
+        PUSH_LISTENERS.append(listener)
+
+
+def remove_push_listener(listener):
+    if listener in PUSH_LISTENERS:
+        PUSH_LISTENERS.remove(listener)
+
+
+def notify_pushed(target, names, lines, source):
+    """Tell the listeners (on the pushing thread; one failing doesn't stop the push)."""
+    lines = [line for line in lines if line.strip() and line.strip() not in ("end", "exit") and
+             not line.strip().startswith(("conf", "!"))]
+    if not lines or not target:
+        return
+    for listener in list(PUSH_LISTENERS):
+        try:
+            listener(target, list(names or ()), lines, source)
+        except Exception:
+            log.exception("A push listener failed")
 
 
 class ConfigShell(macssh.SshShell):
     """A switch's command line that can go to enable and configure."""
     errors_in = staticmethod(mirror.errors_in)  # The lines of an answer that say a line was refused
+    push_target, push_names, push_source = "", (), ""  # Set by Pusher: who's told what it took (notify_pushed)
 
     def __init__(self, session, vault=None, known_hosts=None, trust_new=False, password=None,
                  should_stop=lambda: False, enable_secret=""):
@@ -97,7 +125,7 @@ class ConfigShell(macssh.SshShell):
         """Type each line of text. Returns (transcript, [(line, [error lines])] of the lines refused). Stops at the
         first refused when stop_on_error (and leaves configuration mode). "!" comment lines (the separators between
         blocks) aren't typed."""
-        transcript, refused = [], []
+        transcript, refused, taken = [], [], []
         in_config = False
         for line in text.splitlines():
             if not line.strip() or line.strip().startswith("!"):
@@ -118,6 +146,9 @@ class ConfigShell(macssh.SshShell):
                     if in_config:
                         self.line("end")
                     break
+            else:
+                taken.append(line)
+        notify_pushed(self.push_target, self.push_names, taken, self.push_source)
         return "\n".join(transcript), refused
 
 
@@ -153,7 +184,8 @@ class Pusher:
     """Logs in to each switch once (kept until close) and sends to it."""
 
     def __init__(self, logins, vault=None, known_hosts=None, trust_new=False, enable_secret="",
-                 should_stop=lambda: False, shell_factory=ConfigShell):
+                 should_stop=lambda: False, shell_factory=ConfigShell, source=""):
+        self.source = source  # The page sending, for the push listeners ("The ACLs page")
         self.logins, self.vault, self.known_hosts = logins, vault, known_hosts
         self.trust_new, self.enable_secret, self.should_stop = trust_new, enable_secret, should_stop
         self.shell_factory = shell_factory
@@ -178,6 +210,10 @@ class Pusher:
             return None
         shell = self.shell_factory(session, self.vault, self.known_hosts, self.trust_new, self.logins.password,
                                    self.should_stop, enable_secret=self.enable_secret)
+        try:
+            shell.push_target, shell.push_names, shell.push_source = address, tuple(names or ()), self.source
+        except AttributeError:  # A stand-in shell that can't take them
+            pass
         try:
             shell.open()
         except Cancelled:

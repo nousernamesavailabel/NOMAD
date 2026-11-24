@@ -3,7 +3,11 @@
 one too (with the texts fetched as they're opened).
 
 A pull the same as the last copy (noise aside) only notes when it was checked; a different one is a new version,
-which shows in Recent changes (and on the map) until someone reviews it. A device's first copy isn't a change.
+which shows in Recent changes (and on the map) until someone reviews it (review.py: every block given a verdict;
+finish_review) or, when the tribe allows it, acknowledges it without a review. A raised change stays flagged until
+someone closes it, or a later copy shows it put back. Every review, close and acknowledgement is kept in reviews (the
+review log); NOMAD's own pushes in pushes, to suggest which blocks they explain. A device's first copy isn't a
+change.
 
 Scheduled backups (a work queue, device by device): the devices on tribe maps that are routers, switches, firewalls or
 WLCs are in scope (sync_devices). Each is due once an interval (a day unless set), spread over the day. Computers
@@ -24,7 +28,7 @@ import threading
 import time
 import zlib
 
-from . import diff, noise
+from . import diff, noise, review
 
 CLAIM_SECONDS = 600
 SERVICE_SEEN_SECONDS = 300  # A service that asked this recently is still about
@@ -35,6 +39,7 @@ DEFAULT_INTERVAL_HOURS = 24
 GUI, SERVICE = "gui", "service"
 SCHEDULED, MANUAL, TERMINAL, TFTP, FILE = "scheduled", "manual", "terminal", "tftp", "file"
 SOURCE_NAMES = {SCHEDULED: "Scheduled backup", MANUAL: "Pulled", TERMINAL: "Terminal", TFTP: "TFTP", FILE: "File"}
+PUSHES_KEPT_DAYS = 400  # NOMAD's pushes are kept this long (to explain the changes they made)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT, address TEXT, names TEXT, platform TEXT,
@@ -64,9 +69,22 @@ CREATE TABLE IF NOT EXISTS results (id INTEGER PRIMARY KEY, at REAL, by TEXT, de
                                     ok INTEGER, note TEXT);
 CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS gone (device_id TEXT PRIMARY KEY, into_id TEXT, revision INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, version_id INTEGER NOT NULL, device_id TEXT, kind TEXT,
+                                    outcome TEXT, user TEXT, at REAL, started REAL, seconds REAL, reason TEXT,
+                                    blocks TEXT, total INTEGER, seen INTEGER, unexpected INTEGER,
+                                    self_review INTEGER NOT NULL DEFAULT 0, quick INTEGER NOT NULL DEFAULT 0,
+                                    revision INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS reviews_version ON reviews (version_id);
+CREATE INDEX IF NOT EXISTS reviews_revision ON reviews (revision);
+CREATE TABLE IF NOT EXISTS pushes (id INTEGER PRIMARY KEY, at REAL, user TEXT, source TEXT, target TEXT, names TEXT,
+                                   lines TEXT);
+CREATE INDEX IF NOT EXISTS pushes_at ON pushes (at);
 """
+MIGRATIONS = (("versions", "review_state", "TEXT"),)  # Columns added since a table was first made
 VERSION_FIELDS = ("id", "device_id", "which", "hash", "pulled_at", "pulled_by", "source", "changed_by", "previous_id",
-                  "added", "removed", "first", "reviewed_by", "reviewed_at", "revision")
+                  "added", "removed", "first", "reviewed_by", "reviewed_at", "revision", "review_state")
+REVIEW_FIELDS = ("id", "version_id", "device_id", "kind", "outcome", "user", "at", "started", "seconds", "reason",
+                 "blocks", "total", "seen", "unexpected", "self_review", "quick", "revision")
 
 
 class ArchiveError(Exception):
@@ -96,6 +114,11 @@ class ConfigStore:
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        for table, column, kind in MIGRATIONS:
+            columns = {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                with self.db:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
         self.lock = threading.RLock()
 
     def close(self):
@@ -123,10 +146,14 @@ class ConfigStore:
         return float(self.settings().get("interval_hours", DEFAULT_INTERVAL_HOURS)) * 3600
 
     def settings(self):
-        values = {"interval_hours": DEFAULT_INTERVAL_HOURS}
+        values = {"interval_hours": DEFAULT_INTERVAL_HOURS, "allow_acknowledge": False,
+                  "sensitive_patterns": list(review.SENSITIVE_PATTERNS)}
         for row in self.db.execute("SELECT name, value FROM settings"):
             values[row["name"]] = json.loads(row["value"])
         return values
+
+    def sensitive_patterns(self):
+        return self.settings().get("sensitive_patterns")
 
     def set_settings(self, values):
         with self.db:
@@ -136,6 +163,13 @@ class ConfigStore:
                     value = float(value)
                     if not 1 <= value <= 24 * 30:
                         raise ArchiveError("Back up every 1 to 720 hours.")
+                elif name == "allow_acknowledge":
+                    value = bool(value)
+                elif name == "sensitive_patterns":
+                    value = [str(item).strip() for item in value or [] if str(item).strip()][:200]
+                    bad = review.bad_patterns(value)
+                    if bad:
+                        raise ArchiveError(f"{bad[0][0]} isn't a regular expression: {bad[0][1]}.")
                 self.db.execute("INSERT OR REPLACE INTO settings (name, value, revision) VALUES (?, ?, ?)",
                                 (name, json.dumps(value), revision))
         return revision
@@ -227,6 +261,7 @@ class ConfigStore:
         self.db.execute("UPDATE versions SET device_id = ?, revision = ? WHERE device_id = ?",
                         (target, revision, source))
         self.db.execute("UPDATE results SET device_id = ? WHERE device_id = ?", (target, source))
+        self.db.execute("UPDATE reviews SET device_id = ?, revision = ? WHERE device_id = ?", (target, revision, source))
         for table in ("compliance", "failures", "claims"):
             self.db.execute(f"DELETE FROM {table} WHERE device_id = ?", (source,))
         created = [value for value in (old["created"], new["created"]) if value is not None]
@@ -294,7 +329,7 @@ class ConfigStore:
 
     def drop_device(self, device_id):
         """Delete a device's row and everything kept for it (in the caller's transaction)."""
-        for table in ("versions", "compliance", "failures", "claims"):
+        for table in ("versions", "compliance", "failures", "claims", "reviews"):
             self.db.execute(f"DELETE FROM {table} WHERE device_id = ?", (device_id,))
         self.db.execute("DELETE FROM devices WHERE id = ?", (device_id,))
 
@@ -485,18 +520,221 @@ class ConfigStore:
                  latest["id"] if latest else None, added, removed, 1 if first else 0,
                  user if first else None, now if first else None, revision))
             self.db.execute("UPDATE devices SET revision = ? WHERE id = ?", (revision, device_id))
+            if not first:
+                self.close_put_back(device_id, which, config, revision, now)
         return {"stored": True, "version_id": cursor.lastrowid, "first": first, "revision": revision}
 
+    # ----------------------------------------------------------------- Reviews
+
     def review(self, version_id, user, now=None):
-        """Mark a change seen (it leaves the map's badge)."""
+        """An older NOMAD opened a change (which it took as reviewing it): noted as Seen in the review log, and the
+        change still waits for a review."""
         now = time.time() if now is None else now
         with self.db:
-            if self.version(version_id, False) is None:
+            version = self.version(version_id, False)
+            if version is None:
                 raise ArchiveError("That version isn't in the config archive.")
             revision = self.next_revision()
-            self.db.execute("UPDATE versions SET reviewed_by = ?, reviewed_at = ?, revision = ? WHERE id = ? AND "
-                            "reviewed_by IS NULL", (user, now, revision, int(version_id)))
+            self._log_review(version, review.KIND_SEEN, review.SEEN, user, now, revision)
         return revision
+
+    def _text_of(self, version_id):
+        version = self.version(version_id) if version_id else None
+        return (version or {}).get("text") or ""
+
+    def review_blocks(self, version_id):
+        """The blocks of a change (review.Block), from the copy before it."""
+        version = self.version(version_id)
+        if version is None:
+            raise ArchiveError("That version isn't in the config archive.")
+        return review.blocks(self._text_of(version["previous_id"]), version["text"] or "", self.sensitive_patterns())
+
+    def waiting_before(self, version):
+        """An older change to the same device's same configuration still to review, or None."""
+        row = self.db.execute("SELECT * FROM versions WHERE device_id = ? AND which = ? AND id < ? AND first = 0 AND "
+                              "review_state IS NULL AND reviewed_by IS NULL ORDER BY id LIMIT 1",
+                              (version["device_id"], version["which"], version["id"])).fetchone()
+        return self._version(row, False) if row else None
+
+    def finish_review(self, version_id, user, verdicts, reason, seconds=0.0, started=None, self_review=False,
+                      now=None):
+        """A review of a change, checked against its blocks (review.check): Approved when every block was expected,
+        else Raised. Self-reviewed (labeled, never refused) when the caller says so, or one of NOMAD's pushes by
+        the same person made the change. Returns {"outcome", "revision", "review_id", "quick", "self_review"}."""
+        now = time.time() if now is None else now
+        with self.db:
+            version = self.version(version_id, False)
+            if version is None:
+                raise ArchiveError("That version isn't in the config archive.")
+            if version["first"]:
+                raise ArchiveError("A device's first copy isn't a change: there's nothing to review.")
+            state = review.state_of(version)
+            if state not in (None, review.SEEN):
+                raise ArchiveError(f"It's {review.STATE_NAMES[state]} already, by {version['reviewed_by'] or 'someone'}.")
+            older = self.waiting_before(version)
+            if older is not None:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(older["pulled_at"] or 0))
+                raise ArchiveError(f"An older change to this device (from {when}) is still to review: review the "
+                                   f"changes oldest first.")
+            try:
+                checked = review.check(self.review_blocks(version_id), verdicts, reason, seconds)
+            except review.ReviewError as error:
+                raise ArchiveError(str(error)) from None
+            self_review = bool(self_review) or any(push["user"] == user for push in self.pushes_for(version))
+            revision = self.next_revision()
+            review_id = self._log_review(version, review.KIND_REVIEW, checked.outcome, user, now, revision,
+                                         reason=reason, started=started, seconds=checked.seconds,
+                                         blocks=checked.blocks, seen=checked.seen, unexpected=checked.unexpected,
+                                         self_review=self_review, quick=checked.quick)
+            self.db.execute("UPDATE versions SET review_state = ?, reviewed_by = ?, reviewed_at = ?, revision = ? "
+                            "WHERE id = ?", (checked.outcome, user, now, revision, int(version_id)))
+        return {"outcome": checked.outcome, "revision": revision, "review_id": review_id, "quick": checked.quick,
+                "self_review": self_review}
+
+    def close_raised(self, version_id, user, outcome, note, now=None):
+        """Close a raised change: Explained (someone says why it's all right) or Reverted (put back). Closed by the
+        one who raised it is labeled so. Returns the revision."""
+        now = time.time() if now is None else now
+        if outcome not in review.CLOSED:
+            raise ArchiveError("Close it as Explained or Reverted.")
+        if len((note or "").strip()) < review.MIN_REASON:
+            raise ArchiveError("Say why it's all right." if outcome == review.EXPLAINED else
+                               "Say how it was put back.")
+        with self.db:
+            version = self.version(version_id, False)
+            if version is None:
+                raise ArchiveError("That version isn't in the config archive.")
+            if version.get("review_state") != review.RAISED:
+                raise ArchiveError("Only a raised change can be closed.")
+            raised_by = self.db.execute("SELECT user FROM reviews WHERE version_id = ? AND kind = ? ORDER BY id DESC "
+                                        "LIMIT 1", (int(version_id), review.KIND_REVIEW)).fetchone()
+            revision = self.next_revision()
+            self._log_review(version, review.KIND_CLOSE, outcome, user, now, revision, reason=note,
+                             self_review=bool(raised_by and raised_by["user"] == user))
+            self.db.execute("UPDATE versions SET review_state = ?, reviewed_by = ?, reviewed_at = ?, revision = ? "
+                            "WHERE id = ?", (outcome, user, now, revision, int(version_id)))
+        return revision
+
+    def acknowledge(self, version_ids, user, reason, now=None):
+        """Clear changes without reviewing them (only when the tribe allows it): Acknowledged, never Reviewed.
+        Returns how many."""
+        now = time.time() if now is None else now
+        if not self.settings().get("allow_acknowledge"):
+            raise ArchiveError("Acknowledging changes without a review is turned off (Changes > Reviews > Review "
+                               "Settings).")
+        if len((reason or "").strip()) < review.MIN_REASON:
+            raise ArchiveError("Say why these changes don't need a review.")
+        count = 0
+        with self.db:
+            revision = self.next_revision()
+            for version_id in dict.fromkeys(int(item) for item in version_ids):
+                version = self.version(version_id, False)
+                if version is None or version["first"] or review.state_of(version) not in (None, review.SEEN):
+                    continue
+                self._log_review(version, review.KIND_ACKNOWLEDGE, review.ACKNOWLEDGED, user, now, revision,
+                                 reason=reason)
+                self.db.execute("UPDATE versions SET review_state = ?, reviewed_by = ?, reviewed_at = ?, "
+                                "revision = ? WHERE id = ?", (review.ACKNOWLEDGED, user, now, revision, version_id))
+                count += 1
+        return count
+
+    def _log_review(self, version, kind, outcome, user, now, revision, reason="", started=None, seconds=None,
+                    blocks=None, seen=None, unexpected=None, self_review=False, quick=False):
+        cursor = self.db.execute(
+            "INSERT INTO reviews (version_id, device_id, kind, outcome, user, at, started, seconds, reason, blocks, "
+            "total, seen, unexpected, self_review, quick, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?)", (version["id"], version["device_id"], kind, outcome, user, now, started, seconds,
+                      (reason or "").strip()[:2000], json.dumps(blocks) if blocks is not None else None,
+                      len(blocks) if blocks is not None else None, seen, unexpected, 1 if self_review else 0,
+                      1 if quick else 0, revision))
+        return cursor.lastrowid
+
+    def close_put_back(self, device_id, which, config, revision, now):
+        """A new copy that puts back every unexpected block of a raised change closes it as Reverted (in the
+        caller's transaction)."""
+        rows = self.db.execute("SELECT * FROM versions WHERE device_id = ? AND which = ? AND review_state = ?",
+                               (device_id, which, review.RAISED)).fetchall()
+        for row in rows:
+            record = self.db.execute("SELECT blocks FROM reviews WHERE version_id = ? AND kind = ? ORDER BY id DESC "
+                                     "LIMIT 1", (row["id"], review.KIND_REVIEW)).fetchone()
+            prints = [block["fingerprint"] for block in json.loads(record["blocks"] or "[]")
+                      if block.get("verdict") == review.UNEXPECTED] if record else []
+            if not prints or not review.reverted(self._text_of(row["previous_id"]), unpack(row["text"]) or "",
+                                                 config, prints, self.sensitive_patterns()):
+                continue
+            version = self._version(row, False)
+            self._log_review(version, review.KIND_CLOSE, review.REVERTED, review.REVERTED_BY, now, revision,
+                             reason="A later copy shows the unexpected lines put back.")
+            self.db.execute("UPDATE versions SET review_state = ?, reviewed_by = ?, reviewed_at = ?, revision = ? "
+                            "WHERE id = ?", (review.REVERTED, review.REVERTED_BY, now, revision, row["id"]))
+
+    def reviews_of(self, version_id):
+        """The review log's rows for one change, oldest first."""
+        rows = self.db.execute("SELECT * FROM reviews WHERE version_id = ? ORDER BY id", (int(version_id),))
+        return [self._review(row) for row in rows]
+
+    @staticmethod
+    def _review(row):
+        item = {name: row[name] for name in REVIEW_FIELDS}
+        item["blocks"] = json.loads(item["blocks"]) if item["blocks"] else []
+        item["self_review"], item["quick"] = bool(item["self_review"]), bool(item["quick"])
+        return item
+
+    def review_log(self, limit=500):
+        """The review log, newest first, with each change's device name, when it was pulled and its size."""
+        rows = self.db.execute("SELECT r.*, coalesce(d.name, r.device_id) AS device_name, v.pulled_at, v.added, "
+                               "v.removed, v.which, v.changed_by FROM reviews r LEFT JOIN devices d ON "
+                               "d.id = r.device_id LEFT JOIN versions v ON v.id = r.version_id "
+                               "ORDER BY r.id DESC LIMIT ?", (int(limit),))
+        result = []
+        for row in rows:
+            item = self._review(row)
+            for name in ("device_name", "pulled_at", "added", "removed", "which", "changed_by"):
+                item[name] = row[name]
+            result.append(item)
+        return result
+
+    # ----------------------------------------------------------------- NOMAD's own pushes
+
+    def record_push(self, user, source, target, names, lines, now=None):
+        """Lines NOMAD typed into a device's configuration (to explain the change they make). Returns its id."""
+        now = time.time() if now is None else now
+        lines = [str(line).rstrip()[:500] for line in lines or [] if str(line).strip()][:5000]
+        if not lines:
+            return None
+        with self.db:
+            self.db.execute("DELETE FROM pushes WHERE at < ?", (now - PUSHES_KEPT_DAYS * 86400,))
+            cursor = self.db.execute("INSERT INTO pushes (at, user, source, target, names, lines) VALUES "
+                                     "(?, ?, ?, ?, ?, ?)", (now, user, (source or "")[:100], (target or "")[:200],
+                                                            json.dumps([str(name) for name in names or []][:50]),
+                                                            json.dumps(lines)))
+        return cursor.lastrowid
+
+    def _previous_at(self, version):
+        if not version.get("previous_id"):
+            return 0.0
+        row = self.db.execute("SELECT pulled_at FROM versions WHERE id = ?", (version["previous_id"],)).fetchone()
+        return float(row["pulled_at"] or 0) if row else 0.0
+
+    def pushes_for(self, version):
+        """NOMAD's pushes to the change's device between the copy before it and it: [{"id", "at", "user",
+        "source", "target", "lines"}]."""
+        device = self.device(version["device_id"]) or {}
+        known = {str(value).strip().lower() for value in [version["device_id"], device.get("address"),
+                                                          device.get("name"), *(device.get("names") or [])] if value}
+        rows = self.db.execute("SELECT * FROM pushes WHERE at > ? AND at <= ? ORDER BY at",
+                               (self._previous_at(version), (version.get("pulled_at") or time.time()) + 1))
+        result = []
+        for row in rows:
+            names = {str(value).strip().lower() for value in [row["target"], *json.loads(row["names"] or "[]")]}
+            if names & known:
+                result.append({"id": row["id"], "at": row["at"], "user": row["user"], "source": row["source"],
+                               "target": row["target"], "lines": json.loads(row["lines"] or "[]")})
+        return result
+
+    def pushes_for_version(self, version_id):
+        version = self.version(version_id, False)
+        return self.pushes_for(version) if version else []
 
     def recent(self, limit=200):
         """The latest changes (not first copies), newest first, with their devices' names (no texts)."""
@@ -511,8 +749,14 @@ class ConfigStore:
 
     def unreviewed(self):
         """{device id: number of changes nobody has reviewed}."""
-        rows = self.db.execute("SELECT device_id, count(*) AS n FROM versions WHERE reviewed_by IS NULL AND first = 0 "
-                               "GROUP BY device_id")
+        rows = self.db.execute("SELECT device_id, count(*) AS n FROM versions WHERE review_state IS NULL AND "
+                               "reviewed_by IS NULL AND first = 0 GROUP BY device_id")
+        return {row["device_id"]: row["n"] for row in rows}
+
+    def raised(self):
+        """{device id: number of raised changes nobody has closed}."""
+        rows = self.db.execute("SELECT device_id, count(*) AS n FROM versions WHERE review_state = ? GROUP BY "
+                               "device_id", (review.RAISED,))
         return {row["device_id"]: row["n"] for row in rows}
 
     # ----------------------------------------------------------------- Standards and how devices stand
@@ -589,8 +833,11 @@ class ConfigStore:
                    self.db.execute("SELECT device_id, standard FROM compliance")] if standards else None
         gone = [dict(row) for row in self.db.execute("SELECT device_id, into_id FROM gone WHERE revision > ?",
                                                      (since,))] if since else []
+        reviews = [self._review(row) for row in self.db.execute("SELECT * FROM reviews WHERE revision > ? ORDER BY id",
+                                                                (since,))]
         return {"devices": devices, "versions": versions, "standards": standards, "compliance": compliance,
-                "settings": settings, "compliance_present": present, "gone": gone}, self.revision()
+                "settings": settings, "compliance_present": present, "gone": gone, "reviews": reviews}, \
+            self.revision()
 
     def absorb(self, changes, revision, whole=False):
         """Take the server's changes into a copy (texts come later, as they're opened). whole: changes since 0, so
@@ -639,6 +886,12 @@ class ConfigStore:
             for name, value in changes.get("settings", {}).items():
                 self.db.execute("INSERT OR REPLACE INTO settings (name, value, revision) VALUES (?, ?, ?)",
                                 (name, json.dumps(value), revision))
+            for row in changes.get("reviews", ()):
+                values = dict(row, blocks=json.dumps(row.get("blocks") or []),
+                              self_review=1 if row.get("self_review") else 0, quick=1 if row.get("quick") else 0)
+                self.db.execute(f"INSERT OR REPLACE INTO reviews ({', '.join(REVIEW_FIELDS)}) VALUES "
+                                f"({', '.join('?' for _ in REVIEW_FIELDS)})",
+                                [values.get(name) for name in REVIEW_FIELDS])
             for item in changes.get("gone", ()):  # Merged (its copies came above, under the other id) or forgotten
                 self.drop_device(item["device_id"])
             self.set_meta("revision", revision)

@@ -1,13 +1,15 @@
 """What each NOMAD Dashboard page shows, as JSON, from the engine's Snapshot (and its history for trends), and the
 CSV of each page's table. Pure functions: the web server calls them, and the tests call them with made-up snapshots.
 
-Nothing here gives a syslog message's text, a device's config, or any credential.
+Nothing here gives a syslog message's text, a device's config, or any credential. The Reviews page shows config
+changes' sizes, who reviewed them and the reviewers' notes, never the configuration lines.
 """
 import csv
 import io
 import ipaddress
 import time
 
+from ..configs import review as config_review
 from ..netmap import details, layout, monitor, monitor_record, traffic_history, tunnels as tunnel_module
 from ..netmap.monitor import duration_text
 from ..netmap.monitor_record import UPTIME_NAMES, uptime_text
@@ -21,7 +23,8 @@ OVERVIEW_WINDOW = "1h"  # The Overview's host count: the Hosts page's for the sa
 SPANS = traffic_history.SPANS  # NOMAD's Traffic Graphs page offers the same
 STALE_WATCHER = monitor_record.STALE_SECONDS  # Seconds without a poll before the watcher counts as stopped
 KIND_WEIGHTS = {FIREWALL: 3, ROUTER: 2, SWITCH: 1, WLC: 1}
-PAGES = ("overview", "devices", "events", "syslog", "traffic", "vpns", "ipam", "hosts", "sites", "map", "trends")
+PAGES = ("overview", "devices", "events", "syslog", "traffic", "vpns", "ipam", "hosts", "sites", "map", "trends",
+         "reviews")
 # The Syslog page's choice: the least severe level a sender's messages must reach to be listed ("" lists every sender).
 # "error" lists the senders the Overview's Syslog errors count comes from
 SYSLOG_LEVELS = {"error": 3, "warning": 4}
@@ -177,7 +180,95 @@ def overview(snapshot, history=None, now=None, engine=None):
                       "bytes": (snapshot.flows.get("total") or [0])[0], "span": snapshot.flows.get("span", 3600)},
             "fullest": fullest, "busiest": busiest, "freshness": freshness(snapshot, now),
             "hosts": {"window": OVERVIEW_WINDOW, "total": seen["total"], "mac_only": seen["mac_only_total"]},
-            "map_subnets": on_maps}
+            "map_subnets": on_maps, "reviews": review_counts(snapshot)}
+
+
+# --------------------------------------------------------------------- Config change reviews
+
+REVIEW_KINDS = {config_review.KIND_REVIEW: "Review", config_review.KIND_CLOSE: "Closed",
+                config_review.KIND_ACKNOWLEDGE: "Acknowledged", config_review.KIND_SEEN: "Opened by an older NOMAD"}
+REVIEW_SHOWS = ("attention", "raised", "flagged")  # The Reviews page's choices ("" shows every change)
+
+
+def review_counts(snapshot):
+    data = snapshot.tribe.reviews or {}
+    return {"available": bool(data), "to_review": int(data.get("to_review") or 0),
+            "raised": int(data.get("raised") or 0)}
+
+
+def block_notes(blocks):
+    """The blocks a reviewer said something about (or found unexpected), as text."""
+    parts = []
+    for block in blocks or []:
+        if not block.get("note") and block.get("verdict") != config_review.UNEXPECTED:
+            continue
+        where = block.get("path") or "top level"
+        verdict = "unexpected" if block.get("verdict") == config_review.UNEXPECTED else "expected"
+        parts.append(f"{block.get('index', 0) + 1} ({where}, {verdict})" + (f": {block['note']}" if block.get("note")
+                                                                           else ""))
+    return "; ".join(parts)
+
+
+def review_log_rows(snapshot):
+    rows = []
+    for row in (snapshot.tribe.reviews or {}).get("reviews", []):
+        rows.append({"at": row.get("at"), "device": row.get("device_name") or row.get("device_id") or "",
+                     "which": row.get("which") or "", "pulled_at": row.get("pulled_at"),
+                     "change": f"+{row.get('added') or 0} −{row.get('removed') or 0}",
+                     "kind": row.get("kind") or "", "kind_text": REVIEW_KINDS.get(row.get("kind"), row.get("kind")),
+                     "outcome": row.get("outcome") or "",
+                     "outcome_text": config_review.STATE_NAMES.get(row.get("outcome"), row.get("outcome") or ""),
+                     "user": row.get("user") or "", "reason": row.get("reason") or "", "total": row.get("total"),
+                     "unexpected": row.get("unexpected"), "seen": row.get("seen"), "seconds": row.get("seconds"),
+                     "self_review": bool(row.get("self_review")), "quick": bool(row.get("quick")),
+                     "notes": block_notes(row.get("blocks"))})
+    return rows
+
+
+def review_change_rows(snapshot, show=""):
+    """The newest changes with how each was reviewed (its latest review, close or acknowledgement)."""
+    data = snapshot.tribe.reviews or {}
+    latest = {}
+    flags = {}
+    for row in sorted(data.get("reviews", []), key=lambda item: item.get("id") or 0):
+        if row.get("kind") == config_review.KIND_SEEN:
+            continue
+        latest[row.get("version_id")] = row
+        if row.get("kind") == config_review.KIND_REVIEW:
+            flags[row.get("version_id")] = row
+    rows = []
+    for version in data.get("changes", []):
+        state = config_review.state_of(version)
+        last = latest.get(version.get("id")) or {}
+        reviewed = flags.get(version.get("id")) or {}
+        rows.append({"id": version.get("id"), "pulled_at": version.get("pulled_at"),
+                     "device": version.get("device_name") or version.get("device_id") or "",
+                     "which": version.get("which") or "",
+                     "change": f"+{version.get('added') or 0} −{version.get('removed') or 0}",
+                     "changed_by": version.get("changed_by") or "", "pulled_by": version.get("pulled_by") or "",
+                     "state": state or "to_review", "state_text": config_review.STATE_NAMES.get(state, "To review"),
+                     "reviewed_by": (version.get("reviewed_by") or "") if state else "",
+                     "reviewed_at": version.get("reviewed_at") if state else None,
+                     "reason": last.get("reason") or "", "blocks": reviewed.get("total"),
+                     "unexpected": reviewed.get("unexpected"), "seconds": reviewed.get("seconds"),
+                     "self_review": bool(reviewed.get("self_review")), "quick": bool(reviewed.get("quick")),
+                     "attention": config_review.needs_attention(version)})
+    if show == "attention":
+        rows = [row for row in rows if row["attention"]]
+    elif show == "raised":
+        rows = [row for row in rows if row["state"] == config_review.RAISED]
+    elif show == "flagged":
+        rows = [row for row in rows if row["self_review"] or row["quick"]]
+    return rows
+
+
+def reviews(snapshot, show="", now=None):
+    now = time.time() if now is None else now
+    show = show if show in REVIEW_SHOWS else ""
+    data = snapshot.tribe.reviews or {}
+    return {"available": bool(data), "show": show, "counts": review_counts(snapshot),
+            "changes": review_change_rows(snapshot, show), "log": review_log_rows(snapshot),
+            "allow_acknowledge": bool(data.get("allow_acknowledge")), "freshness": freshness(snapshot, now)}
 
 
 def map_subnet_hosts(tribe, rows):
@@ -680,6 +771,20 @@ def csv_table(name, snapshot, history=None, engine=None, query=None):
                   "Used %"]
         body = [[row["network_name"], row["subnet"], row["name"], row["total"], row["map"], row["sweep"],
                  row["flow"], row["size"], row["percent"]] for row in data["subnets"]]
+    elif name == "reviews":
+        header = ["Pulled", "Device", "Configuration", "Change", "Changed by", "Review", "By", "When", "Reason",
+                  "Blocks", "Unexpected", "Time (s)", "Self-reviewed", "Quick"]
+        body = [[_when(row["pulled_at"]), row["device"], row["which"], row["change"], row["changed_by"],
+                 row["state_text"], row["reviewed_by"], _when(row["reviewed_at"]), row["reason"], row["blocks"],
+                 row["unexpected"], row["seconds"], "yes" if row["self_review"] else "",
+                 "yes" if row["quick"] else ""] for row in review_change_rows(snapshot, query.get("show", ""))]
+    elif name == "review-log":
+        header = ["When", "Device", "Configuration", "Change pulled", "Change", "What", "Outcome", "Who", "Reason",
+                  "Blocks", "Unexpected", "Blocks seen", "Time (s)", "Self-reviewed", "Quick", "Block notes"]
+        body = [[_when(row["at"]), row["device"], row["which"], _when(row["pulled_at"]), row["change"],
+                 row["kind_text"], row["outcome_text"], row["user"], row["reason"], row["total"], row["unexpected"],
+                 row["seen"], row["seconds"], "yes" if row["self_review"] else "", "yes" if row["quick"] else "",
+                 row["notes"]] for row in review_log_rows(snapshot)]
     elif name == "uptime":
         header = ["Map", "Name", "Status", "Uptime 24 h %", "Uptime 7 d %", "Uptime 30 d %"]
         body = [[row["map"], row["name"], STATUS_TEXT[row["status"]], row["uptime_24h"], row["uptime_7d"],
@@ -703,4 +808,4 @@ def _safe_cell(value):
 
 
 __all__ = ["PAGES", "overview", "devices", "events", "syslog", "traffic", "vpns", "ipam", "hosts", "sites", "topology",
-           "trends", "series", "csv_table", "NETWORK_KINDS"]
+           "trends", "series", "csv_table", "reviews", "NETWORK_KINDS"]

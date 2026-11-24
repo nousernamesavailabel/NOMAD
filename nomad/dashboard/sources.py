@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 DASHBOARD_USER = "NOMAD Dashboard"
 WAIT_SECONDS = 25
 BACKUP_RESULTS = 200
+REVIEW_ROWS = 500  # The newest changes, and the newest review log rows, the Reviews page shows
 
 
 @dataclass
@@ -42,6 +43,9 @@ class TribeData:
     subnets: list = field(default_factory=list)  # [SubnetEntry]
     sightings: dict = field(default_factory=dict)  # Network id -> {address: when it last answered a sweep}
     backups: list = field(default_factory=list)  # Scheduled backups' outcomes, newest first
+    # Config change reviews: {"changes", "reviews", "to_review", "raised", "allow_acknowledge"} (no config text), or
+    # {} from a server too old to keep them
+    reviews: dict = field(default_factory=dict)
     online: bool = False
     error: str = ""
     synced_at: float = 0.0
@@ -95,11 +99,17 @@ class TribeView:
             except (OldServerError, Exception) as error:  # An older server: no config archive
                 log.debug("No config backup results: %s", error)
                 backups = []
+            try:
+                reviews = self.client.config_reviews(REVIEW_ROWS)
+            except (OldServerError, Exception) as error:  # An older server: no reviews kept
+                log.debug("No config reviews: %s", error)
+                reviews = {}
         except Exception as error:
             self.data = self.build(online=False, error=str(error), backups=self.data.backups,
-                                   synced_at=self.data.synced_at, server=self.data.server, api=self.data.api)
+                                   reviews=self.data.reviews, synced_at=self.data.synced_at, server=self.data.server,
+                                   api=self.data.api)
             raise
-        self.data = self.build(online=True, error="", backups=backups, synced_at=self.clock(),
+        self.data = self.build(online=True, error="", backups=backups, reviews=reviews, synced_at=self.clock(),
                                server=status.get("name", ""), api=int(status.get("api") or 0))
         return self.data
 

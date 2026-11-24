@@ -99,7 +99,34 @@ Both only work on devices that are no longer on a map. A device on a map would c
 
 ## Review changes
 
-The **Changes** tab lists the newest changes first. Changes that nobody has reviewed are bold, and the device gets an amber **CFG** tag on the Network Map. Double-click a change to compare it with the copy before it. That marks it reviewed for everyone.
+The **Changes** tab lists the newest changes first. Changes that still need a review are bold, and the device gets an amber **CFG** tag on the Network Map. The **Review** column shows where each change stands.
+
+Opening a change doesn't review it. To review a change:
+
+1. Double-click it on the **Changes** tab. It opens beside the copy before it, in section-aware Compare with noise left out. Both sides are read-only, and the compare mode can't be changed while you review.
+2. NOMAD goes to the first block of the change. A block is one run of lines removed, added or changed in one place. The bar above the two sides says which block you're on and where it is.
+3. Read the block, then press **Space** if it was meant to happen (Expected) or **U** if it shouldn't be there (Unexpected). NOMAD goes on to the next block. A block only counts if it's on the screen when you mark it. If you scrolled away, NOMAD shows it again first.
+4. If a block is marked **Sensitive**, it touches a line such as a user, AAA, an SNMP community, crypto, the VTY lines or the default route. It needs a note before you can mark it. Press **N** to add a note to any block.
+5. When every block has a verdict, click **Finish Review...** and give a reason. If every block was expected, give the ticket number or say why the change was made, and the change is **Approved**. If any block was unexpected, say what's wrong, and the change is **Raised**.
+
+A raised change stays bold, and stays flagged on the map, until someone closes it. Open it and click **Close as Explained...** if the change is all right after all, or **Close as Reverted...** once it has been put back. **Commands to Undo It...** writes the commands that take the device back to the copy before the change. When a later backup shows the unexpected lines gone, NOMAD closes the change as Reverted by itself.
+
+Changes to the same device are reviewed oldest first. If you open a newer one, NOMAD offers to open the older one instead.
+
+When NOMAD sent the lines itself, from the ACLs, VPNs, Port Mirroring, Carry VLAN, NetFlow Config or Editor pages, the bar says who sent them and from which page. That block looks expected, but you still mark it yourself.
+
+A review is labeled **self-reviewed** when your device login made the change, or one of your own pushes typed it. It's labeled **quick** when it took less than a second per block on a change with three or more blocks. Neither stops the review. Both show in the review log and on the NOMAD Dashboard.
+
+Changes that an older version of NOMAD opened before reviews were kept show as **Seen**. They can still be reviewed properly.
+
+**Reviews** > **Export Review Log...** saves every review, close and acknowledgement as a workbook or CSV, with who did it, when, the reason, how long it took and each block's note.
+
+**Reviews** > **Review Settings...** has two settings. With a tribe, they apply on every computer.
+
+- **Allow Acknowledge Without Review** is off unless you turn it on. When it's on, **Acknowledge Without Review...** on the **Changes** tab clears every change still to review, for example after a planned maintenance window. It needs a reason, and the changes are kept as **Acknowledged**, never as reviewed.
+- **Sensitive lines** is the list of regular expressions that make a block sensitive. **Defaults** puts back NOMAD's own list.
+
+With a tribe, reviews need the tribe server to run this version of NOMAD. On an older server, NOMAD offers to mark the change reviewed the old way, which shows as **Seen**.
 
 **Changed by** comes from the device. NOMAD reads `! Last configuration change at ... by user` from the running-config. On IOS without a user there, it reads `show archive log config all` when archive logging is on. pfSense gives the user of its last save.
 

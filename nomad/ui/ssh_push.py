@@ -230,7 +230,7 @@ class LoginRow(QWidget):
 
         def make(should_stop):
             return configpush.Pusher(login, vault, KnownHosts(), trust, secret, should_stop,
-                                     shell_factory=shell_factory)
+                                     shell_factory=shell_factory, source=self.purpose)
         return make
 
     def save_settings(self, settings, prefix):

@@ -6,15 +6,15 @@ import threading
 from collections import Counter
 
 from PyQt5.QtCore import QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, \
-    QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QPushButton, QRadioButton, QSpinBox, \
-    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+    QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMenu, QPushButton, QRadioButton, \
+    QSpinBox, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 
-from ..configs import archive, pull, runner
+from ..configs import archive, pull, review, runner
 from ..configs.text import FIXABLE, IOS, PLATFORM_NAMES
 from ..ipam.client import OldServerError, ServerUnreachable, TeamKeyError
-from .common import read_only_table, set_hint
+from .common import add_action, read_only_table, set_hint
 from .theme import COLORS
 
 log = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ class ArchivePanel(QWidget):
         self.tree.customContextMenuRequested.connect(self.on_menu)
         self.history_source = None  # device id -> [versions]
 
-    def fill(self, devices, unreviewed, failing, now):
+    def fill(self, devices, unreviewed, failing, now, raised=None):
         open_ids = {self.tree.topLevelItem(index).data(0, Qt.UserRole)
                     for index in range(self.tree.topLevelItemCount()) if self.tree.topLevelItem(index).isExpanded()}
         selected = {item.data(0, Qt.UserRole) for item in self.tree.selectedItems()}
@@ -155,11 +155,11 @@ class ArchivePanel(QWidget):
         counts = Counter((device["name"] or device["id"]).lower() for device in devices)
         for device in devices:
             item = QTreeWidgetItem([device_label(device, counts), when_text(device.get("last_ok")),
-                                    next_text(device, now), device_status(device, unreviewed, failing, now)])
+                                    next_text(device, now), device_status(device, unreviewed, failing, now, raised)])
             item.setData(0, Qt.UserRole, device["id"])
             item.setData(0, Qt.UserRole + 1, "device")
             item.setToolTip(0, f"{device['id']}  ·  {PLATFORM_NAMES.get(device.get('platform') or '', 'Unknown')}")
-            if unreviewed.get(device["id"]):
+            if unreviewed.get(device["id"]) or (raised or {}).get(device["id"]):
                 font = item.font(0)
                 font.setBold(True)
                 item.setFont(0, font)
@@ -190,7 +190,7 @@ class ArchivePanel(QWidget):
             child.setData(0, Qt.UserRole, version["id"])
             child.setData(0, Qt.UserRole + 1, "version")
             child.setToolTip(0, version_tip(version))
-            if not version.get("reviewed_by"):
+            if review.needs_attention(version):
                 font = child.font(0)
                 font.setBold(True)
                 child.setFont(0, font)
@@ -245,7 +245,7 @@ class ArchivePanel(QWidget):
         return False
 
 
-def device_status(device, unreviewed, failing, now):
+def device_status(device, unreviewed, failing, now, raised=None):
     parts = []
     if device.get("excluded"):
         parts.append("Excluded")
@@ -255,6 +255,8 @@ def device_status(device, unreviewed, failing, now):
     if unreviewed.get(device["id"]):
         count = unreviewed[device["id"]]
         parts.append(f"{count} change{'s' if count != 1 else ''} to review")
+    if (raised or {}).get(device["id"]):
+        parts.append(f"{raised[device['id']]} raised")
     if failing.get(device["id"]):
         parts.append(f"fails {failing[device['id']]} standard line{'s' if failing[device['id']] != 1 else ''}")
     if device.get("failures"):
@@ -294,9 +296,7 @@ def who_text(by):
 def version_status(version):
     if version.get("first"):
         return archive.SOURCE_NAMES.get(version.get("source"), "")
-    if version.get("reviewed_by"):
-        return "Reviewed"
-    return "To review"
+    return review.state_text(version)
 
 
 def version_tip(version):
@@ -306,26 +306,40 @@ def version_tip(version):
     if version.get("changed_by"):
         lines.append(f"Changed on the device by {version['changed_by']}")
     if version.get("reviewed_by") and not version.get("first"):
-        lines.append(f"Reviewed by {version['reviewed_by']} {when_text(version.get('reviewed_at'))}")
+        lines.append(f"{review.state_text(version)} by {version['reviewed_by']} "
+                     f"{when_text(version.get('reviewed_at'))}")
     return "\n".join(lines)
 
 
 class ChangesPanel(QWidget):
-    """Recent changes (newest first; bold ones nobody has reviewed), and the devices overdue for a backup."""
+    """Recent changes (newest first; bold ones to review or raised), and the devices overdue for a backup.
+    Double-clicking one reviews it (or shows its review)."""
     open_change = pyqtSignal(int)
+    settings_requested = pyqtSignal()
+    export_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         row = QHBoxLayout()
-        self.only_unreviewed = QCheckBox("Only changes to review")
-        self.review_all_button = QPushButton("Mark All Reviewed")
+        self.only_unreviewed = QCheckBox("Only changes to review or raised")
+        self.acknowledge_button = QPushButton("Acknowledge Without Review...")
+        self.acknowledge_button.setToolTip("Clear the changes to review without reviewing them, with a reason: kept as "
+                                           "Acknowledged, never as reviewed (Review Settings turns it on)")
+        self.acknowledge_button.setVisible(False)
+        self.reviews_button = QPushButton("Reviews")
+        self.reviews_menu = QMenu(self.reviews_button)
+        add_action(self.reviews_menu, "Review Settings...", self.ask_settings)
+        add_action(self.reviews_menu, "Export Review Log...", self.ask_export)
+        self.reviews_button.setMenu(self.reviews_menu)
         row.addWidget(self.only_unreviewed, 1)
-        row.addWidget(self.review_all_button)
+        row.addWidget(self.acknowledge_button)
+        row.addWidget(self.reviews_button)
         layout.addLayout(row)
-        self.table = read_only_table(["When", "Device", "Change", "Changed by", "Pulled by", "Reviewed"])
-        self.table.setToolTip("Double-click a change to compare it with the copy before (and mark it reviewed)")
+        self.table = read_only_table(["When", "Device", "Change", "Changed by", "Pulled by", "Review", "By"])
+        self.table.setToolTip("Double-click a change to review it: every block gets a verdict while it's on the screen "
+                              "(a change already reviewed shows its review)")
         layout.addWidget(self.table, 3)
         self.overdue_label = QLabel()
         layout.addWidget(self.overdue_label)
@@ -340,20 +354,25 @@ class ChangesPanel(QWidget):
         self.refill()
 
     def refill(self, *_):
-        rows = [item for item in self.recent if not (self.only_unreviewed.isChecked() and item.get("reviewed_by"))]
+        rows = [item for item in self.recent if not self.only_unreviewed.isChecked() or review.needs_attention(item)]
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         bold = QFont(self.table.font())
         bold.setBold(True)
         for row, version in enumerate(rows):
+            state = review.state_of(version)
             values = [when_text(version["pulled_at"]), version.get("device_name") or version["device_id"],
                       change_text(version), version.get("changed_by") or "", version.get("pulled_by") or "",
-                      version.get("reviewed_by") or ""]
+                      review.state_text(version), (version.get("reviewed_by") or "") if state else ""]
             for column, value in enumerate(values):
                 item = self.table.item(row, column) or read_only_item()
                 item.setText(value)
                 item.setData(Qt.UserRole, version["id"])
-                item.setFont(bold if not version.get("reviewed_by") else self.table.font())
+                item.setFont(bold if review.needs_attention(version) else self.table.font())
+                item.setForeground(QColor(COLORS["error"]) if column == 5 and state == review.RAISED else
+                                   QColor(COLORS["muted"]) if column == 5 and state in (review.SEEN,
+                                                                                         review.ACKNOWLEDGED) else
+                                   QColor(COLORS["text"]))
                 self.table.setItem(row, column, item)
         self.table.resizeColumnsToContents()
         self.overdue_label.setText(f"Overdue for a backup ({len(self.overdue_rows)}):" if self.overdue_rows else
@@ -375,7 +394,17 @@ class ChangesPanel(QWidget):
             self.open_change.emit(int(item.data(Qt.UserRole)))
 
     def unreviewed_ids(self):
-        return [item["id"] for item in self.recent if not item.get("reviewed_by")]
+        """The changes listed that nobody has reviewed (or that were only opened by an older NOMAD)."""
+        return [item["id"] for item in self.recent if review.state_of(item) in (None, review.SEEN)]
+
+    def ask_settings(self):
+        self.settings_requested.emit()
+
+    def ask_export(self):
+        self.export_requested.emit()
+
+    def set_acknowledge_allowed(self, allowed):
+        self.acknowledge_button.setVisible(bool(allowed))
 
 
 def read_only_item():

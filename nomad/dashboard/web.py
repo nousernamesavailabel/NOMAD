@@ -120,6 +120,8 @@ class DashboardServer:
             return views.topology(snapshot, int(query["id"]), query.get("view", "l2"))
         if name == "trends":
             return views.trends(snapshot)
+        if name == "reviews":
+            return views.reviews(snapshot, query.get("show", ""))
         raise KeyError(name)
 
 

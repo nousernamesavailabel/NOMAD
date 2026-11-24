@@ -105,6 +105,7 @@ class CompareView(QWidget):
     fix_requested = pyqtSignal(str, str, str, object)
     modified_changed = pyqtSignal()
     compared = pyqtSignal()
+    position_changed = pyqtSignal(int)  # The change Prev/Next went to
 
     def __init__(self, parent, left, right, left_title, right_title, mode=diff.SECTION, left_path="", right_path="",
                  read_only=(False, False)):
@@ -113,6 +114,8 @@ class CompareView(QWidget):
         self.current = -1  # Which change Prev/Next is at
         self.arrows = ({}, {})  # {line: hunk} on each side
         self.syncing = False
+        self.review = None  # A config_review.ReviewController while a change is reviewed here
+        self.locked = False  # Reviewing: read-only, so no copy arrows
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -136,7 +139,7 @@ class CompareView(QWidget):
         self.inline_button.setText("Inline")
         self.inline_button.setCheckable(True)
         self.inline_button.setToolTip("Show both sides in one pane, - and + lines, like git diff")
-        swap_button = QPushButton("Swap Sides")
+        swap_button = self.swap_button = QPushButton("Swap Sides")
         self.fix_button = QPushButton("Fix Commands")
         self.fix_button.setToolTip("The Cisco commands that make one side's configuration like the other's")
         fix_menu = QMenu(self.fix_button)
@@ -152,6 +155,9 @@ class CompareView(QWidget):
         bar.addWidget(swap_button)
         bar.addWidget(self.fix_button)
         layout.addLayout(bar)
+        self.review_slot = QVBoxLayout()  # Where a review's bar goes
+        self.review_slot.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self.review_slot)
 
         self.stack = QStackedWidget()
         side_by_side = QWidget()
@@ -236,7 +242,7 @@ class CompareView(QWidget):
             self.right.editor.markerAdd(line, MARK_HIDDEN)
         left_arrows, right_arrows = {}, {}
         last_left, last_right = len(result.a_lines) - 1, len(result.b_lines) - 1
-        for hunk in result.changes:
+        for hunk in result.changes if not self.locked else []:
             left_line, right_line = min(hunk.a_start, last_left), min(hunk.b_start, last_right)
             if left_line not in left_arrows:
                 left_arrows[left_line] = hunk
@@ -340,6 +346,7 @@ class CompareView(QWidget):
         else:
             self.show_lines(hunk.a_start, hunk.b_start)
         self.show_position()
+        self.position_changed.emit(self.current)
 
     def show_lines(self, left_line, right_line):
         """Put the cursor on left_line on the left and right_line on the right, then scroll both sides to the same
@@ -444,6 +451,25 @@ class CompareView(QWidget):
         context = dict(self.right.context)
         self.fix_requested.emit(self.right.editor.text(), self.left.editor.text(),
                                 f"{self.right.title} → like {self.left.title}", context)
+
+    # ----------------------------------------------------------------- Reviewing
+
+    def add_review_bar(self, bar):
+        self.review_slot.addWidget(bar)
+
+    def lock_for_review(self):
+        """Section-aware with noise left out, read-only, side by side: the comparison a review is checked against."""
+        self.set_mode(diff.SECTION)
+        if self.mode != diff.SECTION:
+            self.run_compare()
+        self.inline_button.setChecked(False)
+        for widget in (self.mode_combo, self.inline_button, self.swap_button):
+            widget.setEnabled(False)
+        self.mode_combo.setToolTip("Locked while reviewing: section-aware, with noise left out")
+        for pane in self.panes():
+            pane.editor.setReadOnly(True)
+        self.locked = True
+        self.paint()
 
     # ----------------------------------------------------------------- For the page
 

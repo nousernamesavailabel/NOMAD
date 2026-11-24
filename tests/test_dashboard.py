@@ -81,6 +81,9 @@ def test_a_viewer_key_reads_but_never_changes_or_gets_secrets(server, tmp_path):
     copy.sync()  # Doesn't ask for the credentials
     assert copy.load(map_id)[0].devices["r1"].label == "R1"
     assert copy.secrets(map_id) == {}
+    assert client.config_reviews(10)["to_review"] == 0  # Reviews, yes (no config text in them)
+    with pytest.raises(IpamError, match="viewer key"):  # NOMAD's pushes carry the lines typed: no
+        client.config_pushes(1)
 
 
 def test_the_watchers_monitoring_goes_through_the_tribe_to_every_nomad(server, tmp_path):
@@ -266,6 +269,7 @@ def snapshot_of(network_map, statuses=None, **extra):
                                SubnetEntry("net1", "10.1.0.0/24", "Servers", 254, 250)],
                       sightings={"net1": {"10.0.0.60": 5000.0, "10.1.0.9": 10.0}}, online=True, synced_at=1.0,
                       server="tribe")
+    tribe.reviews = extra.pop("tribe_reviews", {})
     return Snapshot(revision=3, tribe=tribe, statuses=statuses or {}, **extra)
 
 
@@ -594,3 +598,47 @@ def test_the_dashboard_shows_the_watchers_since_and_uptime_as_they_are(tmp_path)
     assert box["status"] == "up" and box["stale_text"].startswith("Not checked since ")
     assert views.status_text("up", engine.snapshot.statuses[(1, "r1")], clock[0]).endswith("(it was up then)")
     engine.stop()
+
+
+def review_snapshot():
+    blocks = [{"index": 0, "kind": "added", "path": "", "fingerprint": "f0", "sensitive": True, "verdict": "unexpected",
+               "note": "who is eve", "seconds": 4, "push": ""},
+              {"index": 1, "kind": "changed", "path": "interface Gi0/1", "fingerprint": "f1", "sensitive": False,
+               "verdict": "expected", "note": "", "seconds": 2, "push": ""}]
+    reviews = {"to_review": 1, "raised": 1, "allow_acknowledge": False,
+               "changes": [{"id": 3, "device_id": "10.0.0.1", "device_name": "R1", "which": "running",
+                            "pulled_at": 300.0, "added": 1, "removed": 0, "first": 0, "changed_by": "",
+                            "pulled_by": "alice (PC1)", "reviewed_by": None, "reviewed_at": None,
+                            "review_state": None},
+                           {"id": 2, "device_id": "10.0.0.1", "device_name": "R1", "which": "running",
+                            "pulled_at": 200.0, "added": 2, "removed": 1, "first": 0, "changed_by": "eve",
+                            "pulled_by": "alice (PC1)", "reviewed_by": "bob (PC2)", "reviewed_at": 250.0,
+                            "review_state": "raised"}],
+               "reviews": [{"id": 1, "version_id": 2, "device_id": "10.0.0.1", "device_name": "R1", "kind": "review",
+                            "outcome": "raised", "user": "bob (PC2)", "at": 250.0, "seconds": 2.0,
+                            "reason": "=Who is eve?", "blocks": blocks, "total": 2, "seen": 2, "unexpected": 1,
+                            "self_review": False, "quick": True, "pulled_at": 200.0, "added": 2, "removed": 1,
+                            "which": "running"}]}
+    return snapshot_of(small_map(), tribe_reviews=reviews)
+
+
+def test_reviews_page_shows_states_flags_and_notes_never_lines():
+    snapshot = review_snapshot()
+    page = views.reviews(snapshot)
+    assert page["available"] and page["counts"] == {"available": True, "to_review": 1, "raised": 1}
+    newest, raised = page["changes"]
+    assert (newest["state"], newest["state_text"], newest["reviewed_by"]) == ("to_review", "To review", "")
+    assert (raised["state_text"], raised["reason"], raised["blocks"], raised["quick"]) == ("Raised", "=Who is eve?", 2,
+                                                                                          True)
+    [logged] = page["log"]
+    assert logged["notes"] == "1 (top level, unexpected): who is eve"
+    assert [row["id"] for row in views.reviews(snapshot, "raised")["changes"]] == [2]
+    assert [row["id"] for row in views.reviews(snapshot, "attention")["changes"]] == [3, 2]
+    assert [row["id"] for row in views.reviews(snapshot, "flagged")["changes"]] == [2]
+    assert views.overview(snapshot)["reviews"] == page["counts"]
+    _, text = views.csv_table("reviews", snapshot)
+    assert "'=Who is eve?" in text and "Raised" in text
+    _, text = views.csv_table("review-log", snapshot)
+    assert "who is eve" in text
+    old = views.reviews(snapshot_of(small_map()))  # A tribe server too old to keep reviews
+    assert not old["available"] and old["changes"] == []

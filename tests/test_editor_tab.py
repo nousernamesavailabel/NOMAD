@@ -5,13 +5,14 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PyQt5.QtCore import QThreadPool  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QMessageBox, QWidget  # noqa: E402
+from PyQt5.QtCore import QThreadPool, Qt  # noqa: E402
+from PyQt5.QtTest import QTest  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox, QWidget  # noqa: E402
 
 from nomad.configs import archive, diff  # noqa: E402
 from nomad.netmap import configpush, model  # noqa: E402
 from nomad.terminal.sessions import SessionStore  # noqa: E402
-from nomad.ui import editor_tab  # noqa: E402
+from nomad.ui import config_review, editor_tab  # noqa: E402
 from nomad.ui.compare_view import CompareView  # noqa: E402
 from nomad.ui.config_events import config_events  # noqa: E402
 from nomad.ui.editor_tab import Document, EditorTab, config_lines  # noqa: E402
@@ -162,7 +163,7 @@ def test_fix_commands_from_compare(page, app):
     assert config_lines(doc.editor.text()) == ["interface Gi0/1", " description B", "exit"]
 
 
-def test_archive_changes_review_and_map_flags(page, app):
+def test_archive_changes_review_and_map_flags(page, app, monkeypatch):
     configs = page.configs
     configs.upload("10.0.0.1", "running", CONFIG, "alice", name="R1", address="10.0.0.1")
     change = configs.upload("10.0.0.1", "running", CONFIG + "logging host 1.1.1.1\n", "alice", changed_by="bob")
@@ -170,13 +171,59 @@ def test_archive_changes_review_and_map_flags(page, app):
     assert page.archive_panel.tree.topLevelItemCount() == 1
     assert page.changes_panel.table.rowCount() == 1
     assert page.window.netmap_tab.notes == {"10.0.0.1": "Config: 1 config change to review (Editor page)"}
+    page.window.resize(1200, 800)
+    page.resize(1200, 800)
+    page.window.show()
     page.open_change(change["version_id"])
     settle(app)
     view = page.current_document()
     assert isinstance(view, CompareView) and view.result.counts() == (1, 0)
     assert view.left.editor.isReadOnly() and view.right.editor.isReadOnly()
+    controller = view.review
+    assert controller.reviewing and view.mode == diff.SECTION and not view.mode_combo.isEnabled()
+    page.refresh_views()  # Opening it isn't reviewing it
+    assert page.window.netmap_tab.notes == {"10.0.0.1": "Config: 1 config change to review (Editor page)"}
+    assert page.changes_panel.table.item(0, 5).text() == "To review"
+    settle(app)
+    QTest.keyClick(view.right.editor, Qt.Key_Space)
+    assert controller.state.done() and controller.state.verdicts == {0: "expected"}
+
+    class Finish:
+        def __init__(self, *args):
+            pass
+
+        def exec_(self):
+            return QDialog.Accepted
+
+        def reason(self):
+            return "CHG-1"
+
+    monkeypatch.setattr(config_review, "FinishDialog", Finish)
+    controller.finish()
+    settle(app)
+    assert not controller.reviewing and "Approved" in controller.bar.title.text()
     page.refresh_views()
     assert page.window.netmap_tab.notes == {}
+    assert page.changes_panel.table.item(0, 5).text() == "Approved"
+    [row] = page.configs.store.reviews_of(change["version_id"])
+    assert (row["outcome"], row["reason"], row["total"]) == ("approved", "CHG-1", 1)
+    page.window.hide()
+
+
+def test_acknowledge_is_hidden_until_allowed(page, app):
+    page.refresh_views()
+    assert page.changes_panel.acknowledge_button.isHidden()
+    page.configs.set_settings({"allow_acknowledge": True})
+    page.refresh_views()
+    assert not page.changes_panel.acknowledge_button.isHidden()
+
+
+def test_nomads_pushes_are_kept_in_the_archive(page, app):
+    page.configs.upload("10.0.0.1", "running", CONFIG, "alice", name="R1", address="10.0.0.1")
+    configpush.notify_pushed("10.0.0.1", [], ["configure terminal", "logging host 1.1.1.1", "end"], "Carry VLAN")
+    change = page.configs.upload("10.0.0.1", "running", CONFIG + "logging host 1.1.1.1\n", "alice")
+    [push] = page.configs.pushes_for_version(change["version_id"])
+    assert (push["source"], push["lines"]) == ("Carry VLAN", ["logging host 1.1.1.1"])
 
 
 def test_put_back_writes_commands_to_an_old_version(page, app):

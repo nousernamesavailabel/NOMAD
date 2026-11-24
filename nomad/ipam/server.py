@@ -64,7 +64,17 @@ configuration, scheduled backups handed out device by device, and standards chec
     POST /api/configs/report          {"device_id", "reason"}: this computer couldn't (another gets it)
     POST /api/configs/upload          {"device_id", "which", "text", "source", "changed_by", "name", "address",
                                       "platform"}: a configuration pulled (kept when it changed)
-    POST /api/configs/review          {"version_id"}: a change seen
+    POST /api/configs/review          {"version_id"}: a change opened by an older NOMAD (noted as Seen; it's still to
+                                      review)
+    POST /api/configs/review_finish   {"version_id", "verdicts", "reason", "seconds", "started", "self_review"}: a
+                                      review, checked against the change's blocks: Approved or Raised (API 21)
+    POST /api/configs/review_close    {"version_id", "outcome", "note"}: a raised change Explained or Reverted (API 21)
+    POST /api/configs/acknowledge     {"version_ids", "reason"}: changes cleared without a review, when the archive's
+                                      settings allow it (API 21)
+    POST /api/configs/push            {"source", "target", "names", "lines"}: lines NOMAD typed into a device (API 21)
+    GET  /api/configs/pushes?version_id=N  NOMAD's pushes to a change's device before it (API 21)
+    GET  /api/configs/reviews?limit=N the newest changes with their review states, and the review log (API 21; a
+                                      viewer key may ask: no config text in either)
     POST /api/configs/exclude         {"device_id", "excluded"}: left out of scheduled backups
     POST /api/configs/merge           {"sources", "target"}: devices no longer on a map folded into another (API 20)
     POST /api/configs/forget          {"device_ids"}: devices no longer on a map dropped with their copies (API 20)
@@ -117,7 +127,7 @@ TEAM, ADMIN, VIEWER = "team", "admin", "viewer"
 # (/api/configs/version), and nothing that changes anything
 VIEWER_GETS = frozenset({"/api/status", "/api/wait", "/api/changes", "/api/log", "/api/sightings",
                          "/api/maps/changes", "/api/maps/monitoring", "/api/maps/traffic", "/api/configs/changes", "/api/configs/results",
-                         "/api/configs/runners"})
+                         "/api/configs/runners", "/api/configs/reviews"})
 ADMIN_ONLY_ACTIONS = {"add_network", "delete_network"}
 WHOLE_NETWORK_ACTIONS = {"take_network"}  # Their reply carries every row made, however many
 EDIT_REPLY, WHOLE_REPLY = 5000, 10 ** 9
@@ -127,13 +137,15 @@ VIEWER_RECHECK_SECONDS = 5
 STOP_WAIT_SECONDS = 10  # How long stop() waits for the listener to close
 HANDSHAKE_SECONDS = 15  # A connection that hasn't finished its TLS handshake by then is dropped
 IDLE_SECONDS = MAX_WAIT_SECONDS + 30  # A connection that sends nothing for this long is closed (past /api/wait's)
-API_LEVEL = 20  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
+API_LEVEL = 21  # 2 added /api/wait (instant sync), 3 /api/log (history), 4 loopback subnets, 5 sightings (last seen),
 # 6 tribe maps, 7 VLANs, 8 subnet placement, 9 subnet roles, 10 moving subnets between networks, 11 assets,
 # 12 software targets, 13 wireless controller assets, 14 map icons locked in place, 15 taking a laptop's whole network,
 # 16 the config archive, 17 viewer keys (the NOMAD Dashboard) and ports graphed on the dashboard (a map section),
 # 18 the Map Watcher's monitoring of each map (/api/maps/monitoring), for every NOMAD to show, 19 the Map Watcher's
 # readings of the ports' traffic (/api/maps/traffic, kept in traffic.db), for every NOMAD's Traffic Graphs, 20 merging
-# and forgetting config archive devices (/api/configs/merge and /forget; changes name the devices gone).
+# and forgetting config archive devices (/api/configs/merge and /forget; changes name the devices gone), 21 reviews
+# that prove someone went through a change (review_finish, review_close, acknowledge, the review log), and NOMAD's
+# pushes kept to explain changes (/api/configs/push, /pushes).
 # Clients cope with servers below this, and recommend updating them (add each new level to client.SERVER_FEATURES)
 
 
@@ -310,6 +322,11 @@ class RequestError(Exception):
 
 def _clean(text, limit=64):
     return "".join(character for character in str(text or "") if character.isprintable())[:limit].strip()
+
+
+def _note(text, limit=2000):
+    """A reason or note someone typed: its lines kept as spaces."""
+    return _clean(" ".join(str(text or "").splitlines()), limit)
 
 
 class IpamServer:
@@ -624,6 +641,20 @@ class IpamServer:
             raise RequestError(404, "That version isn't in the config archive.")
         return {"version": version}
 
+    def config_reviews(self, limit):
+        """The newest changes with their review states, the review log, and the review settings (no config text)."""
+        limit = max(1, min(int(limit), 2000))
+        with self.configs.lock:
+            settings = self.configs.settings()
+            return {"changes": self.configs.recent(limit), "reviews": self.configs.review_log(limit),
+                    "to_review": sum(self.configs.unreviewed().values()),
+                    "raised": sum(self.configs.raised().values()),
+                    "allow_acknowledge": bool(settings.get("allow_acknowledge"))}
+
+    def config_pushes(self, version_id):
+        with self.configs.lock:
+            return {"pushes": self.configs.pushes_for_version(version_id)}
+
     def config_request(self, action, user, request):
         """A change to the config archive (or a claim on backups). Returns the reply; announces the new revision."""
         computer = user.rpartition("(")[2].rstrip(")") if "(" in user else user
@@ -653,6 +684,24 @@ class IpamServer:
                 reply = outcome
             elif action == "review":
                 revision = self.configs.review(request["version_id"], user)
+            elif action == "review_finish":
+                reply = self.configs.finish_review(
+                    int(request["version_id"]), user, request.get("verdicts") or [],
+                    _note(request.get("reason")), float(request.get("seconds") or 0),
+                    float(request["started"]) if request.get("started") else None, bool(request.get("self_review")))
+                revision = reply["revision"]
+            elif action == "review_close":
+                revision = self.configs.close_raised(int(request["version_id"]), user, _clean(request.get("outcome")),
+                                                     _note(request.get("note")))
+            elif action == "acknowledge":
+                reply = {"count": self.configs.acknowledge([int(item) for item in request.get("version_ids") or []],
+                                                           user, _note(request.get("reason")))}
+                revision = self.configs.revision()
+            elif action == "push":
+                self.configs.record_push(user, _clean(request.get("source"), 100), _clean(request.get("target"), 200),
+                                         [_clean(item, 200) for item in request.get("names") or []],
+                                         [str(line)[:500] for line in request.get("lines") or []][:5000])
+                return {}  # Nothing a copy keeps: asked for when a change is reviewed
             elif action == "exclude":
                 revision = self.configs.set_excluded(request["device_id"], bool(request.get("excluded")))
             elif action == "merge":
@@ -1087,6 +1136,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 return self._reply(200, app.config_runners())
             if method == "GET" and url.path == "/api/configs/version":
                 return self._reply(200, app.config_version(int(parse_qs(url.query)["id"][0])))
+            if method == "GET" and url.path == "/api/configs/reviews":
+                return self._reply(200, app.config_reviews(int(parse_qs(url.query).get("limit", ["200"])[0])))
+            if method == "GET" and url.path == "/api/configs/pushes":
+                return self._reply(200, app.config_pushes(int(parse_qs(url.query)["version_id"][0])))
             if method == "POST" and url.path.startswith("/api/configs/"):
                 return self._reply(200, app.config_request(url.path[len("/api/configs/"):], self._user(),
                                                            self._body()))
