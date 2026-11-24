@@ -317,6 +317,7 @@ class ChangesPanel(QWidget):
     open_change = pyqtSignal(int)
     settings_requested = pyqtSignal()
     export_requested = pyqtSignal()
+    log_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -330,6 +331,7 @@ class ChangesPanel(QWidget):
         self.acknowledge_button.setVisible(False)
         self.reviews_button = QPushButton("Reviews")
         self.reviews_menu = QMenu(self.reviews_button)
+        add_action(self.reviews_menu, "Review Log...", self.ask_log)
         add_action(self.reviews_menu, "Review Settings...", self.ask_settings)
         add_action(self.reviews_menu, "Export Review Log...", self.ask_export)
         self.reviews_button.setMenu(self.reviews_menu)
@@ -337,7 +339,8 @@ class ChangesPanel(QWidget):
         row.addWidget(self.acknowledge_button)
         row.addWidget(self.reviews_button)
         layout.addLayout(row)
-        self.table = read_only_table(["When", "Device", "Change", "Changed by", "Pulled by", "Review", "By"])
+        self.table = read_only_table(["When", "Device", "Change", "Changed by", "Pulled by", "Review", "By",
+                                      "Reason"])
         self.table.setToolTip("Double-click a change to review it: every block gets a verdict while it's on the screen "
                               "(a change already reviewed shows its review)")
         layout.addWidget(self.table, 3)
@@ -348,9 +351,11 @@ class ChangesPanel(QWidget):
         self.table.cellDoubleClicked.connect(self.on_double_click)
         self.only_unreviewed.toggled.connect(self.refill)
         self.recent, self.overdue_rows = [], []
+        self.records = {}  # Version id -> its review log rows
 
-    def fill(self, recent, overdue):
+    def fill(self, recent, overdue, records=None):
         self.recent, self.overdue_rows = recent, overdue
+        self.records = records or {}
         self.refill()
 
     def refill(self, *_):
@@ -361,12 +366,16 @@ class ChangesPanel(QWidget):
         bold.setBold(True)
         for row, version in enumerate(rows):
             state = review.state_of(version)
+            records = self.records.get(version["id"], [])
             values = [when_text(version["pulled_at"]), version.get("device_name") or version["device_id"],
                       change_text(version), version.get("changed_by") or "", version.get("pulled_by") or "",
-                      review.state_text(version), (version.get("reviewed_by") or "") if state else ""]
+                      review.state_text(version), (version.get("reviewed_by") or "") if state else "",
+                      review.reason_text(records)]
+            said = "\n".join(review.record_lines(records))
             for column, value in enumerate(values):
                 item = self.table.item(row, column) or read_only_item()
                 item.setText(value)
+                item.setToolTip(said if column >= 5 and said else "")
                 item.setData(Qt.UserRole, version["id"])
                 item.setFont(bold if review.needs_attention(version) else self.table.font())
                 item.setForeground(QColor(COLORS["error"]) if column == 5 and state == review.RAISED else
@@ -396,6 +405,9 @@ class ChangesPanel(QWidget):
     def unreviewed_ids(self):
         """The changes listed that nobody has reviewed (or that were only opened by an older NOMAD)."""
         return [item["id"] for item in self.recent if review.state_of(item) in (None, review.SEEN)]
+
+    def ask_log(self):
+        self.log_requested.emit()
 
     def ask_settings(self):
         self.settings_requested.emit()
@@ -599,17 +611,67 @@ class BackupsPanel(QWidget):
 
 # ----------------------------------------------------------------- Dialogs
 
-class SendDialog(QDialog):
-    """Send configuration lines to a device over SSH (with the revert timer on IOS)."""
+class DeviceChoice(QComboBox):
+    """The Editor's device dropdown (Pull Config, Send to Device): the open map's routers, switches, firewalls and
+    WLCs, the archive's devices and the saved SSH sessions, each shown as "name (address)"; type to search, or type
+    an address or name that isn't listed."""
 
-    def __init__(self, parent, address="", platform=IOS, line_count=0):
+    def __init__(self, choices=(), address="", parent=None):
+        """choices: [target] ({"id", "name", "address", "names", "platform"})."""
         super().__init__(parent)
-        self.setWindowTitle("Send to Device")
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.setMaxVisibleItems(20)
+        for target in choices:
+            self.addItem(target_label(target), target)
+        self.completer().setFilterMode(Qt.MatchContains)
+        self.completer().setCaseSensitivity(Qt.CaseInsensitive)
+        self.lineEdit().setPlaceholderText("Pick a device, or type its address or name")
+        self.setCurrentIndex(-1)
+        self.setEditText(address)
+
+    def target(self, resolve):
+        """The device chosen (a copy of its target), or resolve(text) for an address or name typed; None if empty."""
+        text = self.currentText().strip()
+        if not text:
+            return None
+        index = self.findText(text, Qt.MatchFixedString)
+        if index >= 0 and self.itemData(index):
+            return dict(self.itemData(index))
+        return resolve(text)
+
+
+def target_label(target):
+    name = target.get("name") or target["address"]
+    return name if name == target["address"] else f"{name} ({target['address']})"
+
+
+class SendDialog(QDialog):
+    """Send configuration lines to a device over SSH (with the revert timer on IOS). device: what the tab is known to
+    be of ("R1 (10.0.0.1)"): shown, not asked for (Change... picks another from the device dropdown, choices); without
+    it the dropdown is shown straight away."""
+
+    def __init__(self, parent, address="", platform=IOS, line_count=0, device="", choices=()):
+        super().__init__(parent)
+        self.setWindowTitle(f"Send to {device}" if device else "Send to Device")
+        self.setMinimumWidth(460)
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        self.address = QLineEdit(address)
-        self.address.setPlaceholderText("Address or name")
-        form.addRow("Device:", self.address)
+        self.address = DeviceChoice(choices, "" if device else address)
+        self.device_label = QLabel(f"<b>{device}</b>")
+        self.change_button = QPushButton("Change...")
+        self.change_button.setToolTip("Send to another device instead")
+        device_row = QHBoxLayout()
+        device_row.addWidget(self.device_label, 1)
+        device_row.addWidget(self.address, 1)
+        device_row.addWidget(self.change_button)
+        form.addRow("Device:", device_row)
+        self.address.setVisible(not device)
+        self.device_label.setVisible(bool(device))
+        self.change_button.setVisible(bool(device))
+        self.changed = False
+        self.change_button.clicked.connect(self.change_device)
+        self.address.currentIndexChanged.connect(self.device_picked)
         self.platform = QComboBox()
         for value in sorted(FIXABLE):
             self.platform.addItem(PLATFORM_NAMES[value], value)
@@ -656,9 +718,32 @@ class SendDialog(QDialog):
         else:
             self.revert.setChecked(True)
 
+    def change_device(self):
+        self.changed = True
+        self.device_label.hide()
+        self.change_button.hide()
+        self.address.show()
+        self.address.setFocus()
+        self.address.showPopup()
+
+    def changed_device(self):
+        """Whether Change... was used, for another device in place of the one shown."""
+        return self.changed
+
+    def device_picked(self, index):
+        """A device picked from the list: its platform, when NOMAD knows it and writes for it."""
+        target = self.address.itemData(index) if index >= 0 else None
+        platform = (target or {}).get("platform")
+        if platform in FIXABLE:
+            self.platform.setCurrentIndex(max(self.platform.findData(platform), 0))
+
+    def chosen(self, resolve):
+        """The device picked or typed (Change..., or when none was known): its target, or None."""
+        return self.address.target(resolve)
+
     def check_accept(self):
-        if not self.address.text().strip():
-            set_hint(self.hint, "Give the device's address.", "error")
+        if (self.changed or self.device_label.isHidden()) and not self.address.currentText().strip():
+            set_hint(self.hint, "Pick a device, or type its address.", "error")
             return
         self.accept()
 
@@ -752,19 +837,7 @@ class PullDialog(QDialog):
         self.setMinimumWidth(420)
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        self.device = QComboBox()
-        self.device.setEditable(True)
-        self.device.setInsertPolicy(QComboBox.NoInsert)
-        self.device.setMaxVisibleItems(20)
-        for target in choices:
-            label = target["name"] if target["name"] == target["address"] else \
-                f"{target['name']} ({target['address']})"
-            self.device.addItem(label, target)
-        self.device.completer().setFilterMode(Qt.MatchContains)
-        self.device.completer().setCaseSensitivity(Qt.CaseInsensitive)
-        self.device.lineEdit().setPlaceholderText("Pick a device, or type its address or name")
-        self.device.setCurrentIndex(-1)
-        self.device.setEditText(address)
+        self.device = DeviceChoice(choices, address)
         form.addRow("Device:", self.device)
         self.platform = QComboBox()
         self.platform.addItem("Tell from its configuration", "")
@@ -783,14 +856,9 @@ class PullDialog(QDialog):
 
     def target(self, resolve):
         """The device chosen (a copy of its target), or resolve(text) for an address or name typed; None if empty."""
-        text = self.device.currentText().strip()
-        if not text:
+        target = self.device.target(resolve)
+        if target is None:
             return None
-        index = self.device.findText(text, Qt.MatchFixedString)
-        if index >= 0 and self.device.itemData(index):
-            target = dict(self.device.itemData(index))
-        else:
-            target = resolve(text)
         if self.platform.currentData():
             target["platform"] = self.platform.currentData()
         return target

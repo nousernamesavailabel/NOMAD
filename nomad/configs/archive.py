@@ -673,6 +673,18 @@ class ConfigStore:
         rows = self.db.execute("SELECT * FROM reviews WHERE version_id = ? ORDER BY id", (int(version_id),))
         return [self._review(row) for row in rows]
 
+    def reviews_by_version(self, version_ids):
+        """{version id: [its review log rows, oldest first]} for these changes."""
+        ids = [int(item) for item in version_ids]
+        found = {}
+        for start in range(0, len(ids), 500):
+            part = ids[start:start + 500]
+            rows = self.db.execute(f"SELECT * FROM reviews WHERE version_id IN ({', '.join('?' for _ in part)}) "
+                                   f"ORDER BY id", part)
+            for row in rows:
+                found.setdefault(row["version_id"], []).append(self._review(row))
+        return found
+
     @staticmethod
     def _review(row):
         item = {name: row[name] for name in REVIEW_FIELDS}

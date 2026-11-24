@@ -26,7 +26,8 @@ from .backup_logins_sync import UPDATE_LINK, BackupLoginSync
 from .code_editor import CISCO, LANGUAGE_NAMES, PLAIN, XML, CodeEditor, FindBar, language_for
 from .common import add_action, release_thread, run_in_background, set_hint
 from .compare_view import CompareView
-from .config_review import AcknowledgeDialog, ReviewController, ReviewSettingsDialog, own_login_names, write_log
+from .config_review import AcknowledgeDialog, ReviewController, ReviewLogDialog, ReviewSettingsDialog, \
+    own_login_names, write_log
 from .config_events import config_events
 from .editor_panels import ArchivePanel, BackupThread, BackupsPanel, ChangesPanel, CheckDialog, ConfigSyncThread, \
     PullDialog, SendDialog, StandardsPanel, when_text
@@ -224,6 +225,8 @@ class EditorTab(QWidget):
         self.changes_panel.acknowledge_button.clicked.connect(self.acknowledge_all)
         self.changes_panel.settings_requested.connect(self.review_settings)
         self.changes_panel.export_requested.connect(self.export_review_log)
+        self.changes_panel.log_requested.connect(self.show_review_log)
+        self.review_log_dialog = None
         self.standards_panel.new_button.clicked.connect(self.new_standard)
         self.standards_panel.edit_button.clicked.connect(self.edit_standard)
         self.standards_panel.list.itemDoubleClicked.connect(self.edit_standard)
@@ -401,10 +404,13 @@ class EditorTab(QWidget):
             standards_rows, compliance = store.standards(), store.compliance()
             interval = store.interval()
             allow_acknowledge = store.settings().get("allow_acknowledge")
+            records = store.reviews_by_version([version["id"] for version in recent])
         names = {device["id"]: device["name"] for device in devices}
         self.archive_panel.fill(devices, unreviewed, failing, now, raised)
         self.archive_panel.status.setText(self.archive_note)
-        self.changes_panel.fill(recent, overdue)
+        self.changes_panel.fill(recent, overdue, records)
+        if self.review_log_dialog is not None and self.review_log_dialog.isVisible():
+            self.review_log_dialog.fill(self.configs.review_log())
         self.changes_panel.set_acknowledge_allowed(allow_acknowledge)
         self.standards_panel.fill(standards_rows, compliance, names)
         if not self.backups_panel.interval.hasFocus():
@@ -985,6 +991,26 @@ class EditorTab(QWidget):
         self.run_job(lambda: self.configs.set_settings(values),
                      lambda _: (self.status("Review settings saved.", "success"), self.poke_sync()))
 
+    def show_review_log(self):
+        """The review log in a window of its own: every review, close and acknowledgement, filterable; double-click
+        one to open its change."""
+        if self.review_log_dialog is None:
+            self.review_log_dialog = ReviewLogDialog(self)
+            self.review_log_dialog.open_change.connect(self.open_logged_change)
+            self.review_log_dialog.export_requested.connect(self.export_review_log)
+        self.review_log_dialog.fill(self.configs.review_log())
+        self.review_log_dialog.show()
+        self.review_log_dialog.raise_()
+        self.review_log_dialog.activateWindow()
+
+    def open_logged_change(self, version_id):
+        if self.version_row(version_id) is None:
+            self.status("That change isn't in the archive any more.", "warning")
+            return
+        self.show_page()
+        self.window.activateWindow()
+        self.open_change(version_id)
+
     def export_review_log(self):
         from .export_progress import error_text, run_export
         stamp = time.strftime("%Y-%m-%d")
@@ -1165,32 +1191,73 @@ class EditorTab(QWidget):
         self.open_text("\n".join(heading) + "\n" + fix.as_config(lines) + "\n", f"Fix: {title}", Document.FIX, False,
                        context)
 
+    def send_target(self, widget, text):
+        """The device a tab's lines go to, without asking: where the tab came from (an archived copy, fix commands,
+        a Compare side: the one with the cursor, else the right), else the device its hostname line names (on the
+        map, in the archive or a saved SSH session). None when NOMAD can't tell."""
+        if isinstance(widget, CompareView):
+            pane = widget.focused_pane() or widget.right
+            context, text = pane.context, pane.editor.text()
+        else:
+            context = widget.context if isinstance(widget, Document) else {}
+        if context.get("device_id") or context.get("address"):
+            target = self.target_of(context["device_id"]) if context.get("device_id") else \
+                self.known_target(context["address"]) or {"id": context["address"].lower(), "name": context["address"],
+                                                          "address": context["address"], "names": [], "platform": ""}
+            target = dict(target)
+            if context.get("address"):
+                target["address"] = context["address"]
+            target["names"] = list(dict.fromkeys([*(target.get("names") or []), *(context.get("names") or [])]))
+            target["platform"] = context.get("platform") or target.get("platform") or ""
+            return target
+        hostname = config_text.hostname_in(text)
+        if hostname:
+            found = self.target_for_address(hostname)
+            if found.get("address") and found["address"].lower() != hostname.lower():  # Known by that name
+                return found
+            if self.configs is not None:
+                with self.configs.lock:
+                    named = [device for device in self.configs.store.devices()
+                             if (device.get("name") or "").lower() == hostname.lower()]
+                if len(named) > 1:  # An old address of it too: the one still on a map
+                    named = [device for device in named if device.get("in_scope")] or named
+                if len(named) == 1:
+                    return self.target_of(named[0]["id"])
+        return None
+
     def send_current(self):
         widget = self.current_document()
         editor = self.current_editor()
         if editor is None:
             return
-        context = widget.context if isinstance(widget, Document) else {}
         lines = config_lines(editor.text())
         if not lines:
             self.status("There are no configuration lines to send (comments and configure terminal / end are left "
                         "out).", "warning")
             return
-        dialog = SendDialog(self, context.get("address", ""), context.get("platform") or
-                            config_text.IOS, len(lines))
+        known = self.send_target(widget, editor.text())
+        label = ""
+        if known is not None:
+            name = known.get("name") or known["address"]
+            label = name if name == known["address"] else f"{name} ({known['address']})"
+        dialog = SendDialog(self, known["address"] if known else "", (known or {}).get("platform") or
+                            config_text.platform_of(editor.text()) or config_text.IOS, len(lines), label,
+                            self.device_choices())
         if dialog.exec_() != SendDialog.Accepted:
             return
-        address = dialog.address.text().strip()
-        names = list(context.get("names") or [])
+        if known is not None and not dialog.changed_device():
+            target = dict(known)
+        else:
+            target = dialog.chosen(self.target_for_address)
+            if target is None:
+                return
+        address, names = target["address"], list(target.get("names") or [])
         logins = self.login_row.logins(self.status_label, [(address, names)])
         if logins is None:
             return
         make = self.login_row.pusher_maker(logins)
         minutes = dialog.minutes.value() if dialog.revert.isChecked() else 0
         save, pull_after = dialog.save.isChecked(), dialog.pull_after.isChecked()
-        target = self.target_of(context["device_id"]) if context.get("device_id") else \
-            {"id": address.lower(), "name": address, "address": address, "names": names, "platform": ""}
-        target["address"] = address
 
         def work():
             pusher = make(lambda: False)

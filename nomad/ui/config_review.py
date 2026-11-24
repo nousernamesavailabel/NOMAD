@@ -10,11 +10,12 @@ import time
 
 from PyQt5.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, \
-    QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+    QPlainTextEdit, QPushButton, QTableWidgetItem, QVBoxLayout, QWidget
 from PyQt5.Qsci import QsciScintilla
 
 from ..configs import diff, review
-from .common import set_hint
+from . import compare_view
+from .common import read_only_table, set_hint
 from .theme import COLORS
 
 TICK_MS = 250
@@ -221,7 +222,7 @@ class ReviewController(QObject):
         self.current = index % len(self.state.blocks)
         block = self.state.blocks[self.current]
         self.view.current = self.current
-        self.view.show_lines(block.a_start, block.b_start)
+        self.view.show_lines(block.a_start, block.b_start, compare_view.SHOW_AT)
         self.view.show_position()
         self.show_block()
 
@@ -681,6 +682,89 @@ class ReviewSettingsDialog(QDialog):
             set_hint(self.message, f"{bad[0][0]} isn't a regular expression: {bad[0][1]}", "error")
             return
         self.accept()
+
+
+# ----------------------------------------------------------------- The review log in NOMAD
+
+VIEW_COLUMNS = ["When", "Device", "Change", "What", "Outcome", "Who", "Reason", "Blocks", "Unexpected", "Time",
+                "Flags", "Block notes"]
+WHAT_TEXT = {review.KIND_REVIEW: "Review", review.KIND_CLOSE: "Closed", review.KIND_ACKNOWLEDGE: "Acknowledged",
+             review.KIND_SEEN: "Opened (older NOMAD)"}
+
+
+def view_row(row):
+    """A review log row as the Review Log window shows it."""
+    flags = [name for name, on in (("self-reviewed", row.get("self_review")), ("quick", row.get("quick"))) if on]
+    return [when_text(row.get("at")), row.get("device_name") or row.get("device_id") or "",
+            f"+{row.get('added') or 0} −{row.get('removed') or 0}" + (f"  ({when_text(row.get('pulled_at'))})"
+                                                                     if row.get("pulled_at") else ""),
+            WHAT_TEXT.get(row.get("kind"), row.get("kind") or ""),
+            review.STATE_NAMES.get(row.get("outcome"), row.get("outcome") or ""), row.get("user") or "",
+            row.get("reason") or "", "" if row.get("total") is None else str(row["total"]),
+            "" if row.get("unexpected") is None else str(row["unexpected"]),
+            "" if row.get("seconds") is None else review.time_text(row["seconds"]), ", ".join(flags),
+            "; ".join(review.block_notes(row.get("blocks")))]
+
+
+class ReviewLogDialog(QDialog):
+    """Every review, close and acknowledgement, newest first: the reasons for approving or raising each change and
+    the notes on its blocks. Filter with the box or a column's funnel; double-click a row to open its change."""
+    open_change = pyqtSignal(int)
+    export_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from .table_filter import TableFilter
+        self.setWindowTitle("Review Log")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint)
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText("Filter (every word, in any column)")
+        self.filter_input.setClearButtonEnabled(True)
+        self.count_label = QLabel()
+        export_button = QPushButton("Export...")
+        export_button.setToolTip("Save the whole review log as a workbook or CSV")
+        row.addWidget(self.filter_input, 1)
+        row.addWidget(self.count_label)
+        row.addWidget(export_button)
+        layout.addLayout(row)
+        self.table = read_only_table(VIEW_COLUMNS)
+        self.table.setToolTip("Double-click a row to open its change and its review")
+        self.filters = TableFilter(self.table, self.show_count)
+        self.filters.columns.widest = {VIEW_COLUMNS.index("Reason"): 360, VIEW_COLUMNS.index("Block notes"): 420}
+        header = self.filters.header  # Newest first. Quietly: its signal queues a filter run (fill() does one)
+        header.blockSignals(True)
+        header.setSortIndicator(0, Qt.DescendingOrder)
+        header.blockSignals(False)
+        layout.addWidget(self.table, 1)
+        self.filter_input.textChanged.connect(self.filters.set_text)
+        self.table.cellDoubleClicked.connect(self.on_double_click)
+        export_button.clicked.connect(self.export_requested)
+        self.resize(1200, 600)
+
+    def fill(self, rows):
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(rows))
+        for index, row in enumerate(rows):
+            texts = view_row(row)
+            detail = "\n".join(review.record_lines([row]))
+            for column, text in enumerate(texts):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setData(Qt.UserRole, row.get("version_id"))
+                item.setToolTip(detail or text)
+                self.table.setItem(index, column, item)
+        self.table.setSortingEnabled(True)
+        self.filters.apply()
+
+    def show_count(self, shown, total):
+        self.count_label.setText(f"{shown} of {total}" if shown != total else f"{total} row{'s' if total != 1 else ''}")
+
+    def on_double_click(self, row, column):
+        item = self.table.item(row, 0)
+        if item is not None and item.data(Qt.UserRole) is not None:
+            self.open_change.emit(int(item.data(Qt.UserRole)))
 
 
 # ----------------------------------------------------------------- The review log, exported

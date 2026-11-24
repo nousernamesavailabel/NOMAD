@@ -11,8 +11,8 @@ from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox, QWidget  # noqa:
 
 from nomad.configs import archive, diff  # noqa: E402
 from nomad.netmap import configpush, model  # noqa: E402
-from nomad.terminal.sessions import SessionStore  # noqa: E402
-from nomad.ui import config_review, editor_tab  # noqa: E402
+from nomad.terminal.sessions import SSH, Session, SessionStore  # noqa: E402
+from nomad.ui import compare_view, config_review, editor_tab  # noqa: E402
 from nomad.ui.compare_view import CompareView  # noqa: E402
 from nomad.ui.config_events import config_events  # noqa: E402
 from nomad.ui.editor_tab import Document, EditorTab, config_lines  # noqa: E402
@@ -151,6 +151,35 @@ def test_compare_prev_next_keep_sides_lined_up(app):
         view.deleteLater()
 
 
+def test_prev_next_show_a_change_a_third_down_and_the_strip_follows_the_scroll_bar(app):
+    from PyQt5.Qsci import QsciScintilla
+    left = [f"line {number}" for number in range(600)]
+    right = [line if number % 90 != 45 else f"changed {number}" for number, line in enumerate(left)]
+    view = CompareView(None, "\n".join(left), "\n".join(right), "Left", "Right", mode=diff.PLAIN)
+    view.resize(900, 500)
+    view.show()
+    app.processEvents()
+    editor = view.right.editor
+    try:
+        for _ in range(3):
+            view.next_change()
+            app.processEvents()
+            hunk = view.result.changes[view.current]
+            top = editor.SendScintilla(QsciScintilla.SCI_GETFIRSTVISIBLELINE)
+            screen = editor.SendScintilla(QsciScintilla.SCI_LINESONSCREEN)
+            row = editor.SendScintilla(QsciScintilla.SCI_VISIBLEFROMDOCLINE, hunk.b_start)
+            assert top + screen // 4 <= row <= top + screen // 2, (top, screen, row)
+        bar = editor.verticalScrollBar()
+        groove_top = view.strip.mapFromGlobal(bar.mapToGlobal(compare_view.QPoint(0, compare_view.groove_of(bar).top())))
+        track_top, track_height = view.strip.track()
+        assert track_top == groove_top.y() > 0 and track_height < view.strip.height()
+        shown = view.strip.on_screen()
+        total = len(view.result.rows)
+        assert shown[0] <= row / total <= shown[1]  # The current change is in the on-screen box
+    finally:
+        view.deleteLater()
+
+
 def test_fix_commands_from_compare(page, app):
     view = page.open_compare("hostname R1\ninterface Gi0/1\n description A\n",
                              "hostname R1\ninterface Gi0/1\n description B\n", "Now", "Wanted")
@@ -207,7 +236,38 @@ def test_archive_changes_review_and_map_flags(page, app, monkeypatch):
     assert page.changes_panel.table.item(0, 5).text() == "Approved"
     [row] = page.configs.store.reviews_of(change["version_id"])
     assert (row["outcome"], row["reason"], row["total"]) == ("approved", "CHG-1", 1)
+    reason = page.changes_panel.table.item(0, 7)
+    assert reason.text() == "Approved: CHG-1" and "Approved by" in reason.toolTip()
     page.window.hide()
+
+
+def test_review_log_lists_reasons_and_opens_the_change(page, app, monkeypatch):
+    from nomad.configs import review
+    configs = page.configs
+    configs.upload("10.0.0.1", "running", CONFIG, "alice", name="R1", address="10.0.0.1")
+    change = configs.upload("10.0.0.1", "running", CONFIG + "username eve secret x\n", "alice")["version_id"]
+    blocks = configs.store.review_blocks(change)
+    verdicts = [{"index": block.index, "fingerprint": block.fingerprint, "verdict": "unexpected", "note": "who is eve",
+                 "seconds": 2, "seen": True} for block in blocks]
+    configs.finish_review(change, "bob", verdicts, "Nobody asked for eve")
+    configs.close_raised(change, "carol", review.EXPLAINED, "Contractor, CHG-9")
+    page.refresh_views()
+    assert page.changes_panel.table.item(0, 7).text() == "Raised: Nobody asked for eve · Explained: Contractor, CHG-9"
+    assert "who is eve" in page.changes_panel.table.item(0, 7).toolTip()
+    page.show_review_log()
+    dialog = page.review_log_dialog
+    texts = [[dialog.table.item(row, column).text() for column in range(dialog.table.columnCount())]
+             for row in range(dialog.table.rowCount())]
+    assert {(row[3], row[4], row[5], row[6]) for row in texts} == {
+        ("Review", "Raised", "bob", "Nobody asked for eve"), ("Closed", "Explained", "carol", "Contractor, CHG-9")}
+    assert any("who is eve" in row[11] for row in texts)
+    dialog.filter_input.setText("contractor")
+    assert [dialog.table.isRowHidden(row) for row in range(2)].count(False) == 1
+    opened = []
+    monkeypatch.setattr(page, "open_change", lambda version_id: opened.append(version_id))
+    dialog.on_double_click(0, 0)
+    assert opened == [change]
+    dialog.close()
 
 
 def test_acknowledge_is_hidden_until_allowed(page, app):
@@ -310,7 +370,63 @@ def test_send_current_types_lines(page, app, monkeypatch):
     assert text == "configure terminal\ninterface Gi0/1\n description B\nexit\n!\nend"
     report = page.current_document()
     assert report.title == "Sent to 10.0.0.1" and "Every line was taken" in report.editor.text()
-    assert asked == [[("10.0.0.1", [])]]  # The device is named, so its saved session is used without asking
+    assert asked == [[("10.0.0.1", ["R1"])]]  # The device is named (the map's R1), so its session is used
+
+
+def send_with(page, monkeypatch, prepare=lambda dialog: None):
+    """Send the current tab, the dialog answered at once; returns (what the dialog showed, [the addresses sent to])."""
+    shown = {}
+
+    def answer(dialog):
+        shown.update(title=dialog.windowTitle(), asks=not dialog.address.isHidden(), device=dialog.device_label.text())
+        dialog.pull_after.setChecked(False)
+        dialog.revert.setChecked(False)
+        prepare(dialog)
+        return editor_tab.SendDialog.Accepted
+    monkeypatch.setattr(editor_tab.SendDialog, "exec_", answer)
+    monkeypatch.setattr(page.login_row, "logins", lambda status=None, devices=None: (object(), ""))
+    monkeypatch.setattr(page.login_row, "pusher_maker", lambda logins: (lambda should_stop: FakePusher()))
+    FakePusher.sent.clear()
+    page.send_current()
+    settle(QApplication.instance())
+    return shown, [address for address, _ in FakePusher.sent]
+
+
+def test_send_knows_the_device_without_asking(page, app, monkeypatch):
+    page.configs.upload("10.0.0.1", "running", CONFIG, "alice", name="R1", address="10.0.0.1", platform="ios")
+    newest = page.newest_id("10.0.0.1")
+    page.open_version(newest)
+    settle(app)
+    page.current_document().editor.setReadOnly(False)
+    shown, sent = send_with(page, monkeypatch)
+    settle(app)
+    assert shown == {"title": "Send to R1 (10.0.0.1)", "asks": False, "device": "<b>R1 (10.0.0.1)</b>"}
+    assert sent == ["10.0.0.1"]
+    # A file of its own: its hostname line names a device the archive knows
+    page.open_text("hostname R1\ninterface Gi0/1\n description C\n", "r1-change.txt", Document.FILE, False)
+    shown, sent = send_with(page, monkeypatch)
+    settle(app)
+    assert not shown["asks"] and sent == ["10.0.0.1"]
+    # Nothing to go on: asked
+    page.open_text("interface Gi0/1\n description D\n", "snippet.txt", Document.FILE, False)
+    shown, sent = send_with(page, monkeypatch, lambda dialog: dialog.address.setEditText("10.9.9.9"))
+    settle(app)
+    assert shown["asks"] and shown["title"] == "Send to Device" and sent == ["10.9.9.9"]
+    # Change... sends a known tab somewhere else
+    page.open_text("hostname R1\ninterface Gi0/1\n description E\n", "r1-again.txt", Document.FILE, False)
+
+    page.window.session_store.sessions.append(Session(name="CORE-SW", host="10.7.7.7", protocol=SSH))
+    offered = []
+
+    def elsewhere(dialog):  # Change... offers Pull Config's devices: the map's, the archive's, the saved sessions
+        monkeypatch.setattr(dialog.address, "showPopup", lambda: None)
+        dialog.change_device()
+        offered.extend(dialog.address.itemText(index) for index in range(dialog.address.count()))
+        dialog.address.setEditText("CORE-SW (10.7.7.7)")
+    shown, sent = send_with(page, monkeypatch, elsewhere)
+    settle(app)
+    assert not shown["asks"] and sent == ["10.7.7.7"]
+    assert {"R1 (10.0.0.1)", "CORE-SW (10.7.7.7)"} <= set(offered)
 
 
 def test_preview_diff_is_approximate_after(page, app):

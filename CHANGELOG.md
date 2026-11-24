@@ -6,6 +6,18 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-11-24
+
+### Added
+- **The reasons and notes of reviews are shown in NOMAD.** The Changes tab has a **Reason** column: each change's reasons, oldest first ("Raised: ... · Explained: ..."), with everything said about it (who, when, flags, each block's note) in the tooltip of the Review, By and Reason cells (`review.reason_text`, `record_lines`, `block_notes`; `ConfigStore.reviews_by_version`). **Reviews** > **Review Log...** opens the review log in a window of its own (`ReviewLogDialog`): every review, close and acknowledgement, newest first, with the reason, blocks, unexpected blocks, time, flags and block notes, a filter box and column filters, **Export...**, and double-click to open the change. It follows the archive as it changes.
+
+### Changed
+- **Send to Device... doesn't ask which device when the Editor can tell.** A tab from a device (fix commands, an archived copy, Compare's side with the cursor, else its right side) goes to that device, and any other tab to the device its `hostname` line names on the map, in the archive or as a saved SSH session (`EditorTab.send_target`). The dialog shows the device. **Change...** opens the same device dropdown as Pull Config (the open map's routers, switches, firewalls and WLCs, the archive's devices and the saved SSH sessions; type to search, or type an address), which is shown straight away when the Editor can't tell. Picking a device sets its platform. `DeviceChoice`, shared by `SendDialog` and `PullDialog`. The device's other names go along, so its saved session is found.
+
+### Fixed
+- **Compare's overview strip lines up with the scroll bar.** The marks were spread over the strip's whole height (from the pane titles to the bottom scroll bar), while the scroll bar's track is shorter, so each mark sat above the thumb when its change was on the screen. The marks now follow the right side's scroll bar track (`compare_view.groove_of`, `OverviewStrip.follow` / `track`), a box shows what's on the screen, and a click goes to the place clicked, in the middle of the screen.
+- **Prev and Next (F7, Shift+F7) put a change a third of the way down the screen**, not three lines from the top, so what comes before it shows too (`SHOW_AT`, `show_lines(..., at)`). A review's blocks are shown the same way.
+
 ## [2.11.0] - 2026-11-24
 
 ### Added

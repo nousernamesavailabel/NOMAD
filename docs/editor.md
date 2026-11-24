@@ -66,6 +66,8 @@ Both sides can be edited. The arrows in the margin copy a change to the other si
 
 The commands open in a new tab. Check them, then **Copy** them, save them, or click **Send to Device...**. Sending types them in configuration mode and stops at the first line the device refuses. On IOS it can use the revert timer: the device puts its old configuration back unless NOMAD can log in again afterward. It can also save to the startup-config and pull the new running-config into the archive.
 
+**Send to Device...** doesn't ask which device when NOMAD can tell. A tab of fix commands, an archived copy, or a Compare side goes to the device it came from. Any other tab goes to the device its `hostname` line names, if that device is on the map, in the archive or a saved SSH session. The dialog shows the device. Click **Change...** to pick another one from the same list as **Pull Config...**: the open map's routers, switches, firewalls and WLCs, the archive's devices and your saved SSH sessions. Type to search the list, or type an address. When NOMAD can't tell the device, the list is shown straight away.
+
 ## The config archive
 
 The archive keeps a copy of each device's configuration whenever it changes. A pull that's the same as the last copy (noise aside) only records when the device was checked.
@@ -118,6 +120,10 @@ When NOMAD sent the lines itself, from the ACLs, VPNs, Port Mirroring, Carry VLA
 A review is labeled **self-reviewed** when your device login made the change, or one of your own pushes typed it. It's labeled **quick** when it took less than a second per block on a change with three or more blocks. Neither stops the review. Both show in the review log and on the NOMAD Dashboard.
 
 Changes that an older version of NOMAD opened before reviews were kept show as **Seen**. They can still be reviewed properly.
+
+The **Reason** column on the **Changes** tab shows why each change was approved, or why it was raised and how it was closed. Hover over the reason to see who did what and when, and the note on each block.
+
+**Reviews** > **Review Log...** lists every review, close and acknowledgement, newest first, with the reason, the number of blocks and unexpected blocks, how long it took, the self-reviewed and quick flags, and the block notes. Type in the box at the top, or use the funnel in a column's header, to show only some of them. Double-click one to open its change.
 
 **Reviews** > **Export Review Log...** saves every review, close and acknowledgement as a workbook or CSV, with who did it, when, the reason, how long it took and each block's note.
 

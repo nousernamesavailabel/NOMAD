@@ -2,10 +2,10 @@
 up by blank space (annotations, so neither file changes), with the changes colored. Both sides can be edited; the
 arrows in the margin copy a change from one side to the other, and the comparison follows every edit."""
 from PyQt5.Qsci import QsciScintilla, QsciStyle
-from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter, QPixmap, QPolygonF
-from PyQt5.QtWidgets import QComboBox, QHBoxLayout, QLabel, QMenu, QPushButton, QSplitter, QStackedWidget, \
-    QToolButton, QVBoxLayout, QWidget
+from PyQt5.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap, QPolygonF
+from PyQt5.QtWidgets import QComboBox, QHBoxLayout, QLabel, QMenu, QPushButton, QSplitter, QStackedWidget, QStyle, \
+    QStyleOptionSlider, QToolButton, QVBoxLayout, QWidget
 
 from ..configs import diff, text as config_text
 from .code_editor import MARK_ADDED, MARK_CHANGED, MARK_COLORS, MARK_COPY, MARK_HIDDEN, MARK_MOVED, MARK_REMOVED, \
@@ -17,6 +17,7 @@ MARK_COPY_BACK = 7
 KIND_MARKS = {diff.ADDED: MARK_ADDED, diff.REMOVED: MARK_REMOVED, diff.CHANGED: MARK_CHANGED, diff.MOVED: MARK_MOVED}
 KIND_COLORS = {diff.ADDED: "#35c27a", diff.REMOVED: "#e05d5d", diff.CHANGED: "#d9a53a", diff.MOVED: "#5b8fd6"}
 QUICK_LINES = 20000  # Past this many lines, the comparison waits longer after typing before it runs again
+SHOW_AT = 3  # Prev/Next put a change this far down the screen (a third), so the lines before it show too
 
 
 def gap_style(editor):
@@ -42,30 +43,78 @@ def arrow_pixmap(rightward):
     return pixmap
 
 
+def groove_of(bar):
+    """The vertical scroll bar's track (between its arrows), in its own coordinates."""
+    option = QStyleOptionSlider()
+    option.initFrom(bar)
+    option.orientation = Qt.Vertical
+    option.minimum, option.maximum = bar.minimum(), bar.maximum()
+    option.sliderPosition = option.sliderValue = bar.value()
+    option.singleStep, option.pageStep = bar.singleStep(), bar.pageStep()
+    option.upsideDown = False
+    option.subControls = QStyle.SC_All
+    return bar.style().subControlRect(QStyle.CC_ScrollBar, option, QStyle.SC_ScrollBarGroove, bar)
+
+
 class OverviewStrip(QWidget):
-    """Where the changes are in the whole comparison; a click goes there."""
+    """Where the changes are in the whole comparison, lined up with the right side's scroll bar track (so a mark is
+    beside the thumb when its change is on the screen), and a box for what's on the screen; a click goes there."""
     picked = pyqtSignal(float)  # How far down (0 to 1)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedWidth(12)
-        self.marks = []  # (from, to, color): fractions of the height
+        self.marks = []  # (from, to, color): fractions of the whole comparison
+        self.bar = None  # The scroll bar whose track the marks line up with
         self.setToolTip("Where the changes are: click to go there")
 
     def set_marks(self, marks):
         self.marks = marks
         self.update()
 
+    def follow(self, bar):
+        self.bar = bar
+        bar.valueChanged.connect(self.update)
+        bar.rangeChanged.connect(self.update)
+
+    def track(self):
+        """(top, height) of the strip that stands for the whole comparison: the scroll bar's track, when there is
+        one to line up with."""
+        bar = self.bar
+        if bar is not None and bar.isVisible() and bar.maximum() > bar.minimum():
+            groove = groove_of(bar)
+            top = self.mapFromGlobal(bar.mapToGlobal(QPoint(0, groove.top()))).y()
+            if groove.height() > 10 and 0 <= top < self.height():
+                return float(top), float(min(groove.height(), self.height() - top))
+        return 0.0, float(max(self.height(), 1))
+
+    def on_screen(self):
+        """(from, to) fractions of the comparison on the screen, or None (it all fits)."""
+        bar = self.bar
+        if bar is None or bar.maximum() <= bar.minimum():
+            return None
+        total = bar.maximum() - bar.minimum() + bar.pageStep()
+        return (bar.value() - bar.minimum()) / total, (bar.value() - bar.minimum() + bar.pageStep()) / total
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(COLORS["panel"]))
-        height = max(self.height(), 1)
+        top, height = self.track()
         for start, end, color in self.marks:
-            top = start * height
-            painter.fillRect(QRectF(1, top, self.width() - 2, max((end - start) * height, 2)), QColor(color))
+            painter.fillRect(QRectF(1, top + start * height, self.width() - 2, max((end - start) * height, 2)),
+                             QColor(color))
+        shown = self.on_screen()
+        if shown is not None:
+            pen = QPen(QColor(COLORS["text"]))
+            pen.setWidth(1)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(QRectF(0.5, top + shown[0] * height, self.width() - 1.5,
+                                    max((shown[1] - shown[0]) * height, 3) - 1))
 
     def mousePressEvent(self, event):
-        self.picked.emit(min(max(event.pos().y() / max(self.height(), 1), 0.0), 1.0))
+        top, height = self.track()
+        self.picked.emit(min(max((event.pos().y() - top) / max(height, 1), 0.0), 1.0))
 
 
 class ComparePane(QWidget):
@@ -172,6 +221,7 @@ class CompareView(QWidget):
         self.strip = OverviewStrip()
         sides.addWidget(self.splitter, 1)
         sides.addWidget(self.strip)
+        self.strip.follow(self.right.editor.verticalScrollBar())
         self.stack.addWidget(side_by_side)
         self.inline = CodeEditor(self, read_only=True)
         self.inline.setMarginWidth(0, 0)
@@ -280,6 +330,8 @@ class CompareView(QWidget):
             editor.annotate(line, "\n".join([" "] * height), gap_style(editor))
 
     def strip_marks(self):
+        """(from, to, color) of each run of changed rows: fractions of the rows (each a line on the screen, since
+        the gaps line the sides up)."""
         rows = self.result.rows
         total = max(len(rows), 1)
         marks = []
@@ -344,21 +396,24 @@ class CompareView(QWidget):
                     self.inline.go_to(number)
                     break
         else:
-            self.show_lines(hunk.a_start, hunk.b_start)
+            self.show_lines(hunk.a_start, hunk.b_start, SHOW_AT)
         self.show_position()
         self.position_changed.emit(self.current)
 
-    def show_lines(self, left_line, right_line):
+    def show_lines(self, left_line, right_line, at=0):
         """Put the cursor on left_line on the left and right_line on the right, then scroll both sides to the same
-        place (a few rows above whichever comes first), so they stay lined up. Scrolling from code doesn't pass
-        through the scroll bars' sync, so both sides are set here."""
+        place, so they stay lined up: whichever comes first a few rows down the screen, or (at) 1/at of the way down
+        (Prev/Next: a third, so what comes before it shows too). Scrolling from code doesn't pass through the scroll
+        bars' sync, so both sides are set here."""
         rows = []
         for pane, line in ((self.left, left_line), (self.right, right_line)):
             editor = pane.editor
             line = max(0, min(line, editor.lines() - 1))
             editor.setCursorPosition(line, 0)
             rows.append(editor.SendScintilla(QsciScintilla.SCI_VISIBLEFROMDOCLINE, line))
-        top = max(min(rows) - 3, 0)
+        screen = max(self.right.editor.SendScintilla(QsciScintilla.SCI_LINESONSCREEN), 1)
+        above = max(screen // at, 3) if at else 3
+        top = max(min(rows) - above, 0)
         self.syncing = True
         for pane in (self.left, self.right):
             pane.editor.setFirstVisibleLine(top)
@@ -377,7 +432,7 @@ class CompareView(QWidget):
         index = min(int(fraction * len(rows)), len(rows) - 1)
         left_line = next((row.a for row in rows[index:] if row.a is not None), len(self.result.a_lines))
         right_line = next((row.b for row in rows[index:] if row.b is not None), len(self.result.b_lines))
-        self.show_lines(left_line, right_line)
+        self.show_lines(left_line, right_line, 2)  # The place clicked in the middle of the screen
 
     # ----------------------------------------------------------------- Copying across
 

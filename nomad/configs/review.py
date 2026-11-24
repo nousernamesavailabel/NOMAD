@@ -269,6 +269,46 @@ def state_text(version):
     return STATE_NAMES.get(state_of(version), "To review")
 
 
+def reason_text(records):
+    """A change's reasons, oldest first: "Raised: who is eve · Explained: the new contractor" (older NOMADs'
+    openings left out)."""
+    parts = []
+    for row in records or []:
+        if row.get("kind") == KIND_SEEN or not row.get("reason"):
+            continue
+        parts.append(f"{STATE_NAMES.get(row.get('outcome'), row.get('outcome') or '')}: {row['reason']}")
+    return " · ".join(parts)
+
+
+def block_notes(blocks):
+    """The blocks a reviewer wrote a note on or found unexpected: ["2 interface Gi0/1 (unexpected): note"]."""
+    lines = []
+    for block in blocks or []:
+        if not block.get("note") and block.get("verdict") != UNEXPECTED:
+            continue
+        verdict = "unexpected" if block.get("verdict") == UNEXPECTED else "expected"
+        lines.append(f"{block.get('index', 0) + 1} {block.get('path') or '(top level)'} ({verdict})" +
+                     (f": {block['note']}" if block.get("note") else ""))
+    return lines
+
+
+def record_lines(records):
+    """Everything said about a change, one line each, for a tooltip: who did what when and why, and the block
+    notes."""
+    import datetime
+    lines = []
+    for row in records or []:
+        if row.get("kind") == KIND_SEEN:
+            continue
+        when = datetime.datetime.fromtimestamp(float(row["at"])).strftime("%Y-%m-%d %H:%M") if row.get("at") else ""
+        flags = [name for name, on in (("self-reviewed", row.get("self_review")), ("quick", row.get("quick"))) if on]
+        lines.append(f"{STATE_NAMES.get(row.get('outcome'), row.get('outcome') or '')} by {row.get('user') or 'someone'}"
+                     f" {when}" + (f" [{', '.join(flags)}]" if flags else "") +
+                     (f": {row['reason']}" if row.get("reason") else ""))
+        lines += [f"    Block {line}" for line in block_notes(row.get("blocks"))]
+    return lines
+
+
 def time_text(seconds):
     seconds = int(round(seconds or 0))
     if seconds < 60:

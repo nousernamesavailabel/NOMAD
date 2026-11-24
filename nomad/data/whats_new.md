@@ -4,6 +4,15 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-11-24
+
+- **Changed:** **Send to Device...** in the Editor no longer asks which device when it can tell. Fix commands, an archived copy and a Compare side go to the device they came from, and any other tab goes to the device its `hostname` line names. Click **Change...** to pick another device from the same list as **Pull Config...**, saved SSH sessions included.
+
+- **New:** the Editor's **Changes** tab shows each change's **Reason**: why it was approved, or why it was raised and how it was closed. Hover over it to see the block notes. **Reviews** > **Review Log...** lists every review with its reason and notes. Filter it, and double-click one to open the change.
+
+- **Fixed:** in the Editor's Compare, the colored marks beside the scroll bar now line up with it. Before, each mark sat a little above where its change was. A box beside the scroll bar shows the part on the screen.
+- **Changed:** **Prev** and **Next** in Compare now show a change a third of the way down the screen, so you can see the lines before it.
+
 ## [2.11.0] - 2026-11-24
 
 - **New:** reviewing a config change in the Editor now means going through it. Opening a change no longer marks it reviewed. Double-click a change on the **Changes** tab, then mark each block **Expected** (Space) or **Unexpected** (U) while it's on the screen. Blocks that touch sensitive lines, such as users, SNMP communities or the VTY lines, need a note. **Finish Review...** asks for a reason and approves the change, or raises it if something was unexpected. A raised change stays flagged until someone closes it as Explained or Reverted.
