@@ -404,6 +404,15 @@ class MonitorRunner:
         labels = {key: device.label for key, device in devices.items()}
         pings = {key: address for key, address in targets.items() if key not in state.probes}
         results = monitor.poll(pings, self.pinger)
+        if any(rtt is None for rtt in results.values()) and \
+                self.clock() - state.discovered_at > probes.LOOK_AGAIN_AFTER_MISS:
+            # Someone may have just given a device it can't ping a probe: look now, not up to DISCOVER_EVERY later
+            # (till then it would be down here while NOMAD, which found the probe at once, has it up)
+            self.discover(map_id, state, network_map, options)
+            state.probes = {key: probe for key, probe in state.probes.items() if key in devices}
+            results = {key: rtt for key, rtt in results.items() if key not in state.probes}
+            for key, probe in state.probes.items():
+                targets.setdefault(key, probe.target)
         via, problems = {}, {}
         if state.probes:
             entries = {}

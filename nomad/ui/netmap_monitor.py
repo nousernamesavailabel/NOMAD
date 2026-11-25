@@ -357,6 +357,9 @@ class NetworkMonitor(QObject):
         if not self.running:
             return  # Stopped while it was polling
         results = {key: rtt for key, rtt in pinged.items() if key in self.targets and key not in self.probes}
+        if any(rtt is None for rtt in results.values()) and \
+                time.time() - self.discovered_at > probes.LOOK_AGAIN_AFTER_MISS:
+            self.discover()  # Someone may have just given one a probe: the next poll reads it, if so
         via, problems = {}, {}
         for key, probe in self.probes.items():
             router = self.labels.get(probe.router, probe.router)

@@ -1,1 +1,1 @@
-__version__ = "2.11.2"  # The one place the version is set; change it with:  python -m nomad.version bump patch|minor|major
+__version__ = "2.11.3"  # The one place the version is set; change it with:  python -m nomad.version bump patch|minor|major

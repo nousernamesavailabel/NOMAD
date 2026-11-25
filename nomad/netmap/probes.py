@@ -54,6 +54,8 @@ FREQUENCIES = [10, 15, 30, 60, 120, 300]  # Seconds between a probe's pings, on 
 DEFAULT_FREQUENCY = 30
 TIMEOUT_MS = 1000  # Also the threshold: IOS won't schedule a probe whose threshold is over its timeout
 STALE_AFTER = 3  # A latest result older than this many of its probe's periods (and a minute): the probe isn't running
+LOOK_AGAIN_AFTER_MISS = 60  # A ping went unanswered: look over the routers again once this many seconds have passed
+# since the last look (someone may just have given that device a probe, and pinging it from here would call it down)
 PROBES_PER_GET = 8
 WORKERS = 16
 

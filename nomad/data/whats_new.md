@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.11.3] - 2026-11-25
+
+- **Fixed:** a device you set up with **Monitor from a Router** no longer shows as Down a few minutes later while its IP SLA is fine. The Map Watcher now finds the new probe within about a minute. Update the Map Watcher service to get it.
+
 ## [2.11.2] - 2026-11-24
 
 - **Fixed:** on the NOMAD Dashboard, dropdowns such as **Port** and **Subnet** on the Trends page no longer close by themselves when the page updates. Update the NOMAD Dashboard service to get it.

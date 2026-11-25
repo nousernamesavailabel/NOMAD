@@ -6,6 +6,11 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.11.3] - 2026-11-25
+
+### Fixed
+- **A device given a probe with Monitor from a Router no longer turns Down a few minutes later.** NOMAD found the new probe at once and showed the device Up, but the Map Watcher looked over the routers for probes only every 10 minutes. Until then it pinged the device from its own computer, got no answer and called it Down. The map shows this computer's newer status for only 5 minutes (`CATCH_UP_SECONDS`), and after that it showed the Watcher's Down. Now, when a ping goes unanswered, the Watcher and NOMAD's own monitor look over the routers again if the last look was more than a minute ago (`probes.LOOK_AGAIN_AFTER_MISS`). The Watcher reads a probe found that way in the same round, in place of the missed ping.
+
 ## [2.11.2] - 2026-11-24
 
 ### Fixed

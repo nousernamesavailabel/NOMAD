@@ -67,6 +67,44 @@ def test_pings_become_statuses_and_changes(tmp_path, monkeypatch):
     store.close()
 
 
+def test_a_probe_added_since_the_last_look_is_found_before_the_device_is_called_down(tmp_path, monkeypatch):
+    """NOMAD adds a probe for a device the Watcher can't ping: the Watcher looks again at its next miss, not up to
+    DISCOVER_EVERY later, so it doesn't call the device down while NOMAD has it up."""
+    clock = [1000.0]
+    on_router = []
+    looks = []
+
+    def discover(routers, factory):
+        looks.append(clock[0])
+        return probes.Discovery(probes=list(on_router), read={"r1"})
+
+    def poll(targets, factory):
+        return {"r1": {9000: probes.Reading(1, 5, int(clock[0] * 100), int(clock[0] * 100) + 100)}}
+
+    monkeypatch.setattr(probes, "discover", discover)
+    monkeypatch.setattr(probes, "poll", poll)
+    monkeypatch.setattr(counters, "poll", lambda targets, indexes, factory: {})
+    monkeypatch.setattr(tunnels, "poll", lambda *args, **kwargs: {})
+    monkeypatch.setattr(probes, "readable_routers", lambda network_map: ["r1"])
+    store = MonitorStore(tmp_path / "status.db", clock=lambda: clock[0])
+    runner = MonitorRunner(FakeMaps(a_map()), [1], store, lambda map_id, settings: WatchOptions(),
+                           {"interval": 30}, client_factory=object,
+                           pinger=lambda address: 3 if address == "10.0.0.1" else None,  # S1 only a router reaches
+                           clock=lambda: clock[0], access=FakeAccess())
+    runner.step()
+    assert len(looks) == 1
+    on_router.append(probes.Probe("r1", "10.0.0.1", 9000, "10.0.0.2", frequency=30, state="active"))
+    clock[0] += 31
+    runner.step()  # Missed, but the last look was a moment ago
+    assert len(looks) == 1
+    clock[0] += 31
+    runner.step()  # Missed again, a minute on: look again, and read the probe instead of counting the ping
+    assert len(looks) == 2
+    state = runner.states[1].tracker.get("s1")
+    assert state.status == "up" and state.via == "R1" and state.rtt == 5
+    store.close()
+
+
 def test_the_watcher_takes_the_dashboards_older_changes_once(tmp_path):
     from nomad.dashboard.history import HistoryStore
     from nomad.netmap import monitor
