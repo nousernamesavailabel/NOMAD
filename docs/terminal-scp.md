@@ -20,7 +20,7 @@ Everything for talking to devices and servers, sharing the same saved sessions a
 
 ## Sessions
 
-- **Sessions** are saved in folders. Import them from PuTTY or a SecureCRT export.
+- **Sessions** are saved in folders. Import them from PuTTY or a SecureCRT export, or [share them](#share-sessions-with-other-people) with other NOMAD users without your logins.
 - **Quick connect** takes `admin@10.0.0.1`, `telnet 10.0.0.5`, `raw 10.0.0.9:9100` or `COM3:115200`.
 - With **Serial** picked beside quick connect, the text box becomes a list of this computer's COM ports and a speed list. Pick a port and press Enter. The list looks for ports again each time you open it, so a USB console cable plugged in afterward shows up.
 - **Recent** at the top of the list keeps your last 10 connections.
@@ -112,6 +112,40 @@ See the [keyboard guide](keyboard-shortcuts.md) for the rest.
 - Passwords are encrypted in SecureCRT's salted `03:` format, so the destination must use the same passphrase before importing.
 - It doesn't change SecureCRT's global security settings.
 - Private key contents and saved key passphrases are excluded.
+
+### Share sessions with other people
+
+You can give other people your sessions without giving them your logins. The shared file has where and how each session connects, but no passwords, keys or user names.
+
+To share sessions:
+
+1. Click **File** > **Export Sessions to Share...**. You can also right-click sessions or a folder on the Terminal, SCP or RDP page and click **Export to Share...**.
+2. Tick the sessions and folders to share.
+3. Untick **Include notes** if your session notes might have something private in them.
+4. Leave **Suggest credential names** ticked to write the name of the credential each session uses, such as TACACS. Only the name goes in the file.
+5. Click **Export...** and save the `.json` file.
+
+The file still lists your host names and addresses, so share it only with people who should have them.
+
+To import shared sessions:
+
+1. Click **File** > **Import Shared Sessions...**, or right-click the session list and click **Import Shared Sessions...**.
+2. Pick the file.
+3. Check **Import into folder**. The sessions keep their own folders inside it.
+4. Pick the **Credential for all**. Every SSH and Remote Desktop session logs in with it. Click **New Credential...** to make one.
+5. Change any session that logs in differently in its **Credential** column. To change several at once, select them, right-click, and click **Set Credential**. A changed session is shown in bold.
+6. Click **Import**.
+
+Good to know:
+
+- With **Match credentials by name** ticked, a session starts on your credential with the same name as the one it used where it was exported.
+- **Ask when connecting** saves the session with no login, and NOMAD asks for one when you connect.
+- Remote Desktop sessions can only use a credential with a password.
+- Telnet, serial and raw TCP sessions don't use credentials.
+- If you already have a session with the same folder, name, host and protocol, the **Already saved** column lets you skip it, update its settings while keeping your login, or keep both.
+- Untick a session to leave it out.
+
+### Back up and restore
 
 **File** > **Export / Import NOMAD Terminal Settings and Sessions...** saves or restores a password-protected `.nomad` backup.
 

@@ -63,6 +63,7 @@ from .tribe_version import TribeUpdateBanner
 from .terminal_tab import TerminalTab
 from .tool_window import OPEN_SETTING, DialogsFollowTools, ToolWindow, show_status_on
 from .rdp_tab import RdpTab
+from .session_share_dialogs import export_sessions_to_share, import_shared_sessions
 from .terminal_transfer import export_securecrt, export_terminal, import_terminal
 from .vlan_tab import VlanTab
 from .wake_tab import WakeTab
@@ -302,6 +303,8 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Import Sessions from &SecureCRT...",
                             lambda: self.show_terminal(self.terminal_tab.manager.import_from_securecrt))
         file_menu.addAction("Export SSH Sessions to SecureCRT...", lambda: export_securecrt(self))
+        file_menu.addAction("Export Sessions to Share...", lambda: export_sessions_to_share(self, self.session_store))
+        file_menu.addAction("Import Shared Sessions...", lambda: import_shared_sessions(self, self.session_store))
         file_menu.addSeparator()
         file_menu.addAction("Export NOMAD Terminal Settings and Sessions...", lambda: export_terminal(self))
         file_menu.addAction("Import NOMAD Terminal Settings and Sessions...", lambda: import_terminal(self))

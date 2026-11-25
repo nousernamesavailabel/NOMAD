@@ -17,6 +17,7 @@ from .common import set_hint
 from .folder_picker import FolderPickerDialog
 from .credential_dialogs import OWN_LOGIN, CredentialsDialog
 from .session_dialog import SerialPortCombo, SessionDialog
+from .session_share_dialogs import REMOTE_DESKTOP, TERMINAL, export_sessions_to_share, import_shared_sessions
 from .vault_dialog import SecurityDialog, ensure_unlocked
 from .theme import COLORS
 
@@ -605,6 +606,7 @@ class SessionManager(QWidget):
             self.add_credential_menu(menu, actions, [session])
             actions[menu.addAction("Duplicate")] = lambda: self.duplicate_session(session)
             actions[menu.addAction("Move to...")] = lambda: self.move_to_dialog([session], [])
+            actions[menu.addAction("Export to Share...")] = lambda: self.export_to_share([session], [])
             actions[menu.addAction("Delete")] = lambda: self.delete_session(session)
             menu.addSeparator()
         actions[menu.addAction("New Session...")] = lambda: self.new_session(self.selected_folder())
@@ -615,11 +617,15 @@ class SessionManager(QWidget):
             if "/" in folder:
                 grandparent = folder.rpartition("/")[0].rpartition("/")[0]
                 actions[menu.addAction("Move Up a Level")] = lambda: self.move_items([], [folder], grandparent)
+            actions[menu.addAction("Export Folder to Share...")] = lambda: self.export_to_share([], [folder])
             actions[menu.addAction("Delete Folder")] = lambda: self.delete_folder(folder)
+        menu.addSeparator()
         if not self.launch_only:
-            menu.addSeparator()
             actions[menu.addAction("Import from PuTTY")] = self.import_from_putty
             actions[menu.addAction("Import from SecureCRT...")] = self.import_from_securecrt
+        actions[menu.addAction("Import Shared Sessions...")] = self.import_shared
+        if not session and not folder:
+            actions[menu.addAction("Export Sessions to Share...")] = lambda: self.export_to_share(None, None)
         chosen = menu.exec_(self.tree.viewport().mapToGlobal(position))
         if chosen in actions:
             actions[chosen]()
@@ -764,6 +770,16 @@ class SessionManager(QWidget):
                         (", ..." if len(export.skipped) > 5 else ""))
         QMessageBox.information(self, "Import from SecureCRT", message)
 
+    def export_to_share(self, sessions, folders):
+        """Export Sessions to Share, starting with these sessions and folders ticked (None: all of them)."""
+        namespace = REMOTE_DESKTOP if getattr(self.store, "protocols", None) == {RDP} else TERMINAL
+        export_sessions_to_share(self, self.store, None if sessions is None else [item.id for item in sessions],
+                                 folders, namespace)
+
+    def import_shared(self):
+        if import_shared_sessions(self, self.store) is not None:
+            self.fill_tree()
+
     def decrypt_securecrt(self, export):
         """Decrypt the export's saved passwords, asking for SecureCRT's configuration passphrase if one was set.
         Returns how many decrypted (0 if the user skips them)."""
@@ -847,6 +863,7 @@ class SessionManager(QWidget):
             menu.addSeparator()
         self.add_credential_menu(menu, actions, sessions)
         actions[menu.addAction("Move to...")] = lambda: self.move_to_dialog(sessions, folders)
+        actions[menu.addAction("Export to Share...")] = lambda: self.export_to_share(sessions, folders)
         actions[menu.addAction("Delete...")] = lambda: self.delete_items(sessions, folders)
         chosen = menu.exec_(self.tree.viewport().mapToGlobal(position))
         if chosen in actions:

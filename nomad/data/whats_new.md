@@ -4,6 +4,11 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-11-25
+
+- **New:** share saved sessions with other people without your logins. Use **File** > **Export Sessions to Share...** (or right-click sessions or a folder). The file has no passwords, keys or user names.
+- **New:** **File** > **Import Shared Sessions...** lets you pick one saved credential for all the sessions, then change any that log in differently. Sessions you already have can be skipped, updated, or kept both.
+
 ## [2.12.3] - 2026-11-25
 
 - **Fixed:** on a tribe map, right-click > **Add Device Here** sometimes didn't add the device, so you had to add it again. It's added the first time now.

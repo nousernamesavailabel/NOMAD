@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-11-25
+
+### Added
+- **Share saved sessions without logins.** **File** > **Export Sessions to Share...** (also **Export to Share...** / **Export Folder to Share...** on the Terminal, SCP and RDP session lists' right-click menus) writes the ticked sessions and folders, empty ones included, to a `.json` file (`format: "nomad-session-share"`, `version: 1`) with no passwords, passphrases, key files, user names, credential links or log folders. Only the fields in `share.SHARE_FIELDS` are written, so a field added to `Session` later stays out until it's added there. Optional: notes (on by default) and each session's credential name as a hint (on by default).
+- **Import Shared Sessions...** reads such a file as untrusted input: the same allowed fields only, wrong types and unknown choices fall back to the default, control characters in names and hosts are refused, every session must pass `validate_session`, and there's a cap of 5,000 sessions and 20 MB. The import dialog sets the folder to import into (the file's folders go inside it), a **Credential for all**, and exceptions in each row's **Credential** column, or for many rows at once with right-click > **Set Credential**. **Match credentials by name** starts a row on a credential named like its hint. **Ask when connecting** saves no login. RDP rows only offer password credentials. Sessions already saved (same folder, name, host and protocol) can be skipped, updated keeping their own login, or kept both (`share.import_shared`, `ui/session_share_dialogs.py`). The import doesn't need the vault unlocked, because credentials already hold encrypted values.
+
 ## [2.12.3] - 2026-11-25
 
 ### Fixed
