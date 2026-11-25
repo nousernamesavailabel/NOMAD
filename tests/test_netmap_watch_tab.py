@@ -7,7 +7,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
 from netmap_fakes import build_network  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QInputDialog, QMessageBox  # noqa: E402
+from PyQt5.QtCore import Qt  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QDialog, QInputDialog, QMessageBox  # noqa: E402
 from test_netmap_tab import Window  # noqa: E402
 from test_netmap_watch import NEW_PC, plug_in_switch, renumber_acc1, renumbered_network, rtr1_answers  # noqa: E402
 
@@ -15,6 +16,7 @@ from nomad.netmap import export, store, watch  # noqa: E402
 from nomad.netmap.crawl import CrawlSettings, Crawler  # noqa: E402
 from nomad.snmpv3 import V3User  # noqa: E402
 from nomad.ui import netmap_tab  # noqa: E402
+from nomad.ui.netmap_dialogs import DeviceDialog  # noqa: E402
 from nomad.ui.netmap_tribe import TribeSync  # noqa: E402
 
 
@@ -262,6 +264,69 @@ def test_tribe_map_save_waiting_doesnt_undo_anothers_move(app, server, tmp_path,
     finally:
         alice.shutdown()
         bob.shutdown()
+
+def shared_between(app, server, tmp_path, monkeypatch, network):
+    """Alice's and Bob's pages with the same tribe map open."""
+    alice = make_tab(network, tmp_path / "a", monkeypatch, tribe_for(server, tmp_path, "alice"))
+    bob = make_tab(network, tmp_path / "b", monkeypatch, tribe_for(server, tmp_path, "bob"))
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    alice.on_crawled(crawl(network))
+    monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("HQ", True))
+    alice.share_with_tribe()
+    maps = bob.tribe.ensure()
+    assert wait_for(app, lambda: [item["name"] for item in maps.maps()] == ["HQ"])
+    bob.open_tribe_map(maps.maps()[0]["id"])
+    return alice, bob
+
+
+def test_device_added_while_others_changes_arrive_isnt_lost(app, server, tmp_path, monkeypatch):
+    """Bob's change reaches Alice's page while her Add Device dialog is open: the device goes on the map she has
+    open when she OKs it, not the one replaced (which nothing shows or saves)."""
+    network = build_network()
+    alice, bob = shared_between(app, server, tmp_path, monkeypatch, network)
+    try:
+        before = alice.network_map
+
+        class Filled(DeviceDialog):
+            def exec_(self):
+                self.name_input.setText("closet-sw")
+                bob.view.items_by_key["core"].setPos(1234, 567)
+                bob.save_positions()
+                assert wait_for(app, lambda: alice.network_map is not before, 15)
+                return QDialog.Accepted
+        monkeypatch.setattr(netmap_tab, "DeviceDialog", Filled)
+        key = alice.add_device(place=(100.0, 100.0))
+        assert key in alice.network_map.devices and key in alice.view.items_by_key
+        assert alice.network_map.positions["core"] == (1234.0, 567.0)  # Bob's move kept too
+        assert wait_for(app, lambda: bob.network_map.devices.get(key) is not None, 15)
+        assert bob.network_map.devices[key].name == "closet-sw"
+    finally:
+        alice.shutdown()
+        bob.shutdown()
+
+
+def test_others_changes_wait_while_a_dialog_is_open(app, server, tmp_path, monkeypatch):
+    network = build_network()
+    alice, bob = shared_between(app, server, tmp_path, monkeypatch, network)
+    dialog = QDialog()
+    try:
+        before = alice.network_map
+        dialog.setWindowModality(Qt.ApplicationModal)
+        dialog.show()
+        assert QApplication.activeModalWidget() is dialog
+        bob.view.items_by_key["core"].setPos(1234, 567)
+        bob.save_positions()
+        assert wait_for(app, lambda: alice.tribe_reload_waiting, 15)
+        assert alice.network_map is before  # Not replaced under the dialog
+        dialog.hide()
+        assert wait_for(app, lambda: tuple(alice.network_map.positions.get("core", ())) == (1234.0, 567.0), 15)
+        assert not alice.tribe_reload_waiting
+    finally:
+        dialog.deleteLater()
+        alice.shutdown()
+        bob.shutdown()
+
 
 def test_watching_stands_by_while_another_computer_watches(app, server, tmp_path, monkeypatch):
     network = build_network()

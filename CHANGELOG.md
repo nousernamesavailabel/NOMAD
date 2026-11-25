@@ -6,6 +6,11 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.12.3] - 2026-11-25
+
+### Fixed
+- **Add Device Here on a tribe map no longer loses the device now and then.** `add_device` took the map open before the Add Device dialog opened and added the device to that map once it was OK'd. If others' changes to the tribe map arrived while the dialog was open (the Map Watcher, monitoring, syslog), `reload_from_tribe` replaced the map open with a fresh copy, so the device went on the old copy, which nothing drew or saved. Now others' changes wait while any dialog is open, as they already did during a drag (`QApplication.activeModalWidget()`, one retry every 2 s through `retry_tribe_reload`). `add_device` also adds the device to the map open when the dialog is OK'd, and drops the link if the device it was to link to is gone.
+
 ## [2.12.2] - 2026-11-25
 
 ### Fixed

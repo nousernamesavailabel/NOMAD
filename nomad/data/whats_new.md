@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.12.3] - 2026-11-25
+
+- **Fixed:** on a tribe map, right-click > **Add Device Here** sometimes didn't add the device, so you had to add it again. It's added the first time now.
+
 ## [2.12.2] - 2026-11-25
 
 - **Fixed:** after uninstalling the Tribe Server from a computer, NOMAD on that computer (run as administrator) no longer tries to reach a tribe server at 127.0.0.1. It uses the tribe key file you connected with.

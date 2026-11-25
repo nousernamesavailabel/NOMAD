@@ -215,6 +215,7 @@ class NetworkMapTab(QWidget):
         self.unopened = ""  # The map open last time, when it couldn't be reopened: still the one to try next time
         self.restoring_switches = False  # Turning Monitor and Watch back on as they were: nothing new to note
         self.tribe_seen = None  # Its items as last loaded or saved here: saves send only what changed from them
+        self.tribe_reload_waiting = False  # Others' changes held back (a dialog open, a drag): one retry is due
         self.tribe = TribeSync(self, key_loader=self.tribe_key)
         self.watcher = MapWatcher(self)
         self.record_shown = None  # The name of the monitoring record the Monitor is keeping (monitor_record)
@@ -3441,7 +3442,14 @@ class NetworkMapTab(QWidget):
         dialog = DeviceDialog(network_map, linked_to=linked_to, parent=parent or self, address=address, name=name)
         if dialog.exec_() != QDialog.Accepted:
             return None
-        device = put_device(network_map, *dialog.values())
+        device, link = dialog.values()
+        if self.network_map is not None and network_map is not self.network_map:
+            # The map open was replaced while the dialog was open (others' changes to a tribe map): add it to the
+            # map open now, or it's added to one nothing shows or saves
+            network_map = self.network_map
+            if link is not None and link.a not in network_map.devices:
+                link = None  # What it was to be linked to is gone
+        device = put_device(network_map, device, link)
         first = self.network_map is None
         if first:
             self.show_map(network_map)
@@ -4607,8 +4615,12 @@ class NetworkMapTab(QWidget):
         """Others changed the tribe map open: show their changes, keeping the view where it is."""
         if self.tribe_map_id is None or self.network_map is None:
             return
-        if not self.can_watch_now():  # Mid-crawl or mid-drag: try again shortly
-            QTimer.singleShot(2000, self.reload_from_tribe)
+        # Mid-crawl, mid-drag, or a dialog open (Add Device, Edit Device...) that changes the map it was opened on
+        # when it's OK'd: replacing the map now would lose that change. Try again shortly.
+        if not self.can_watch_now() or QApplication.activeModalWidget() is not None:
+            if not self.tribe_reload_waiting:
+                self.tribe_reload_waiting = True
+                QTimer.singleShot(2000, self.retry_tribe_reload)
             return
         self.flush_save()
         newer, settings, self.tribe_seen = self.tribe.maps.snapshot(self.tribe_map_id)
@@ -4620,6 +4632,10 @@ class NetworkMapTab(QWidget):
         self.apply_tribe_settings(settings, {})
         self.redraw_keeping_view()
         self.update_watch_label()
+
+    def retry_tribe_reload(self):
+        self.tribe_reload_waiting = False
+        self.reload_from_tribe()
 
     def redraw_keeping_view(self, show=None, select=None):
         """Draw the map open again, keeping the view where it was, what was selected and which hosts were open."""
