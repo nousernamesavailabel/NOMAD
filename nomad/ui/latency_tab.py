@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDoubleSpin
     QTableWidgetItem, QVBoxLayout, QWidget
 
 from ..icmp import IcmpClient, resolve_host
+from ..tcpcheck import REFUSED, TIMEOUT, connect_time, split_target
 from ..latency import DEFAULT_WINDOW_SECONDS, WINDOW_OPTIONS, CsvLog, LatencyTarget, autoscale, \
     host_problem, same_host, targets_from_dicts
 from ..system import log_dir
@@ -36,19 +37,25 @@ class LatencyThread(StoppableThread):
 
     def run(self):
         address, client = None, None
+        tcp = split_target(self.host)  # (host, port) to time a TCP connection to, instead of pinging
         try:
             while not self.stopping:
                 started = time.monotonic()
                 rtt, ttl, error = None, None, ""
                 try:
-                    if client is None:  # Resolved on first use, and retried while the name doesn't resolve
-                        address, family = resolve_host(self.host)
-                        client = IcmpClient(family)
-                    reply = client.echo(address, timeout=self.timeout)
-                    if reply.ok:
-                        rtt, ttl = float(reply.rtt), reply.ttl
+                    if tcp is not None:
+                        if address is None:  # Resolved on first use, and retried while the name doesn't resolve
+                            address, _ = resolve_host(tcp[0])
+                        rtt, error = tcp_sample(address, tcp[1], self.timeout)
                     else:
-                        error = reply.message.rstrip(".")
+                        if client is None:  # Resolved on first use, and retried while the name doesn't resolve
+                            address, family = resolve_host(self.host)
+                            client = IcmpClient(family)
+                        reply = client.echo(address, timeout=self.timeout)
+                        if reply.ok:
+                            rtt, ttl = float(reply.rtt), reply.ttl
+                        else:
+                            error = reply.message.rstrip(".")
                 except (OSError, ValueError) as problem:
                     error = str(problem).rstrip(".")
                 if self.stopping:
@@ -58,6 +65,19 @@ class LatencyThread(StoppableThread):
         finally:
             if client is not None:
                 client.close()
+
+
+def tcp_sample(address, port, timeout_ms):
+    """(rtt ms or None, error) of one TCP connection to the port: refused counts as lost, as it says nothing
+    listens there."""
+    result = connect_time(address, port, timeout_ms / 1000)
+    if result.ok:
+        return result.rtt, ""
+    if result.outcome == REFUSED:
+        return None, f"TCP {port} refused (nothing listening)"
+    if result.outcome == TIMEOUT:
+        return None, f"No answer on TCP {port}"
+    return None, f"TCP {port}: {result.error or 'failed'}"
 
 
 def swatch_icon(color):
@@ -186,7 +206,10 @@ class LatencyTab(QWidget):
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("Name")
         self.host_input = QLineEdit()
-        self.host_input.setPlaceholderText("Host name or IP address")
+        self.host_input.setPlaceholderText("Host name or IP address (host:443 for TCP)")
+        self.host_input.setToolTip("A host to ping, or for one that drops ping (a web server), host:port or an "
+                                   "http(s):// address: the time a TCP connection to that port takes to open is "
+                                   "timed instead. Nothing is sent over it.")
         self.add_button = QPushButton("Add / Update")
         self.add_button.setToolTip("Add a target, rename the target for this host, or change the host of the "
                                    "target with this name.")

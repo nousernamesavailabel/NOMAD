@@ -14,18 +14,25 @@ from PyQt5.QtWidgets import QApplication, QGraphicsItem, QGraphicsLineItem, QGra
 from ..netmap.l3 import HOP, STAR, SUBNET
 from ..netmap.overlays import DASH, DOT, TUNNEL_COLORS, Mark
 from ..netmap.layout import GROUP_PAD, GROUP_TITLE, NODE_HEIGHT, NODE_WIDTH
+from ..netmap import checks
 from ..netmap.monitor import DOWN, UNKNOWN, UP
 from ..netmap.monitor_record import not_checked_text, percent_text, short_duration, uptime_text
 from ..netmap.vlans import ACCESS, NATIVE, ONE_END, TAGGED
 from ..netmap.model import AP, AP_DOWN, BUILDING, FIREWALL, GROUP_KINDS, KIND_NAMES, NO_SNMP, ROOM, ROUTER, \
-    SERVER, SHARED_PORT_HOSTS, SITE, SNMP, SWITCH, UNREACHABLE, WLC
+    SERVER, SHARED_PORT_HOSTS, SITE, SNMP, SWITCH, UNREACHABLE, WEB, WLC
 from .theme import COLORS
 
 KIND_COLORS = {SWITCH: COLORS["link"], ROUTER: COLORS["accent"], FIREWALL: "#ff9f43", WLC: "#f78fb3",
-               AP: "#c792ea", SERVER: "#4ecdc4"}
+               AP: "#c792ea", SERVER: "#4ecdc4", WEB: "#9aa5ff"}
 STATUS_COLORS = {UP: COLORS["success"], DOWN: COLORS["error"], UNKNOWN: COLORS["muted"]}
-KIND_TAGS = {SWITCH: "SW", ROUTER: "RTR", FIREWALL: "FW", WLC: "WLC", AP: "AP", SERVER: "SRV"}
+KIND_TAGS = {SWITCH: "SW", ROUTER: "RTR", FIREWALL: "FW", WLC: "WLC", AP: "AP", SERVER: "SRV", WEB: "WEB"}
 STRIP_WIDTH = 34
+
+
+def short_warning(text):
+    """"HTTP 503" from "HTTP 503 Service Unavailable": a warning short enough for a device's box."""
+    words = (text or "").split()
+    return " ".join(words[:2]) if words[:1] == ["HTTP"] else text
 BADGE_HEIGHT = 20
 NEWS_HEIGHT = 15  # The NEW tag over a device found by watching
 PORT_WIDTH = 210
@@ -86,8 +93,9 @@ def via_router(via):
     return via.split(" (vrf ", 1)[0]
 
 
-def probe_text(via):
-    return f"Checked from {via} with an IP SLA ping"
+def probe_text(via, how=""):
+    """The tooltip's line for a device checked from a router; how: "TCP 443" for a tcp-connect probe."""
+    return f"Checked from {via} with an IP SLA " + (f"TCP connect ({how})" if how else "ping")
 
 
 def host_line(host):
@@ -286,8 +294,14 @@ class DeviceItem(NodeItem):
         if device.ap_status:
             tip.append(f"{'Down' if self.ap_down else 'Up'}, as its controller {device.controller} says"
                        + (f" (AP group {device.ap_group})" if device.ap_group else ""))
+        how = checks.short_text(checks.spec_of(device))  # "TCP 443" for a device not pinged (a web server)
+        if how and (state is None or not state.via):
+            line = f"Monitored on {how}"
+            if state is not None and state.status == UP and state.problem:
+                line += f", with a warning: {state.problem}"
+            tip.append(line)
         if state is not None and state.via:
-            tip.append(probe_text(state.via))
+            tip.append(probe_text(state.via, f"TCP {checks.spec_of(device).tcp_port}" if how else ""))
         if state is not None and state.uptime:
             tip.append(f"Uptime: {uptime_text(state.uptime)}")
         if state is not None and state.source:
@@ -295,7 +309,8 @@ class DeviceItem(NodeItem):
         if state is not None and not state.exact and state.status in (UP, DOWN):
             tip.append("+: monitoring started again after it last changed, so it's been like this at least that long")
         if self.pings_now:
-            tip.append("Answers ping now (it didn't when crawled): right-click > Check SNMP Again to note it")
+            tip.append(f"Answers {'on ' + how if how else 'ping'} now (it didn't when crawled): right-click > Check "
+                       "SNMP Again to note it")
         if self.host_count:
             tip.append(f"{self.host_count} hosts: double-click to show them by port")
         tip.append(self.lock_note())
@@ -388,6 +403,11 @@ class DeviceItem(NodeItem):
             parts.append(percent_text(state.uptime["24h"]))
         return " · ".join(parts)
 
+    def short_source(self, source):
+        """"Pings, no SNMP", or for a device checked on a port (a web server) "TCP 443, no SNMP"."""
+        how = checks.short_text(checks.spec_of(self.device)) if source == NO_SNMP else ""
+        return f"{how}, no SNMP" if how else SHORT_SOURCE_NAMES[source]
+
     def detail_lines(self):
         """The two lines under its name, each (text, color): its address (and time to answer while it's up), then
         while monitored how long it's been down or up with its uptime over 24 hours (or why it can't be checked, or
@@ -401,6 +421,8 @@ class DeviceItem(NodeItem):
             lines.append((not_checked_text(state), COLORS["muted"]))
         elif state is not None and state.status == DOWN:
             lines.append((self.lasted_text("Down"), COLORS["error"]))
+        elif state is not None and state.status == UP and state.problem:  # A web server answering HTTP 503
+            lines.append((f"Warning: {short_warning(state.problem)}", COLORS["warning"]))
         elif state is not None and state.problem:
             lines.append((f"Can't check: {state.problem}", COLORS["warning"]))
         elif state is not None and state.via:  # Just the router: the box hasn't room for its VRF (the tooltip has)
@@ -412,9 +434,9 @@ class DeviceItem(NodeItem):
         elif state is not None and state.status == UNKNOWN:
             lines.append(("Being checked", COLORS["muted"]))
         elif self.pings_now:
-            lines.append((SHORT_SOURCE_NAMES[NO_SNMP], COLORS["warning"]))
+            lines.append((self.short_source(NO_SNMP), COLORS["warning"]))
         elif device.source in (NO_SNMP, UNREACHABLE):
-            lines.append((SHORT_SOURCE_NAMES[device.source],
+            lines.append((self.short_source(device.source),
                           COLORS["warning" if device.source == NO_SNMP else "error"]))
         elif self.ap_down:
             lines.append(("Down (its controller says)", COLORS["error"]))
@@ -509,7 +531,7 @@ class DeviceItem(NodeItem):
         """Monitoring: green when it answers ping, red when it's down, an empty ring until it's been checked."""
         center = QPointF(self.rect.right() - 10, self.rect.top() + 10)
         status = UNKNOWN if state.stale_at else state.status  # A Map Watcher that stopped: an empty gray ring
-        color = QColor(STATUS_COLORS[status])
+        color = QColor(COLORS["warning"] if status == UP and state.problem else STATUS_COLORS[status])
         painter.setPen(QPen(color, 1.5))
         painter.setBrush(color if status != UNKNOWN else Qt.NoBrush)
         painter.drawEllipse(center, 5.5, 5.5)

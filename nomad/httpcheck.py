@@ -121,8 +121,9 @@ def _connect(address, port, timeout):
     return sock
 
 
-def check_url(url, timeout=10.0):
-    """Fetch url once, timing each step. Never raises: problems end up in result.error."""
+def check_url(url, timeout=10.0, address=None):
+    """Fetch url once, timing each step. Never raises: problems end up in result.error. address: connect there
+    instead of looking the URL's host up (a map device's own address), still asking for the URL's host."""
     result = HttpResult(url)
     parts = urlsplit(url)
     host, secure = parts.hostname, parts.scheme == "https"
@@ -131,8 +132,11 @@ def check_url(url, timeout=10.0):
     try:
         started = time.perf_counter()
         try:
-            ipaddress.ip_address(host)
-            result.address = host
+            if address:
+                result.address = address
+            else:
+                ipaddress.ip_address(host)
+                result.address = host
         except ValueError:
             try:
                 infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)

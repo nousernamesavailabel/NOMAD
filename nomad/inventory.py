@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 
 from .netmap.model import AP, FIREWALL, HOST, KIND_NAMES, NETWORK_KINDS, PHONE, ROUTER, SERVER, SWITCH, UNKNOWN, \
-    WLC, display_name, normalize_name
+    WEB, WLC, display_name, normalize_name
 
 YAML, INI = "yaml", "ini"
 FORMAT_NAMES = {YAML: "YAML", INI: "INI"}
@@ -56,7 +56,8 @@ PLATFORMS = {platform.key: platform for platform in [
 NONE = ""  # No platform: not a device Ansible manages, or not known
 
 KIND_GROUPS = {SWITCH: "switches", ROUTER: "routers", FIREWALL: "firewalls", WLC: "wireless_controllers",
-               AP: "access_points", PHONE: "phones", SERVER: "servers", HOST: "end_hosts", UNKNOWN: "unknown_devices"}
+               AP: "access_points", PHONE: "phones", SERVER: "servers", WEB: "web_servers", HOST: "end_hosts",
+               UNKNOWN: "unknown_devices"}
 RESERVED_GROUPS = {"all", "ungrouped"}
 SSH_PORT = 22
 

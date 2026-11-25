@@ -6,6 +6,17 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-11-25
+
+### Added
+- **Web server, a new kind of map device, monitored without ping.** A device of kind **Web server** (`model.WEB`, tag WEB, set by hand) is checked by opening a TCP connection to port 443. The time the handshake takes is its response time, as an echo's is, so a web server that drops ping still has a status and a round trip time. Nothing is sent over the connection, and it's closed with a reset, so no request is logged and no TIME_WAIT socket is left behind (`nomad/tcpcheck.py`, `connect_time`). A refused port is down ("TCP 443 refused (nothing listening)"); no answer after two tries of 3 s is down too (Windows takes 2 s to report a refused port).
+- **Check with, on any device** (Add / Edit Device): **Ping**, **TCP port**, or **Web address (HTTP or HTTPS)**, kept in `Device.check` ("" for the kind's own way, "ping", "tcp:<port>", "http:<url>"; `netmap/checks.py`). It's a correctable attribute, so it survives a crawl of a device the crawl found, and a hand-added device folded into a found one keeps it. A web address is fetched once per check from the device's own address, asking for the URL's host (`httpcheck.check_url(address=)`): any answer is up, a 5xx is up with a warning, a refused port or no HTTP reply is down. The time shown is the connection's, not the page's.
+- **The warning and the reason a device is down are shown everywhere.** `DeviceStatus.problem` now also holds an up device's warning and a down device's reason when it's checked on a port or web address, so the record, the Map Watcher's summary and status.db carry them without a schema change. The map box shows an amber dot and "Warning: HTTP 503"; the details say "Up, 4 ms, with a warning: ..." or "Down ...: TCP 443 refused"; the Devices table's Status says "Up with a warning"; the Monitor log notes when a warning starts and ends (`Change.noted`) and names the check ("5 ms on TCP 443"). The details pane has a **Checked with** row. The tooltip says what it's monitored on.
+- **Monitor from a Router puts a TCP connect probe on the router for a device checked on a port** (`ip sla N` / `tcp-connect <address> <port> control disable`), read from CISCO-RTTMON-MIB like an echo (rttMonCtrlAdminRttType 6, rttMonEchoAdminTargetPort). A device takes only a probe of its own kind: a web server a tcp-connect probe to its port, a pinged device an ICMP echo (`probes.assign`, `probe_port`). There's no test ping for a TCP probe. tcp-connect takes no source-interface, so the interface picked is turned into its address (`probes.source_address`). The dialogs have a **Checks** column.
+- **The Latency page times a TCP connection for a host written host:port or as an http(s):// address** (`tcpcheck.split_target`), for a host that drops ping. `https://web1` and `web1:443` are the same target.
+- **The NOMAD Dashboard** shows a web server's check in **Checked from** ("TCP 443"), its warning in amber, an amber dot and "Warning: HTTP 503" on the map, and the WEB tag. The Devices CSV has a **Checked with** column.
+- A web server is a Server on the Assets page, in the `web_servers` Ansible group, and an edge device for MAC Finder and the crawl's uplink ports. Checking a hand-added web server (Check SNMP Again, adding it) uses its port, not ping, so one that drops ping isn't marked unreachable.
+
 ## [2.11.3] - 2026-11-25
 
 ### Fixed

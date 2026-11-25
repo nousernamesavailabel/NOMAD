@@ -19,7 +19,7 @@ from ..snmp import V2C, SnmpClient, SnmpError, oid_text, parse_oid
 from ..snmpv3 import credential_from_json, credential_to_json, is_v3, users_from_json
 from . import aruba, collect, hardware, l3, pfsense, vlans
 from .model import AP, AP_DOWN, AP_UP, CONTROLLER, HOST, KIND_NAMES, NEIGHBOR, NETWORK_KINDS, NO_SNMP, PHONE, \
-    ROUTER, SERVER, SNMP, SSH_READ, UNKNOWN, UNREACHABLE, Device, Host, Link, NetworkMap, Trace, device_mac, \
+    ROUTER, SERVER, SNMP, SSH_READ, UNKNOWN, UNREACHABLE, WEB, Device, Host, Link, NetworkMap, Trace, device_mac, \
     display_name, name_mac, normalize_name, port_key, port_sort_key, short_port
 
 log = logging.getLogger(__name__)
@@ -1232,7 +1232,7 @@ class Crawler:
         uplinks = set()
         for link in self.map.links_of(key):
             other = self.map.devices.get(link.other(key))
-            if other is not None and other.kind not in (PHONE, HOST, AP, SERVER):
+            if other is not None and other.kind not in (PHONE, HOST, AP, SERVER, WEB):
                 uplinks.add(port_key(link.port_on(key)))
         members = {}
         for member, parent in tables.lag_parents.items():

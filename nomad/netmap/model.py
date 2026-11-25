@@ -10,9 +10,11 @@ FORMAT_VERSION = 1
 SWITCH, ROUTER, FIREWALL, AP, PHONE, HOST, UNKNOWN = "switch", "router", "firewall", "ap", "phone", "host", "unknown"
 SERVER = "server"  # Only set by hand: the crawl shows servers as hosts on their switch port
 WLC = "wlc"  # A wireless controller (Aruba): its access points and their Wi-Fi clients are read from it
+WEB = "web"  # A web server, set by hand: monitored on its web port (TCP 443 unless changed), so it needn't answer ping
 NETWORK_KINDS = {SWITCH, ROUTER, FIREWALL, WLC}  # Worth asking over SNMP, and whose links carry others' traffic
 KIND_NAMES = {SWITCH: "Switch", ROUTER: "Router", FIREWALL: "Firewall", WLC: "Wireless controller",
-              AP: "Access point", PHONE: "Phone", HOST: "Host", SERVER: "Server", UNKNOWN: "Unknown"}
+              AP: "Access point", PHONE: "Phone", HOST: "Host", SERVER: "Server", WEB: "Web server",
+              UNKNOWN: "Unknown"}
 
 # How a device was found
 SNMP = "snmp"  # Answered SNMP: its neighbors, MAC and ARP tables were read
@@ -35,8 +37,10 @@ SITE, BUILDING, ROOM = "site", "building", "room"
 GROUP_KINDS = {SITE: "Site", BUILDING: "Building", ROOM: "Room"}
 PARENT_KIND = {BUILDING: SITE, ROOM: BUILDING}  # The kind of group each kind can be in
 
-CORRECTABLE = ("name", "mgmt_ip", "kind", "platform", "note")  # What can be corrected by hand on a device found
-CORRECTED_NAMES = {"name": "Name", "mgmt_ip": "IP address", "kind": "Kind", "platform": "Model", "note": "Note"}
+# What can be corrected by hand on a device found
+CORRECTABLE = ("name", "mgmt_ip", "kind", "platform", "note", "check")
+CORRECTED_NAMES = {"name": "Name", "mgmt_ip": "IP address", "kind": "Kind", "platform": "Model", "note": "Note",
+                   "check": "Check with"}
 
 NEIGHBOR_PROTOCOLS = {"cdp", "lldp"}  # A link from a device's neighbor tables (not traceroute's, or by subnet)
 
@@ -163,6 +167,9 @@ class Device:
     # Its CDP or LLDP table couldn't all be read (a timeout) when it was last read, so a link it didn't give then may
     # still be there
     neighbors_partial: bool = False
+    # How monitoring checks it (netmap/checks.py): "" for its kind's way (ping; TCP 443 for a web server), "ping",
+    # "tcp:<port>", or "http:<url>"
+    check: str = ""
 
     @property
     def label(self):
@@ -197,7 +204,12 @@ class Device:
     def found_by(self):
         """For the Devices table and the details: how it got on the map, and whether it answers SNMP."""
         names = MANUAL_SOURCE_NAMES if self.manual else SOURCE_NAMES
-        return names.get(self.source, self.source)
+        text = names.get(self.source, self.source)
+        if self.source == NO_SNMP:  # Checked on a port (a web server): it answered there, not to ping
+            from .checks import short_text, spec_of
+            how = short_text(spec_of(self))
+            text = text.replace("Pings", f"Answers on {how}").replace("pings", f"answers on {how}") if how else text
+        return text
 
     def owns(self, address):
         """Whether the address is one of the device's."""
@@ -574,7 +586,7 @@ class NetworkMap:
         a crawled one between the same two devices. A found device in new (just added to the map) takes key's
         place rather than where the crawl drew it."""
         old = self.devices[key]
-        for attribute in ("name", "mgmt_ip", "platform", "note", "software", "serial", "mac"):
+        for attribute in ("name", "mgmt_ip", "platform", "note", "software", "serial", "mac", "check"):
             if not getattr(found, attribute):
                 setattr(found, attribute, getattr(old, attribute))
         if found.kind == UNKNOWN:

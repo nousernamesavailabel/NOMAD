@@ -27,7 +27,10 @@ class DeviceStatus:
     fails: int = 0  # Polls in a row with no answer
     checked: float = 0.0  # time.time() of the last poll
     via: str = ""  # Checked from a router: "R5 (vrf MGMT-B)" ("" for a ping from this computer)
-    problem: str = ""  # Unknown because it can't be checked: why ("R5 isn't answering SNMP")
+    # Unknown: why it can't be checked ("R5 isn't answering SNMP"). Up: a warning, for a device checked on a port or
+    # web address that answers with trouble ("HTTP 503 Service Unavailable"). Down: why, for one checked that way
+    # ("TCP 443 refused (nothing listening)"). Ping leaves it "" while up or down
+    problem: str = ""
     # How it's shown (monitor_record fills these in; the tracker leaves them be):
     exact: bool = True  # False: since is only when monitoring first saw it like this ("up for at least...")
     uptime: dict = field(default_factory=dict)  # "24h"/"7d"/"30d" -> fraction of the time it was up
@@ -43,7 +46,8 @@ class Change:
     lasted: Optional[float] = None  # How long it had been in the status before, in seconds (None the first time)
     rtt: Optional[int] = None
     via: str = ""
-    problem: str = ""
+    problem: str = ""  # Why it can't be checked, why it's down, or a warning while up (DeviceStatus.problem)
+    noted: bool = False  # Not a change of status: an up device's warning started, changed or ended
 
 
 def ping(address, tries=PING_TRIES, timeout=PING_TIMEOUT_MS):
@@ -59,13 +63,30 @@ def ping(address, tries=PING_TRIES, timeout=PING_TIMEOUT_MS):
     return None
 
 
-def poll(targets, pinger=ping, workers=WORKERS):
-    """Ping every {key: address} at once. Returns {key: rtt or None}."""
+def poll(targets, pinger=ping, workers=WORKERS, checks=None, notes=None, runner=None):
+    """Ping every {key: address} at once. Returns {key: rtt or None}. checks: {key: checks.CheckSpec} for the devices
+    checked some other way (a TCP port, a web address), run by runner (checks.run); notes, a dict, gets each of
+    their notes (why there was no answer, or a warning)."""
     if not targets:
         return {}
+    checks = {key: spec for key, spec in (checks or {}).items() if key in targets and not spec.pings}
+    if checks and runner is None:
+        from .checks import run as runner
+
+    def check(key):
+        if key not in checks:
+            return pinger(targets[key]), ""
+        try:
+            outcome = runner(checks[key], targets[key])
+        except Exception as error:  # One device's trouble shouldn't stop the poll
+            return None, str(error) or "the check failed"
+        return outcome.rtt, outcome.note
+
     with ThreadPoolExecutor(max_workers=min(workers, len(targets))) as executor:
-        results = dict(zip(targets, executor.map(pinger, targets.values())))
-    return results
+        found = dict(zip(targets, executor.map(check, list(targets))))
+    if notes is not None:
+        notes.update({key: note for key, (_, note) in found.items() if key in checks})
+    return {key: rtt for key, (rtt, _) in found.items()}
 
 
 class StatusTracker:
@@ -82,28 +103,37 @@ class StatusTracker:
         """Drop devices no longer on the map."""
         self.devices = {key: status for key, status in self.devices.items() if key in keys}
 
-    def update(self, results, via=None):
-        """Take a poll's {key: rtt or None} (via: {key: the router it was checked from}). Returns the Changes of
-        status it caused."""
+    def update(self, results, via=None, notes=None):
+        """Take a poll's {key: rtt or None} (via: {key: the router it was checked from}; notes: {key: why there was
+        no answer, or a warning while it answers}, for devices checked on a port or web address). Returns the
+        Changes it caused: of status, and of an up device's warning."""
         now = self.clock()
-        via = via or {}
+        via, notes = via or {}, notes or {}
         changes = []
         for key, rtt in results.items():
             state = self.devices.setdefault(key, DeviceStatus(since=now, exact=False))
-            state.checked, state.via, state.problem = now, via.get(key, ""), ""
+            was_status, was_note = state.status, state.problem
+            note = notes.get(key, "")
+            state.checked, state.via = now, via.get(key, "")
             if rtt is not None:
-                state.fails, state.rtt = 0, rtt
+                state.fails, state.rtt, state.problem = 0, rtt, note
                 new = UP
             else:
                 state.fails += 1
                 state.rtt = None
                 new = DOWN if state.fails >= self.fails_for_down else state.status
-                if state.status == UNKNOWN and new == UNKNOWN:
+                if new == UNKNOWN:
+                    state.problem = ""
                     continue  # Not heard from yet: wait for the second miss before calling it down
-            if new != state.status:
-                lasted = now - state.since if state.status != UNKNOWN else None
-                changes.append(Change(key, new, now, lasted, rtt, state.via))
+                if new == DOWN:
+                    state.problem = note
+                # Up, but missed once: still up, and its warning stands until it answers again
+            if new != was_status:
+                lasted = now - state.since if was_status != UNKNOWN else None
+                changes.append(Change(key, new, now, lasted, rtt, state.via, state.problem))
                 state.status, state.since, state.exact = new, now, lasted is not None
+            elif new == UP and rtt is not None and state.problem != was_note:
+                changes.append(Change(key, UP, now, now - state.since, rtt, state.via, state.problem, noted=True))
         return changes
 
     def cannot_check(self, problems, via=None):
@@ -146,20 +176,30 @@ def duration_text(seconds):
     return f"{days} day{'' if days == 1 else 's'} {hours} h" if hours else f"{days} day{'' if days == 1 else 's'}"
 
 
-def change_text(change, label, address):
-    """A line for the Monitor log."""
+def change_text(change, label, address, how=""):
+    """A line for the Monitor log. how: what checks the device when it isn't ping ("TCP 443")."""
     name = f"{label} ({address})" if address and address != label else label
     if change.status == UNKNOWN:
         return f"{name} can't be checked: {change.problem or 'no reason given'}"
+    if change.noted:
+        if not change.problem:
+            return f"{name} answers without a warning again"
+        return f"{name} answers with a warning: {change.problem}" + \
+            (f" ({change.rtt} ms)" if change.rtt is not None else "")
     if change.status == DOWN:
-        text = f"{name} is down: no answer to " + (f"the IP SLA ping from {change.via}" if change.via else "ping")
+        if change.problem:
+            text = f"{name} is down: {change.problem}" + (f" (checked from {change.via})" if change.via else "")
+        else:
+            text = f"{name} is down: no answer to " + (f"the IP SLA ping from {change.via}" if change.via else "ping")
         if change.lasted is not None:
             text += f" (it had been up for {duration_text(change.lasted)})"
         return text
     text = f"{name} is up"
     if change.lasted is not None:
         text += f" again, after being down for {duration_text(change.lasted)}"
-    details = [f"{change.rtt} ms"] if change.rtt is not None else []
+    details = [f"{change.rtt} ms" + (f" on {how}" if how else "")] if change.rtt is not None else []
     if change.via:
-        details.append(f"pinged from {change.via}")
+        details.append(f"checked from {change.via}" if how else f"pinged from {change.via}")
+    if change.problem:
+        details.append(f"with a warning: {change.problem}")
     return text + (f" ({', '.join(details)})" if details else "")

@@ -22,7 +22,8 @@ from ..ipam.client import ADMIN, current_key, is_tribe_server
 from ..ipam.map_compare import DEVICE as DEVICE_ADDRESS, compare_map
 from ..ipam.reconcile import MAC_DIFFERS, NOT_RECORDED
 from ..ipam.store import IpamError
-from ..netmap import diff, export, hardware, l3, monitor, monitor_record, overlays, shared, store, tunnels, watch
+from ..netmap import checks, diff, export, hardware, l3, monitor, monitor_record, overlays, shared, store, tunnels
+from ..netmap import watch
 from ..netmap import vlan_path
 from ..netmap import vlans as vlan_info
 from ..netmap.details import device_details, hardware_blocks, subnet_details, vlan_blocks, vlan_port_text
@@ -132,9 +133,10 @@ class CheckThread(StoppableThread):
     """Asks devices added by hand whether they answer SNMP (or only ping), as a crawl would, a few at once."""
     checked = pyqtSignal(str, str, object)  # Device key, the address asked, crawl.Check
 
-    def __init__(self, settings, targets, checker, parent=None):
+    def __init__(self, settings, targets, checker, parent=None, pingers=None):
         super().__init__(parent)
         self.settings, self.targets, self.checker = settings, targets, checker  # targets: [(key, address)]
+        self.pingers = dict(pingers or {})  # Key -> what checks it instead of ping (a web server's TCP 443)
 
     def run(self):
         def ask(target):
@@ -142,7 +144,11 @@ class CheckThread(StoppableThread):
             if self.stopping:
                 return
             try:
-                result = self.checker(self.settings, address)
+                pinger = self.pingers.get(key)
+                if pinger is not None:
+                    result = self.checker(self.settings, address, pinger=pinger)
+                else:
+                    result = self.checker(self.settings, address)
             except Exception:  # One device's trouble shouldn't stop the rest
                 log.exception("Checking %s over SNMP failed", address)
                 return
@@ -3752,8 +3758,10 @@ class NetworkMapTab(QWidget):
         self.checking.update(key for key, _ in targets)
         if announce:
             self.announce.update(key for key, _ in targets)
+        pingers = {key: checks.Answers(spec) for key, spec in
+                   ((key, checks.spec_of(devices[key])) for key, _ in targets) if not spec.pings}
         thread = CheckThread(self.crawl_settings([address for _, address in targets]), targets, self.check_device,
-                             self)
+                             self, pingers)
         thread.checked.connect(self.on_checked)
         thread.finished.connect(self.on_check_finished)
         self.check_threads.append(thread)
@@ -3809,9 +3817,12 @@ class NetworkMapTab(QWidget):
                 text, level = (f"{device.label} answers SNMP. Right-click it > Crawl from Here to read its neighbors "
                                "and hosts.", "success")
             elif check.source == NO_SNMP:
-                text, level = f"{device.label}: {check.error}{why}", "warning"
+                how = checks.short_text(checks.spec_of(device))
+                text, level = (f"{device.label} answers on {how}, but not SNMP{why}." if how else
+                               f"{device.label}: {check.error}{why}"), "warning"
             else:
-                text, level = f"{device.label} doesn't answer SNMP or ping{why}.", "error"
+                how = checks.short_text(checks.spec_of(device)) or "ping"
+                text, level = f"{device.label} doesn't answer SNMP or {how}{why}.", "error"
             set_hint(self.status_label, text, level)
 
     # ----------------------------------------------------------------- Sites, buildings and rooms

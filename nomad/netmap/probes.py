@@ -1,6 +1,7 @@
 """Monitoring devices this computer can't reach (they're behind a VRF, or there's no route back to here) from a router
-on the map that can: an IP SLA ICMP echo probe on the router pings the device, and NOMAD reads the probe's latest
-result over SNMP (CISCO-RTTMON-MIB, read-only).
+on the map that can: an IP SLA ICMP echo probe on the router pings the device (or, for a device checked on a TCP port,
+such as a web server that drops ping, a tcp-connect probe opens a connection to that port), and NOMAD reads the
+probe's latest result over SNMP (CISCO-RTTMON-MIB, read-only).
 
 The probes are the shared record. NOMAD tags the ones it makes "NOMAD <device>", so every NOMAD with the map (anyone in
 the tribe, the Map Watcher service) finds them by reading the tags on the map's routers and matching each probe's
@@ -24,11 +25,12 @@ from .model import FIREWALL, NETWORK_KINDS, SNMP, port_key, short_port
 RTT_MON = "1.3.6.1.4.1.9.9.42.1.2"
 CTRL_OWNER = f"{RTT_MON}.1.1.2"  # rttMonCtrlAdminOwner
 CTRL_TAG = f"{RTT_MON}.1.1.3"  # rttMonCtrlAdminTag
-CTRL_RTT_TYPE = f"{RTT_MON}.1.1.4"  # rttMonCtrlAdminRttType: 1 echo
+CTRL_RTT_TYPE = f"{RTT_MON}.1.1.4"  # rttMonCtrlAdminRttType: 1 echo, 6 tcpConnect
 CTRL_FREQUENCY = f"{RTT_MON}.1.1.6"  # Seconds
 CTRL_TIMEOUT = f"{RTT_MON}.1.1.7"  # Milliseconds
 ECHO_PROTOCOL = f"{RTT_MON}.2.1.1"  # rttMonEchoAdminProtocol: 2 ipIcmpEcho
 ECHO_TARGET = f"{RTT_MON}.2.1.2"  # rttMonEchoAdminTargetAddress: 4 bytes for IPv4
+ECHO_TARGET_PORT = f"{RTT_MON}.2.1.5"  # rttMonEchoAdminTargetPort: a tcp-connect probe's
 ECHO_SOURCE = f"{RTT_MON}.2.1.6"  # rttMonEchoAdminSourceAddress: the source-ip or source-interface's, if set
 ECHO_VRF = f"{RTT_MON}.2.1.26"  # rttMonEchoAdminVrfName
 OPER_STATE = f"{RTT_MON}.9.1.10"  # rttMonCtrlOperState: 6 active
@@ -38,6 +40,8 @@ LATEST_TIME = f"{RTT_MON}.10.1.5"  # rttMonLatestRttOperTime: sysUpTime (centise
 SYS_UPTIME = "1.3.6.1.2.1.1.3.0"
 
 ECHO, ICMP_ECHO, ACTIVE, OK = 1, 2, 6, 1
+TCP_CONNECT, TCP_PROTOCOL = 6, 24  # rttMonCtrlAdminRttType tcpConnect, rttMonEchoAdminProtocol ipTcpConn
+SOCKET_ERROR = 16  # A tcp-connect probe's sense for a closed port ("Socket connect error" on IOS XE 17.4)
 SENSES = {0: "other", 1: "OK", 2: "disconnected", 3: "over threshold", 4: "timeout", 5: "busy", 6: "not connected",
           7: "dropped", 8: "sequence error", 9: "verify error", 10: "application specific", 11: "DNS server timeout",
           12: "TCP connect timeout", 13: "HTTP transaction timeout", 14: "DNS query error", 15: "HTTP error",
@@ -62,7 +66,7 @@ WORKERS = 16
 
 @dataclass
 class Probe:
-    """One IP SLA ICMP echo probe NOMAD found on a router."""
+    """One IP SLA ICMP echo (or TCP connect) probe NOMAD found on a router."""
     router: str  # The router's device key
     address: str  # Where NOMAD asks the router over SNMP
     entry: int
@@ -73,6 +77,12 @@ class Probe:
     frequency: int = 0  # Seconds
     state: str = ""  # active, pending...
     source: str = ""  # The address it pings from, when it was given one (source-ip or source-interface)
+    port: int = 0  # A tcp-connect probe's TCP port (0: an ICMP echo)
+
+    @property
+    def what(self):
+        """"ping" or "TCP 443": what the probe checks."""
+        return f"TCP {self.port}" if self.port else "ping"
 
     @property
     def device_label(self):
@@ -159,7 +169,7 @@ def number(value):
 # ----------------------------------------------------------------- Reading the routers
 
 def read_probes(client, router, address):
-    """The router's NOMAD-tagged ICMP echo probes. Raises SnmpError if it doesn't answer."""
+    """The router's NOMAD-tagged ICMP echo and TCP connect probes. Raises SnmpError if it doesn't answer."""
     tags = {}
     for oid, value in client.walk(parse_oid(CTRL_TAG)):
         if not value.is_exception and len(oid) > len(parse_oid(CTRL_TAG)) and is_nomad_tag(text(value)):
@@ -169,12 +179,17 @@ def read_probes(client, router, address):
     for start in range(0, len(entries), PROBES_PER_GET):
         chunk = entries[start:start + PROBES_PER_GET]
         columns = (CTRL_RTT_TYPE, ECHO_PROTOCOL, ECHO_TARGET, ECHO_VRF, CTRL_OWNER, CTRL_FREQUENCY, OPER_STATE,
-                   ECHO_SOURCE)
+                   ECHO_SOURCE, ECHO_TARGET_PORT)
         values = dict(client.get([parse_oid(f"{column}.{entry}") for entry in chunk for column in columns]))
         for entry in chunk:
             row = {column: values.get(parse_oid(f"{column}.{entry}")) for column in columns}
-            if number(row[CTRL_RTT_TYPE]) != ECHO or number(row[ECHO_PROTOCOL]) not in (0, ICMP_ECHO):
-                continue  # Not an ICMP echo (a UDP jitter probe tagged NOMAD, say)
+            kind, protocol = number(row[CTRL_RTT_TYPE]), number(row[ECHO_PROTOCOL])
+            if kind == ECHO and protocol in (0, ICMP_ECHO):
+                port = 0
+            elif kind == TCP_CONNECT and protocol in (0, TCP_PROTOCOL) and number(row[ECHO_TARGET_PORT]):
+                port = number(row[ECHO_TARGET_PORT])
+            else:
+                continue  # Neither (a UDP jitter probe tagged NOMAD, say)
             target = row[ECHO_TARGET]
             target = address_text(target.value) if target is not None and not target.is_exception else ""
             if not target:
@@ -184,7 +199,7 @@ def read_probes(client, router, address):
             found.append(Probe(router, address, entry, target, text(row[ECHO_VRF]), tags[entry],
                                text(row[CTRL_OWNER]), number(row[CTRL_FREQUENCY]),
                                OPER_STATES.get(number(row[OPER_STATE]), ""),
-                               "" if source in ("0.0.0.0", "::") else source))
+                               "" if source in ("0.0.0.0", "::") else source, port))
     return found
 
 
@@ -259,6 +274,18 @@ def stale(probe, reading):
     return ""
 
 
+def reading_result(probe, reading):
+    """(rtt or None, note) a probe's latest result counts as in monitoring: a TCP connect probe's failure says why
+    (an ICMP echo's needs no words: no answer to the IP SLA ping)."""
+    if reading.ok:
+        return reading.rtt, ""
+    if probe.port and reading.sense == SOCKET_ERROR:  # What IOS says when the port is closed (refused)
+        return None, f"TCP {probe.port} refused or unreachable from the router (socket connect error)"
+    if probe.port:
+        return None, f"no TCP connection on port {probe.port} ({SENSES.get(reading.sense, 'error').lower()})"
+    return None, ""
+
+
 # ----------------------------------------------------------------- Which probe is each device's
 
 def can_probe(device):
@@ -275,10 +302,18 @@ def readable_routers(network_map):
     return [key for key, device in network_map.devices.items() if can_probe(device)]
 
 
+def probe_port(device):
+    """The TCP port a probe for the device connects to (a device monitoring checks on a TCP port or web address, such
+    as a web server), or 0 for an ICMP echo (one monitoring pings)."""
+    from .checks import spec_of
+    return spec_of(device).tcp_port
+
+
 def assign(network_map, probes):
     """{device key: Probe}: each device a probe's target belongs to: the device it's the management address of, else
     one with it among its addresses (other than the probe's own router). With more than one for a device, an active
-    probe wins, then the lowest-numbered."""
+    probe wins, then the lowest-numbered. A device checked on a TCP port only takes a tcp-connect probe to that port,
+    and one monitoring pings only an ICMP echo."""
     owners = {device.mgmt_ip: key for key, device in network_map.devices.items() if device.mgmt_ip}
     others = {}
     for key, device in network_map.devices.items():
@@ -287,9 +322,14 @@ def assign(network_map, probes):
                 others.setdefault(address, []).append(key)
     found = {}
     for probe in sorted(probes, key=lambda item: (item.state not in ("", "active"), item.router, item.entry)):
+        def fits(item):
+            return probe_port(network_map.devices[item]) == probe.port
+
         key = owners.get(probe.target)
+        if key is not None and not fits(key):
+            key = None
         if key is None:
-            key = next((item for item in others.get(probe.target, []) if item != probe.router), None)
+            key = next((item for item in others.get(probe.target, []) if item != probe.router and fits(item)), None)
         if key is not None and key not in found:
             found[key] = probe
     return found
@@ -363,6 +403,19 @@ def source_words(source):
     return f"source-ip {source}" if address_ok(source) else f"source-interface {source}"
 
 
+def source_address(device, source):
+    """A tcp-connect probe's source-ip for the source chosen (tcp-connect takes no source-interface): the address
+    itself, or the router's address on that interface; "" when it's "" (the router picks). Raises ValueError for an
+    interface the router has no IPv4 address on."""
+    if not source or address_ok(source):
+        return source
+    for ip, _length, port in (device.interfaces_l3 if device is not None else []):
+        if port and address_ok(ip) and same_source(short_port(port), source):
+            return ip
+    raise ValueError(f"A TCP check's source has to be an address, and NOMAD doesn't know {source}'s: pick it from "
+                     "the list or type the address.")
+
+
 def same_source(one, other):
     """Whether two sources are the same one (GigabitEthernet0/1 and Gi0/1 are)."""
     return port_key(one or "") == port_key(other or "")
@@ -370,11 +423,19 @@ def same_source(one, other):
 
 # ----------------------------------------------------------------- Configuration
 
-def setup_text(entry, target, vrf, tag, owner, frequency=DEFAULT_FREQUENCY, timeout=TIMEOUT_MS, source=""):
+def setup_text(entry, target, vrf, tag, owner, frequency=DEFAULT_FREQUENCY, timeout=TIMEOUT_MS, source="", port=0):
     """The lines that make and start a probe. The threshold goes in before the timeout: IOS won't schedule one whose
     threshold (5000 ms unless set) is over its timeout. source: the interface (or address) it pings from; "" lets
-    the router pick (the way out to the target)."""
-    lines = ["configure terminal", f"ip sla {entry}", f" icmp-echo {target} {source_words(source)}".rstrip()]
+    the router pick (the way out to the target). port: a tcp-connect probe to that TCP port instead of an ICMP echo
+    (source then an address: see source_address), with control messages off, since the target is a web server or
+    such, not an IP SLA responder."""
+    if port:
+        if source and not address_ok(source):
+            raise ValueError(f"A TCP check's source has to be an address, not {source}.")
+        first = f" tcp-connect {target} {port}" + (f" source-ip {source}" if source else "") + " control disable"
+    else:
+        first = f" icmp-echo {target} {source_words(source)}".rstrip()
+    lines = ["configure terminal", f"ip sla {entry}", first]
     if vrf:
         lines.append(f"  vrf {vrf}")
     lines += [f"  tag {tag}"]
@@ -393,12 +454,13 @@ SLA_LINE = re.compile(r"^ip sla (\d+)\s*$")
 
 
 def blank_entry():
-    return {"target": "", "source": "", "vrf": "", "tag": "", "scheduled": False}
+    return {"target": "", "source": "", "vrf": "", "tag": "", "scheduled": False, "port": 0}
 
 
 def parse_sla_config(text_in):
-    """`show running-config | section ip sla` as {entry: {"target", "source", "vrf", "tag", "scheduled"}} (any kind
-    of probe: target is "" for kinds other than ICMP echo; source is its source-interface or source-ip, if any)."""
+    """`show running-config | section ip sla` as {entry: {"target", "source", "vrf", "tag", "scheduled", "port"}}
+    (any kind of probe: target is "" for kinds other than ICMP echo and TCP connect; port is a TCP connect's, 0 for an
+    echo; source is its source-interface or source-ip, if any)."""
     found, current = {}, None
     for raw in (text_in or "").splitlines():
         line = raw.rstrip()
@@ -422,6 +484,10 @@ def parse_sla_config(text_in):
             for keyword in ("source-interface", "source-ip"):
                 if keyword in words[2:-1]:
                     current["source"] = words[words.index(keyword) + 1]
+        elif words[0] == "tcp-connect" and len(words) > 2 and words[2].isdigit():
+            current["target"], current["port"] = words[1], int(words[2])
+            if "source-ip" in words[3:-1]:
+                current["source"] = words[words.index("source-ip") + 1]
         elif words[0] == "vrf" and len(words) > 1:
             current["vrf"] = words[1]
         elif words[0] == "tag":
@@ -437,10 +503,11 @@ def free_entry(used, start=FIRST_ENTRY):
     return entry
 
 
-def existing_entry(config, target, vrf):
-    """The number of a probe already pinging target in vrf (config: parse_sla_config's), or None."""
+def existing_entry(config, target, vrf, port=0):
+    """The number of a probe already pinging target in vrf (or, with a port, connecting to that TCP port of it)
+    (config: parse_sla_config's), or None."""
     for entry, item in sorted(config.items()):
-        if item["target"] == target and item["vrf"] == vrf:
+        if item["target"] == target and item["vrf"] == vrf and item.get("port", 0) == port:
             return entry
     return None
 

@@ -4,6 +4,14 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-11-25
+
+- **New:** a **Web server** kind of device on the Network Map. NOMAD checks it by opening a connection to port 443 instead of pinging it, so a web server that drops ping still shows as up, with its response time. A refused port counts as down.
+- **New:** **Check with** in Add / Edit Device sets how any device is monitored: ping, a TCP port (such as 3389 for RDP), or a web address. A web address that answers with a server error (HTTP 5xx) shows as up with a warning: an amber dot and "Warning: HTTP 503".
+- **New:** **Monitor from a Router** puts a TCP connect probe on the router for a web server, so one this computer can't reach can be checked from a router too.
+- **New:** the **Latency** page can time a host that drops ping: enter host:443 or an https:// address.
+- Update the Map Watcher and NOMAD Dashboard services to check web servers the same way.
+
 ## [2.11.3] - 2026-11-25
 
 - **Fixed:** a device you set up with **Monitor from a Router** no longer shows as Down a few minutes later while its IP SLA is fine. The Map Watcher now finds the new probe within about a minute. Update the Map Watcher service to get it.

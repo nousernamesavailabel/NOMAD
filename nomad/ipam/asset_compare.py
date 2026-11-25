@@ -14,13 +14,14 @@ from dataclasses import dataclass, field, replace
 
 from ..netmap import hardware
 from ..netmap.collect import PHONE as MAP_PHONE, classify
-from ..netmap.model import AP, FIREWALL, PHONE, ROUTER, SERVER, SWITCH, UNKNOWN, WLC, display_name
+from ..netmap.model import AP, FIREWALL, PHONE, ROUTER, SERVER, SWITCH, UNKNOWN, WEB, WLC, display_name
 from .assets import IN_SERVICE, OUT_OF_SERVICE, PART_KINDS, REPLACED, STATUSES, is_part, label, today
 from .store import serial_key
 
 NEW, UPDATE, REPLACE, SAME, CONFLICT = "new", "update", "replace", "same", "conflict"
 ACTION_LABELS = {NEW: "New", UPDATE: "Changed", REPLACE: "Replaced", SAME: "No change", CONFLICT: "Conflict"}
 DEVICE_KINDS = {SWITCH, ROUTER, FIREWALL, WLC, AP, PHONE, SERVER, UNKNOWN}  # Map devices that become assets
+ASSET_KIND_OF = {WEB: SERVER}  # Map kinds that become assets of another kind (a web server is a server)
 COMPARED = ("hostname", "model", "maker", "software", "mgmt_ip", "mac", "kind", "slot", "map_device", "location",
             "serial", "parent_id")
 FIELD_NAMES = {"hostname": "Hostname", "model": "Model", "maker": "Maker", "software": "Software",
@@ -112,9 +113,10 @@ def sightings(network_map, track_parts=True):
     parts when track_parts, and the phones its switches see. Devices only drawn by hand, and computers, aren't."""
     found = []
     for key, device in sorted(network_map.devices.items()):
-        if device.kind not in DEVICE_KINDS or (device.manual and not device.serial):
+        kind = ASSET_KIND_OF.get(device.kind, device.kind)
+        if kind not in DEVICE_KINDS or (device.manual and not device.serial):
             continue
-        found += device_sightings(key, device.kind, device.parts, display_name(device.name), device.software,
+        found += device_sightings(key, kind, device.parts, display_name(device.name), device.software,
                                   device.mgmt_ip, network_map.device_group_label(key), device.platform,
                                   device.serial, device.mac, track_parts)
     for host in network_map.hosts:
@@ -184,7 +186,8 @@ def network_sightings(details, network_map=None, track_parts=True):
             continue
         device = map_device_at(network_map, item.address)
         if device is not None:
-            kind = device.kind if device.kind in DEVICE_KINDS else UNKNOWN
+            kind = ASSET_KIND_OF.get(device.kind, device.kind)
+            kind = kind if kind in DEVICE_KINDS else UNKNOWN
             found += device_sightings(device.key, kind, item.parts, display_name(device.name) or item.hostname,
                                       item.software or device.software, item.address,
                                       network_map.device_group_label(device.key), device.platform,

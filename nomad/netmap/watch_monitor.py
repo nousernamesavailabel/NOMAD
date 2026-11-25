@@ -22,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import counters, monitor, monitor_record, probes, tunnels
+from . import checks, counters, monitor, monitor_record, probes, tunnels
 from .model import SNMP, port_key
 
 log = logging.getLogger(__name__)
@@ -314,6 +314,7 @@ class MonitorRunner:
         self.settings = monitor_settings({"monitor": settings or {}})
         self.client_factory = client_factory or SnmpClient
         self.pinger, self.clock = pinger, clock
+        self.runner = None  # Runs a check on a port or web address (checks.run); tests swap in their own
         self.access = access or AccessFinder(self.client_factory, clock)
         self.states = {map_id: MapState(clock) for map_id in self.map_ids}
         self.stop_event = threading.Event()
@@ -403,7 +404,10 @@ class MonitorRunner:
         state.tracker.forget_others(set(targets))
         labels = {key: device.label for key, device in devices.items()}
         pings = {key: address for key, address in targets.items() if key not in state.probes}
-        results = monitor.poll(pings, self.pinger)
+        specs = {key: spec for key, spec in ((key, checks.spec_of(device)) for key, device in devices.items())
+                 if not spec.pings}
+        notes = {}
+        results = monitor.poll(pings, self.pinger, checks=specs, notes=notes, runner=self.runner)
         if any(rtt is None for rtt in results.values()) and \
                 self.clock() - state.discovered_at > probes.LOOK_AGAIN_AFTER_MISS:
             # Someone may have just given a device it can't ping a probe: look now, not up to DISCOVER_EVERY later
@@ -411,6 +415,7 @@ class MonitorRunner:
             self.discover(map_id, state, network_map, options)
             state.probes = {key: probe for key, probe in state.probes.items() if key in devices}
             results = {key: rtt for key, rtt in results.items() if key not in state.probes}
+            notes = {key: note for key, note in notes.items() if key in results}
             for key, probe in state.probes.items():
                 targets.setdefault(key, probe.target)
         via, problems = {}, {}
@@ -443,14 +448,19 @@ class MonitorRunner:
                     if state.last_results.get(key) == stamp:
                         continue  # No new result since the last poll: it counts once
                     state.last_results[key] = stamp
-                    results[key] = reading.rtt if reading.ok else None
-        changes = state.tracker.update(results, via) + state.tracker.cannot_check(problems, via)
+                    results[key], notes[key] = probes.reading_result(probe, reading)
+        changes = state.tracker.update(results, via, notes) + state.tracker.cannot_check(problems, via)
         logged = []
         for change in changes:
-            if change.status == monitor.UP and change.lasted is None:
+            if change.status == monitor.UP and change.lasted is None and not change.problem:
                 continue  # Answered the first poll: nothing's happened to it
             label = labels.get(change.key, change.key)
-            text = monitor.change_text(change, label, targets.get(change.key, ""))
+            probe = state.probes.get(change.key)
+            if probe is not None:
+                how = f"TCP {probe.port}" if probe.port else ""
+            else:
+                how = checks.short_text(specs[change.key]) if change.key in specs else ""
+            text = monitor.change_text(change, label, targets.get(change.key, ""), how)
             log.info("%s", text)
             logged.append((change, label, text))
         self.store.add_changes(map_id, logged)

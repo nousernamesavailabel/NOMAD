@@ -1,7 +1,7 @@
 import csv
 
 from nomad.latency import CSV_HEADER, DEFAULT_TARGETS, HISTORY_SECONDS, CsvLog, LatencyTarget, autoscale, \
-    host_problem, latency_level, targets_from_dicts
+    host_problem, latency_level, same_host, targets_from_dicts
 
 
 def test_stats_cover_only_the_window():
@@ -83,8 +83,18 @@ def test_host_problem_rejects_bad_hosts():
     assert host_problem("  ") == "Enter a host name or IP address."
     for host in ("10.1.1.256", "10.1.1", "10.1.1.1.1", "10..1.1", "192.168.001.1"):
         assert "not a valid IPv4 address" in host_problem(host), host
-    for host in ("2001:db8::1::2", "fe80::12345", "1.2.3.4:80"):
+    for host in ("2001:db8::1::2", "fe80::12345", "1.2.3.4::80"):
         assert "not a valid IPv6 address" in host_problem(host), host
     assert "no zone" in host_problem("fe80::1%")
-    for host in ("bad host", "-router", "router-", "a..b", "http://x", "x" * 64):
+    for host in ("bad host", "-router", "router-", "a..b", "x" * 64, "bad host:80"):
         assert "not a valid host name" in host_problem(host), host
+    assert "only http:// and https://" in host_problem("ftp://x")
+    assert "isn't between 1 and 65535" in host_problem("web1:70000")
+
+
+def test_tcp_targets_are_hosts_with_a_port():
+    for host in ("1.2.3.4:80", "web1:443", "[2001:db8::1]:443", "https://web1", "http://web1:8080/health"):
+        assert host_problem(host) == "", host
+    assert same_host("https://Web1/", "web1:443")  # The same host and port
+    assert not same_host("web1", "web1:443")  # Pinging it is another target
+    assert not same_host("web1:443", "web1:80")

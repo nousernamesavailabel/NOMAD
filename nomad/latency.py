@@ -1,4 +1,6 @@
-"""Latency monitoring (formerly the Latenct tool): ping several targets continuously and keep their history."""
+"""Latency monitoring (formerly the Latenct tool): ping several targets continuously and keep their history. A target
+written host:port or as an http(s):// address is timed by opening a TCP connection to that port instead (for a web
+server that drops ping): the handshake is one round trip, as an echo is."""
 import csv
 import ipaddress
 import os
@@ -7,6 +9,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
+
+from .tcpcheck import port_problem, split_target
 
 HISTORY_SECONDS = 8 * 60 * 60  # History kept per target, so the view window can be changed at any time
 WINDOW_OPTIONS = [("Last 1 min", 60), ("Last 5 min", 300), ("Last 10 min", 600), ("Last 30 min", 1800),
@@ -23,9 +27,13 @@ HOST_LABEL = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?")
 
 def same_host(first, second):
     """Whether two target hosts are the same: the same address however it's written (2001:db8::1 and
-    2001:DB8:0::1), or the same name in any case (and without a trailing dot)."""
+    2001:DB8:0::1), or the same name in any case (and without a trailing dot). A TCP target is its host and port
+    (https://web1 is web1:443)."""
     def key(text):
         text = text.strip()
+        tcp = split_target(text)
+        if tcp is not None:
+            return f"{key(tcp[0])}#{tcp[1]}"
         address, percent, scope = text.partition("%")
         try:
             return str(ipaddress.ip_address(address)) + percent + scope.lower()
@@ -35,10 +43,16 @@ def same_host(first, second):
 
 
 def host_problem(text):
-    """Why text can't be a target host (an IPv4 or IPv6 address or a host name), or "" when it can."""
+    """Why text can't be a target host (an IPv4 or IPv6 address or a host name, or one of those with a TCP port:
+    host:443, [2001:db8::1]:443 or https://host), or "" when it can."""
     host = text.strip()
     if not host:
         return "Enter a host name or IP address."
+    tcp = split_target(host)
+    if tcp is not None:
+        return port_problem(tcp[1]) or host_problem(tcp[0])
+    if "://" in host:
+        return f"'{host}': only http:// and https:// addresses can be timed (on their TCP port)."
     if ":" in host:
         address, percent, scope = host.partition("%")
         try:

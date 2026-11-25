@@ -5,7 +5,7 @@
 window.NomadMap = (function () {
   const SVG = "http://www.w3.org/2000/svg";
   const W = 170, H = 58, STRIP = 34, R = 7;
-  const KIND_TAGS = {switch: "SW", router: "RTR", firewall: "FW", wlc: "WLC", ap: "AP", server: "SRV"};
+  const KIND_TAGS = {switch: "SW", router: "RTR", firewall: "FW", wlc: "WLC", ap: "AP", server: "SRV", web: "WEB"};
   const GROUP_KINDS = {site: "Site", building: "Building", room: "Room"};
   const MONITORED = new Set(["up", "down", "unknown", "cant"]);
   // The strip down a device's left side: its rounded corners on the left only
@@ -46,6 +46,12 @@ window.NomadMap = (function () {
   }
 
   // "R5" from "R5 (vrf MGMT-B)": the router a device is checked from, without the VRF (as NOMAD's boxes say it)
+  // "HTTP 503" from "HTTP 503 Service Unavailable": a web server's warning, short enough for its box
+  function shortWarning(text) {
+    const words = String(text || "").split(/\s+/);
+    return words[0] === "HTTP" ? words.slice(0, 2).join(" ") : String(text || "");
+  }
+
   function viaRouter(via) {
     return String(via || "").split(" (vrf ")[0];
   }
@@ -64,6 +70,7 @@ window.NomadMap = (function () {
     if (node.stale_text) second = [node.stale_text, ""];  // The Map Watcher stopped: grayed, as it was then
     else if (node.status === "down") second = [lasted("Down"), "bad"];
     else if (node.status === "cant") second = [`Can't check: ${node.problem || ""}`, "warn"];
+    else if (node.status === "up" && node.problem) second = [`Warning: ${shortWarning(node.problem)}`, "warn"];
     else if (node.via) second = [[`Via ${viaRouter(node.via)}`, uptime].filter(Boolean).join(" · "), ""];
     else if (node.status === "up") second = [lasted("Up"), "good"];
     else if (node.status === "unknown") second = ["Being checked", ""];
@@ -136,7 +143,10 @@ window.NomadMap = (function () {
         detailLines(node).forEach(([text, tone], row) => {
           g.appendChild(el("text", {class: `sub ${tone}`, x: STRIP + 6, y: 34 + row * 15}, trim(text, 22)));
         });
-        if (monitored) g.appendChild(el("circle", {class: "dot", cx: W - 10, cy: 10, r: 5.5}));
+        if (monitored) {
+          g.appendChild(el("circle", {class: `dot${node.status === "up" && node.problem ? " warn" : ""}`,
+            cx: W - 10, cy: 10, r: 5.5}));
+        }
       }
       const uptimeTip = node.uptime !== null && node.uptime !== undefined ? `\nUp ${node.uptime}% of the last 24 hours` : "";
       g.appendChild(el("title", {}, node.label + (node.status_text ? ` – ${node.status_text}` : "") + uptimeTip));

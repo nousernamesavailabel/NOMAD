@@ -29,6 +29,10 @@ def shown_value(attribute, value):
     """How a value the crawl found reads: a kind's name, or "nothing"."""
     if attribute == "kind":
         return KIND_NAMES.get(value, value)
+    if attribute == "check":
+        from .checks import describe, parse
+        spec = parse(value)
+        return describe(spec) if spec is not None else "its kind's way"
     return value or "nothing"
 
 
@@ -87,7 +91,10 @@ def device_details(network_map, key, status="", status_rows=(), live=None):
     if device is None:
         return None
     kind = KIND_NAMES.get(device.kind, device.kind)
-    rows = [("Status", status), *status_rows, *disk_rows(device), *wireless_rows(network_map, key),
+    from .checks import describe, spec_of
+    spec = spec_of(device)
+    rows = [("Status", status), ("Checked with", "" if spec.pings else describe(spec)), *status_rows,
+            *disk_rows(device), *wireless_rows(network_map, key),
             ("Management IP", device.mgmt_ip), ("Group", network_map.device_group_label(key)),
             ("Found by", device.found_by), ("Hops from start", "" if device.manual else str(device.hops)),
             ("Addresses", ", ".join(device.addresses)), ("Problem", device.error), ("Note", device.note),

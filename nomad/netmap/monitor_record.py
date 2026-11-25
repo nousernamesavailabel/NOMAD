@@ -250,10 +250,11 @@ def status_text(state, now=None):
         started = f" (since {when.strftime('%H:%M:%S' if when.date() == today else '%Y-%m-%d %H:%M')})"
     lasted = duration_since(state, now)
     lasted = f" {lasted}" if lasted else ""
+    why = f": {state.problem}" if state.problem else ""  # Checked on a port or web address: why, or a warning
     if state.status == DOWN:
-        return f"Down{lasted}{started}{via}"
+        return f"Down{lasted}{started}{via}{why}"
     rtt = f", {'<1' if state.rtt < 1 else state.rtt} ms" if state.rtt is not None else ""
-    return f"Up{lasted}{rtt}{started}{via}"
+    return f"Up{lasted}{rtt}{started}{via}" + (f", with a warning{why}" if why else "")
 
 
 # --------------------------------------------------------------------- Kept in SQLite

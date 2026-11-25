@@ -16,7 +16,7 @@ from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, \
     QPushButton, QVBoxLayout, QWidget
 
-from ..netmap import monitor, monitor_record, probes
+from ..netmap import checks, monitor, monitor_record, probes
 from ..netmap.monitor import DOWN, UNKNOWN, UP
 from ..snmp import SnmpClient
 from .common import release_thread
@@ -29,16 +29,21 @@ CATCH_UP_SECONDS = 300  # At least this long, this computer's newer up/down outr
 
 
 class PollThread(QThread):
-    finished_poll = pyqtSignal(object, object)  # {key: rtt or None} pinged, probes.poll's {router key: readings or why}
+    # {key: rtt or None} pinged (or checked on a port or web address), probes.poll's {router key: readings or why},
+    # {key: note} of the devices checked on a port or web address (why there was no answer, or a warning)
+    finished_poll = pyqtSignal(object, object, object)
 
-    def __init__(self, targets, pinger, probe_targets=(), client_factory=SnmpClient, parent=None):
+    def __init__(self, targets, pinger, probe_targets=(), client_factory=SnmpClient, parent=None, checks=None,
+                 runner=None):
         super().__init__(parent)
         self.targets, self.pinger = targets, pinger
         self.probe_targets, self.client_factory = list(probe_targets), client_factory
+        self.checks, self.runner = dict(checks or {}), runner
 
     def run(self):
-        pinged = monitor.poll(self.targets, self.pinger)
-        self.finished_poll.emit(pinged, probes.poll(self.probe_targets, self.client_factory))
+        notes = {}
+        pinged = monitor.poll(self.targets, self.pinger, checks=self.checks, notes=notes, runner=self.runner)
+        self.finished_poll.emit(pinged, probes.poll(self.probe_targets, self.client_factory), notes)
 
 
 class DiscoverThread(QThread):
@@ -61,6 +66,8 @@ class NetworkMonitor(QObject):
     def __init__(self, parent=None, pinger=monitor.ping):
         super().__init__(parent)
         self.pinger = pinger
+        self.runner = None  # Runs a check on a port or web address (checks.run); tests swap in their own
+        self.checks = {}  # Device key -> its checks.CheckSpec, for those not pinged (a web server's TCP 443)
         self.client_factory = SnmpClient  # Tests swap in the fake network's
         self.access = None  # access(address) -> (credential, version, timeout) to read a router over SNMP, or None
         self.tracker = monitor.StatusTracker()
@@ -141,8 +148,18 @@ class NetworkMonitor(QObject):
         for key, probe in self.probes.items():
             self.targets.setdefault(key, probe.target)
         self.labels = {key: device.label for key, device in network_map.devices.items()}
+        self.checks = {key: spec for key, spec in ((key, checks.spec_of(device))
+                                                   for key, device in network_map.devices.items()) if not spec.pings}
         self.tracker.forget_others(set(self.targets))
         self.update_summary()
+
+    def how(self, key):
+        """"TCP 443": what checks a device that isn't pinged, or "" (ping)."""
+        probe = self.probes.get(key)
+        if probe is not None:
+            return f"TCP {probe.port}" if probe.port else ""
+        spec = self.checks.get(key)
+        return checks.short_text(spec) if spec is not None else ""
 
     def via(self, key):
         """"R5 (vrf MGMT-B)": the router a device is checked from, or "" (pinged from this computer)."""
@@ -237,7 +254,8 @@ class NetworkMonitor(QObject):
             return f"{monitor.STATUS_NAMES[state.status]} ({monitor_record.not_checked_text(state).lower()})"
         if state.status == UNKNOWN and state.problem:
             return "Can't check"
-        return monitor.STATUS_NAMES[state.status] + (f" (from {state.via})" if state.via else "")
+        warning = " with a warning" if state.status == UP and state.problem else ""
+        return monitor.STATUS_NAMES[state.status] + warning + (f" (from {state.via})" if state.via else "")
 
     # ----------------------------------------------------------------- Looking for probes on the routers
 
@@ -329,7 +347,8 @@ class NetworkMonitor(QObject):
         if self.running and time.time() - self.discovered_at > DISCOVER_EVERY:
             self.discover()
         pings = {key: address for key, address in self.targets.items() if key not in self.probes}
-        self.thread = PollThread(pings, self.pinger, self.probe_targets(), self.client_factory, self)
+        self.thread = PollThread(pings, self.pinger, self.probe_targets(), self.client_factory, self, self.checks,
+                                 self.runner)
         self.thread.finished_poll.connect(self.on_results)
         self.thread.finished.connect(self.on_thread_finished)
         self.thread.start()
@@ -353,10 +372,11 @@ class NetworkMonitor(QObject):
     def on_thread_finished(self):
         self.thread = None
 
-    def on_results(self, pinged, read=None):
+    def on_results(self, pinged, read=None, notes=None):
         if not self.running:
             return  # Stopped while it was polling
         results = {key: rtt for key, rtt in pinged.items() if key in self.targets and key not in self.probes}
+        notes = {key: note for key, note in (notes or {}).items() if key in results}
         if any(rtt is None for rtt in results.values()) and \
                 time.time() - self.discovered_at > probes.LOOK_AGAIN_AFTER_MISS:
             self.discover()  # Someone may have just given one a probe: the next poll reads it, if so
@@ -383,15 +403,15 @@ class NetworkMonitor(QObject):
                 if self.last_results.get(key) == stamp:
                     continue  # No new result since the last poll: it counts once
                 self.last_results[key] = stamp
-                results[key] = reading.rtt if reading.ok else None
-        changes = self.tracker.update(results, via) + self.tracker.cannot_check(problems, via)
+                results[key], notes[key] = probes.reading_result(probe, reading)
+        changes = self.tracker.update(results, via, notes) + self.tracker.cannot_check(problems, via)
         self.last_poll = time.time()
         logged = []
         for change in changes:
-            if change.status == UP and change.lasted is None:
+            if change.status == UP and change.lasted is None and not change.problem:
                 continue  # Answered the first poll: nothing's happened to it
             label = self.labels.get(change.key, change.key)
-            text = monitor.change_text(change, label, self.targets.get(change.key, ""))
+            text = monitor.change_text(change, label, self.targets.get(change.key, ""), self.how(change.key))
             self.log(text, change.when)
             logged.append((change, label, text))
         self.keep(logged)

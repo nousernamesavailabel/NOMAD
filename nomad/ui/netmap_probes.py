@@ -1,5 +1,6 @@
 """Monitor from a Router: put IP SLA probes on the map's routers for devices this computer can't reach (behind a VRF,
-or with no route back here), and see or take away the probes already there. The probes are found again by everyone
+or with no route back here), and see or take away the probes already there. A device monitoring pings gets an ICMP
+echo probe; one checked on a TCP port or web address (a web server) gets a tcp-connect probe to that port. The probes are found again by everyone
 monitoring the map (netmap/probes.py), so nothing about them is saved here."""
 import logging
 from dataclasses import dataclass, field
@@ -20,9 +21,10 @@ from .theme import COLORS, accent_button
 
 log = logging.getLogger(__name__)
 
-ADD_COLUMNS = ["Device", "Address", "Check From", "VRF", "Source Interface", "Justification", "Status"]
-ADDRESS_COLUMN, ROUTER_COLUMN, VRF_COLUMN, SOURCE_COLUMN, WHY_COLUMN, STATUS_COLUMN = range(1, 7)
-PROBE_COLUMNS = ["Device", "Address", "Router", "IP SLA", "VRF", "Source Interface", "Every", "Status", "Owner"]
+ADD_COLUMNS = ["Device", "Address", "Check From", "VRF", "Source Interface", "Justification", "Checks", "Status"]
+ADDRESS_COLUMN, ROUTER_COLUMN, VRF_COLUMN, SOURCE_COLUMN, WHY_COLUMN, CHECKS_COLUMN, STATUS_COLUMN = range(1, 8)
+PROBE_COLUMNS = ["Device", "Address", "Checks", "Router", "IP SLA", "VRF", "Source Interface", "Every", "Status",
+                 "Owner"]
 PROBE_STATUS_COLUMN = PROBE_COLUMNS.index("Status")
 ROUTER_PICKS = "Router picks"  # No source: the router pings from the interface on its way to the device
 PING_TIMEOUT = 20  # Seconds for the router's test ping (two tries, a second each, plus a slow prompt)
@@ -41,6 +43,11 @@ class Item:
     owner: str = ""
     frequency: int = probes.DEFAULT_FREQUENCY
     source: str = ""  # The interface (or address) the router pings from; "" for the one on its way there
+    port: int = 0  # A tcp-connect probe's TCP port (a web server's 443); 0 for an ICMP echo
+
+    @property
+    def what(self):
+        return f"TCP {self.port}" if self.port else "ping"
 
 
 @dataclass
@@ -105,7 +112,7 @@ class ProbeThread(StoppableThread):
                            f"{job.label}: write memory didn't work: {said or 'no answer'}")
 
     def add(self, pusher, shell, job, item, config):
-        entry = probes.existing_entry(config, item.target, item.vrf)
+        entry = probes.existing_entry(config, item.target, item.vrf, item.port)
         if entry is not None:
             held = config[entry].get("source", "")
             if item.source and not probes.same_source(held, item.source):
@@ -115,14 +122,16 @@ class ProbeThread(StoppableThread):
                 return False
             self.item_done.emit(item, True, f"{job.label} already has IP SLA {entry} for it: using that")
             return False
-        try:
-            ping = probes.ping_summary(shell.run(probes.ping_command(item.target, item.vrf, item.source),
-                                                 timeout=PING_TIMEOUT))
-        except (Cancelled, ConnectionFailed, paramiko.SSHException, OSError, EOFError):
-            ping = ""
+        ping = ""
+        if not item.port:  # (IOS has no one-off TCP test to run first: the probe's first result says)
+            try:
+                ping = probes.ping_summary(shell.run(probes.ping_command(item.target, item.vrf, item.source),
+                                                     timeout=PING_TIMEOUT))
+            except (Cancelled, ConnectionFailed, paramiko.SSHException, OSError, EOFError):
+                ping = ""
         entry = probes.free_entry(set(config))
         outcome = pusher.set_up(job.address, probes.setup_text(entry, item.target, item.vrf, item.tag, item.owner,
-                                                               item.frequency, source=item.source))
+                                                               item.frequency, source=item.source, port=item.port))
         if outcome.transcript:
             log.info("Monitor from a Router, %s:\n%s", job.label, outcome.transcript)
         if not outcome.ok:
@@ -132,14 +141,15 @@ class ProbeThread(StoppableThread):
                                 else outcome.problem or "Failed")
             return False
         config[entry] = {"target": item.target, "source": item.source, "vrf": item.vrf, "tag": item.tag,
-                         "scheduled": True}
+                         "scheduled": True, "port": item.port}
         if ping.startswith("0 of"):
             text = (f"Added IP SLA {entry} on {job.label}, but its test ping got no answer ({ping}): check the "
                     f"router, VRF{' and source interface' if item.source else ''}, or the device is down")
             self.item_done.emit(item, True, text)
         else:
             self.item_done.emit(item, True, f"Added IP SLA {entry} on {job.label}" +
-                                (f" (test ping: {ping})" if ping else ""))
+                                (f" (test ping: {ping})" if ping else "") +
+                                (f", checking {item.what}" if item.port else ""))
         return True
 
     def take_away(self, pusher, job, item, config):
@@ -341,10 +351,16 @@ class ProbeDialog(QDialog):
                               "router's in the VRF, or type another interface or address. Router picks: the "
                               "interface on its way to the device.")
             self.add_table.setCellWidget(row, SOURCE_COLUMN, source)
-            for column in (WHY_COLUMN, STATUS_COLUMN):
+            for column in (WHY_COLUMN, CHECKS_COLUMN, STATUS_COLUMN):
                 item = QTableWidgetItem("")
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.add_table.setItem(row, column, item)
+            port = probes.probe_port(device)
+            checks_item = self.add_table.item(row, CHECKS_COLUMN)
+            checks_item.setText(f"TCP {port}" if port else "Ping")
+            checks_item.setToolTip(f"A tcp-connect probe: the router opens a connection to port {port}, as this "
+                                   "device is checked on that port (Edit Device > Check with)" if port else
+                                   "An ICMP echo probe: the router pings it")
             self.show_choice(row)
             if current is not None and current.source:
                 self.set_source(row, current.source)
@@ -473,11 +489,18 @@ class ProbeDialog(QDialog):
                                             "(Loopback0, Gi0/1), or give its address.", "error")
                 return None
             holder = network_map.devices[router]
+            port = probes.probe_port(device)
+            if port:
+                try:  # tcp-connect takes source-ip, not source-interface
+                    source = probes.source_address(holder, source)
+                except ValueError as error:
+                    set_hint(self.status_label, f"{device.label}: {error}", "error")
+                    return None
             job = jobs.get(router)
             if job is None:
                 job = jobs[router] = probes_job(router, holder)
             job.items.append(Item(row, key, device.label, target, vrf, tag=probes.make_tag(device.label),
-                                  owner=owner, frequency=frequency, source=source))
+                                  owner=owner, frequency=frequency, source=source, port=port))
         return list(jobs.values())
 
     def copy_config(self):
@@ -495,7 +518,7 @@ class ProbeDialog(QDialog):
                 entry = probes.free_entry(taken)
                 taken.add(entry)
                 lines.append(probes.setup_text(entry, item.target, item.vrf, item.tag, item.owner, item.frequency,
-                                               source=item.source))
+                                               source=item.source, port=item.port))
             parts.append("\n".join(lines))
         QApplication.clipboard().setText("\n\n".join(parts) + "\n")
         set_hint(self.status_label, "Copied each router's lines. Check the probe numbers are free (show ip sla "
@@ -526,9 +549,10 @@ class ProbeDialog(QDialog):
         lines = []
         for job in jobs:
             for item in job.items:
-                lines.append(f"{item.label} ({item.target}) from {job.label}" +
-                             (f" in vrf {item.vrf}" if item.vrf else "") +
-                             (f", pinging from {item.source}" if item.source else ""))
+                lines.append(f"{item.label} ({item.target}" + (f", {item.what}" if item.port else "") +
+                             f") from {job.label}" + (f" in vrf {item.vrf}" if item.vrf else "") +
+                             (f", {'connecting' if item.port else 'pinging'} from {item.source}" if item.source
+                              else ""))
         saved = ("Each router's configuration is saved afterwards (write memory)." if self.save_check.isChecked()
                  else "Nothing is saved (write memory is off): a router that reloads comes back without them.")
         question = (f"Add {'these probes' if len(lines) > 1 else 'this probe'} over SSH?\n\n" + "\n".join(lines) +
@@ -646,7 +670,8 @@ class ProbeDialog(QDialog):
                 owner = next((item.label for item in network_map.devices.values() if item.owns(probe.target)), "")
                 device = (f"{owner} (another probe is used for it)" if owner else
                           f"Not on the map ({probe.device_label or 'no tag'})")
-            values = [device, probe.target, network_map.devices[probe.router].label, str(probe.entry),
+            values = [device, probe.target, "TCP " + str(probe.port) if probe.port else "Ping",
+                      network_map.devices[probe.router].label, str(probe.entry),
                       probe.vrf or "global", probe.source or ROUTER_PICKS,
                       monitor.duration_text(probe.frequency) if probe.frequency else "",
                       "", probe.owner]

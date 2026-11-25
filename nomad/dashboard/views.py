@@ -10,7 +10,7 @@ import ipaddress
 import time
 
 from ..configs import review as config_review
-from ..netmap import details, layout, monitor, monitor_record, traffic_history, tunnels as tunnel_module
+from ..netmap import checks, details, layout, monitor, monitor_record, traffic_history, tunnels as tunnel_module
 from ..netmap.monitor import duration_text
 from ..netmap.monitor_record import UPTIME_NAMES, uptime_text
 from ..netmap.model import AP_DOWN, FIREWALL, NETWORK_KINDS, ROUTER, SWITCH, WLC, port_key
@@ -40,6 +40,11 @@ def device_status(snapshot, map_id, key):
     if row["status"] == "unknown" and row.get("problem"):
         return CANT, row
     return row["status"], row
+
+
+def check_text(device):
+    """"TCP 443": what checks a device that monitoring doesn't ping (a web server), or ""."""
+    return checks.short_text(checks.spec_of(device))
 
 
 def place_of(network_map, key):
@@ -111,7 +116,7 @@ def device_rows(snapshot):
                 "group": network_map.device_group_label(key), "status": status, "status_text": STATUS_TEXT[status],
                 "since": row["since"] if row else None, "exact": bool(row.get("exact", True)) if row else True,
                 "checked": row["checked"] if row else None, "rtt": row["rtt"] if row else None,
-                "via": row["via"] if row else "",
+                "via": row["via"] if row else "", "check": check_text(device),
                 "problem": row["problem"] if row else "",
                 "stale_text": stale_text(row),
                 "ap_down": device.ap_status == AP_DOWN,
@@ -741,9 +746,10 @@ def csv_table(name, snapshot, history=None, engine=None, query=None):
     if name == "devices":
         rows = device_rows(snapshot)
         header = ["Map", "Site", "Building", "Room", "Name", "Address", "Kind", "Status", "Since", "Response (ms)",
-                  "Checked from", "Problem", "Uptime 24 h %", "Uptime 7 d %", "Uptime 30 d %"]
+                  "Checked with", "Checked from", "Problem", "Uptime 24 h %", "Uptime 7 d %", "Uptime 30 d %"]
         body = [[row["map"], row["site"], row["building"], row["room"], row["name"], row["address"], row["kind"], row["status_text"],
-                 _when(row["since"]), row["rtt"] if row["rtt"] is not None else "", row["via"], row["problem"],
+                 _when(row["since"]), row["rtt"] if row["rtt"] is not None else "", row["check"] or "Ping",
+                 row["via"], row["problem"],
                  row["uptime_24h"], row["uptime_7d"], row["uptime_30d"]] for row in rows]
     elif name == "events":
         header = ["When", "Kind", "Map", "What happened"]

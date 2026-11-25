@@ -37,7 +37,7 @@ from ..snmpv3 import is_v3
 from . import aruba, collect, macssh, vlans
 from .crawl import VLAN_WORKERS, Crawler
 from .model import AP, AP_DOWN, FIREWALL, HOST, NEIGHBOR, NETWORK_KINDS, PHONE, ROUTER, SERVER, SHARED_PORT_HOSTS, \
-    SNMP, SWITCH, WLC, Device, Link, NetworkMap, normalize_name, port_key, short_port
+    SNMP, SWITCH, WEB, WLC, Device, Link, NetworkMap, normalize_name, port_key, short_port
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ GET_BATCH = 20  # OIDs asked for in one GET
 TABLE_READ_AT = 8  # MACs without a quick answer before every switch's MAC table is read once instead
 FDB_KINDS = {SWITCH, ROUTER}  # Devices that can have MAC tables (routers with switch ports); firewalls only ARP
 ARP_KINDS = {SWITCH, ROUTER, FIREWALL, WLC}
-NOT_UPLINK_KINDS = {PHONE, HOST, AP, SERVER}  # A link to one of these is an edge port, not an uplink
+NOT_UPLINK_KINDS = {PHONE, HOST, AP, SERVER, WEB}  # A link to one of these is an edge port, not an uplink
 UNKNOWN_DEVICE = "?"  # leads_to: a port another switch's MAC was learned on, with no link on the map
 DNS_TIMEOUT = 2.0  # Seconds to wait for reverse DNS (names for live results)
 

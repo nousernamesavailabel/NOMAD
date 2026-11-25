@@ -81,13 +81,15 @@ class FakeRouter:
         self.silent = False
 
     def probe(self, entry, target, vrf="", tag="NOMAD sw-b", owner="NOMAD tester", frequency=30, kind=1, state=6,
-              source="0.0.0.0"):
+              source="0.0.0.0", port=0):
+        """port: a tcp-connect probe (type 6, protocol 24) to that port."""
         values = {probes.ECHO_SOURCE: Value(OCTET_STRING, bytes(int(part) for part in source.split("."))),
+                  probes.ECHO_TARGET_PORT: Value(INTEGER, port),
                   probes.CTRL_TAG: Value(OCTET_STRING, tag.encode()),
                   probes.CTRL_OWNER: Value(OCTET_STRING, owner.encode()),
-                  probes.CTRL_RTT_TYPE: Value(INTEGER, kind),
+                  probes.CTRL_RTT_TYPE: Value(INTEGER, probes.TCP_CONNECT if port else kind),
                   probes.CTRL_FREQUENCY: Value(INTEGER, frequency),
-                  probes.ECHO_PROTOCOL: Value(INTEGER, 2),
+                  probes.ECHO_PROTOCOL: Value(INTEGER, probes.TCP_PROTOCOL if port else 2),
                   probes.ECHO_TARGET: Value(OCTET_STRING, bytes(int(part) for part in target.split("."))),
                   probes.ECHO_VRF: Value(OCTET_STRING, vrf.encode()),
                   probes.OPER_STATE: Value(INTEGER, state)}
@@ -138,10 +140,10 @@ class Routers:
 def test_running_config_is_read():
     config = probes.parse_sla_config(R5_SLA)
     assert config[9998] == {"target": "10.251.5.9", "source": "", "vrf": "NOMAD-TEST", "tag": "NOMAD gone",
-                            "scheduled": True}
+                            "scheduled": True, "port": 0}
     assert config[9999]["tag"] == "NOMAD test"
     assert config[12] == {"target": "", "source": "", "vrf": "", "tag": "",
-                          "scheduled": True}  # Not ICMP echo: no target
+                          "scheduled": True, "port": 0}  # Not ICMP echo: no target
     assert probes.existing_entry(config, "10.251.5.1", "NOMAD-TEST") == 9999
     assert probes.existing_entry(config, "10.251.5.1", "") is None  # Another VRF is another probe
     assert probes.free_entry(set(config)) == 9000
@@ -177,6 +179,64 @@ def test_setup_lines_put_the_threshold_before_the_timeout():
     assert " icmp-echo 10.20.5.11 source-ip 10.0.0.1" in \
         probes.setup_text(9000, "10.20.5.11", "", "NOMAD x", "", source="10.0.0.1").splitlines()
     assert probes.removal_text(9000) == "configure terminal\nno ip sla 9000\nend"
+
+
+def test_tcp_connect_probes_for_devices_checked_on_a_port():
+    text = probes.setup_text(9000, "10.20.5.80", "MGMT-B", "NOMAD web1", "NOMAD jared", 30, port=443)
+    assert text.splitlines()[:4] == ["configure terminal", "ip sla 9000", " tcp-connect 10.20.5.80 443 control disable",
+                                     "  vrf MGMT-B"]
+    assert " tcp-connect 10.20.5.80 443 source-ip 10.0.0.1 control disable" in \
+        probes.setup_text(9000, "10.20.5.80", "", "NOMAD x", "", source="10.0.0.1", port=443).splitlines()
+    with pytest.raises(ValueError):  # tcp-connect takes no source-interface
+        probes.setup_text(9000, "10.20.5.80", "", "NOMAD x", "", source="Loopback0", port=443)
+    r1 = lab_map().devices["r1"]
+    assert probes.source_address(r1, "Gi0/1") == "10.20.5.1" and probes.source_address(r1, "") == ""
+    assert probes.source_address(r1, "10.9.9.9") == "10.9.9.9"
+    with pytest.raises(ValueError):
+        probes.source_address(r1, "Loopback7")
+    config = probes.parse_sla_config("ip sla 9000\n tcp-connect 10.20.5.80 443 source-ip 10.20.5.1 control disable\n"
+                                     "  vrf MGMT-B\n  tag NOMAD web1\nip sla 9001\n icmp-echo 10.20.5.80\n  vrf MGMT-B\n")
+    assert config[9000]["target"] == "10.20.5.80" and config[9000]["port"] == 443
+    assert config[9000]["source"] == "10.20.5.1"
+    assert probes.existing_entry(config, "10.20.5.80", "MGMT-B", 443) == 9000
+    assert probes.existing_entry(config, "10.20.5.80", "MGMT-B") == 9001  # The ping is another probe
+    assert probes.existing_entry(config, "10.20.5.80", "MGMT-B", 80) is None
+
+
+def test_tcp_probes_are_read_and_matched_to_devices_checked_on_that_port():
+    from nomad.netmap.model import WEB
+    r1 = FakeRouter()
+    r1.probe(9000, "10.20.5.80", "MGMT-B", tag="NOMAD web1", port=443)
+    r1.probe(9001, "10.20.5.80", "MGMT-B", tag="NOMAD web1 ping")
+    r1.result(9000, 1, 4)
+    network = Routers(**{"10.0.0.1": r1})
+    found = probes.discover([("r1", "10.0.0.1", "public", 1, 2000)], network.client).probes
+    assert [(probe.entry, probe.port, probe.what) for probe in found] == [(9000, 443, "TCP 443"), (9001, 0, "ping")]
+    network_map = lab_map()
+    network_map.devices["web1"] = Device("web1", name="web1", mgmt_ip="10.20.5.80", kind=WEB, manual=True)
+    assert probes.assign(network_map, found) == {"web1": found[0]}  # Checked on TCP 443: the tcp-connect probe
+    network_map.devices["web1"].check = "ping"
+    assert probes.assign(network_map, found) == {"web1": found[1]}  # Pinged: the ICMP echo
+    network_map.devices["web1"].check = "tcp:8443"
+    assert probes.assign(network_map, found) == {}  # Neither checks its port
+    assert probes.reading_result(found[0], probes.Reading(1, 4)) == (4, "")
+    assert probes.reading_result(found[0], probes.Reading(12, 0)) == (None, "no TCP connection on port 443 (tcp "
+                                                                            "connect timeout)")
+    assert probes.reading_result(found[0], probes.Reading(16, 0)) == (None, "TCP 443 refused or unreachable from "
+                                                                            "the router (socket connect error)")
+    assert probes.reading_result(found[1], probes.Reading(4, 0)) == (None, "")
+
+
+def test_adding_a_tcp_probe_skips_the_test_ping(app):
+    pusher = FakePusher(FakeShell(config=R5_SLA + "\nip sla 9000\n tcp-connect 10.20.5.81 443 control disable\n"))
+    job = netmap_probes.Job("r1", "R5", "10.0.0.1", [], [
+        netmap_probes.Item(0, "web1", "web1", "10.20.5.80", "", tag="NOMAD web1", port=443),
+        netmap_probes.Item(1, "web2", "web2", "10.20.5.81", "", tag="NOMAD web2", port=443)])
+    done, _ = run_thread([job], pusher)
+    assert done[0] == ("web1", True, "Added IP SLA 9001 on R5, checking TCP 443")
+    assert done[1] == ("web2", True, "R5 already has IP SLA 9000 for it: using that")
+    assert " tcp-connect 10.20.5.80 443 control disable" in pusher.sent[0].splitlines()
+    assert not [command for command in pusher.the_shell.commands if command.startswith("ping")]
 
 
 def test_tags_pings_and_addresses():

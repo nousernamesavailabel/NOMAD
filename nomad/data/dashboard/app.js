@@ -381,7 +381,12 @@
     {key: "since", label: "For", render: (r) => r.stale_text ? r.stale_text : r.since ? fmtAgo(r.since) + (r.exact === false ? "+" : "") : "",
      value: (r) => r.since ? -r.since : null},
     {key: "rtt", label: "Response", number: true, render: (r) => r.rtt === null || r.rtt === undefined ? "" : `${r.rtt} ms`},
-    {key: "via", label: "Checked from", render: (r) => r.via || (r.problem ? h("span", {class: "muted"}, r.problem) : "")},
+    // A router (IP SLA) or how it's checked when it isn't pinged ("TCP 443"), with why it's down or can't be
+    // checked, or an up web server's warning (HTTP 5xx) in amber
+    {key: "via", label: "Checked from", value: (r) => [r.via, r.check, r.problem].filter(Boolean).join(" "),
+     render: (r) => h("span", {}, [r.via, r.check].filter(Boolean).join(" · "),
+       r.problem ? h("span", {class: r.status === "up" ? "warn-text" : "muted"},
+         (r.via || r.check ? " · " : "") + r.problem) : "")},
     {key: "uptime_24h", label: "Up 24 h", number: true, render: (r) => fmtPercent(r.uptime_24h)},
     {key: "uptime_7d", label: "Up 7 d", number: true, render: (r) => fmtPercent(r.uptime_7d)},
     {key: "uptime_30d", label: "Up 30 d", number: true, render: (r) => fmtPercent(r.uptime_30d)},

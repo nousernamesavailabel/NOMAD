@@ -206,7 +206,7 @@ For something the crawl can't find (an unmanaged switch, or one SNMP can't reach
 - Right-click the map's background > **Add Device Here...** With no map open, this starts a new map.
 - Or right-click a device > **Edit** > **Add Device Linked to This...**
 
-Give it a name, IP address, kind and model.
+Give it a name, IP address, kind and model. **Check with** sets how monitoring checks it: ping, a TCP port, or a web address. See [Web servers and devices that drop ping](#web-servers-and-devices-that-drop-ping).
 
 A device with an address is checked over SNMP with your credentials, like the crawl's devices, and pinged while monitoring:
 
@@ -316,6 +316,18 @@ Tick **Monitor** and choose how often (every 10 s to 10 min) to ping every devic
 
 NOMAD keeps each map's monitoring on this computer for a year. When it starts again, it picks up where it left off. A device that was up is still up since the same time. A device that changed while NOMAD was closed is logged once. The time NOMAD was closed doesn't count against anyone's uptime.
 
+### Web servers and devices that drop ping
+
+A web server often drops ping, so pinging it would always call it down. Give it the **Web server** kind instead (right-click it > **Edit** > **Edit Device...**, or when you add it). NOMAD then checks it by opening a TCP connection to port 443. The time the connection takes to open is the response time, just like a ping's. Nothing is sent over the connection, so the server doesn't log a request.
+
+To check another way, change **Check with** in the same dialog. It works for any kind of device, for example a server that only answers on RDP (TCP 3389):
+
+- **Ping**: the usual check.
+- **TCP port**: up when the port accepts a connection. A refused port (nothing listening) counts as down.
+- **Web address (HTTP or HTTPS)**: NOMAD fetches the address from the device's own IP address, once per check. Any answer from the web server counts as up. A server error (HTTP 5xx) counts as up with a warning: the dot turns amber and the box says, for example, "Warning: HTTP 503". Leave the address blank to fetch https:// and the device's address.
+
+The response time is always the connection's time, not the page's, so it measures the network, the same as ping. When a device goes down, the Monitor log says why, for example "TCP 443 refused (nothing listening)" or "no answer on TCP 443". The Map Watcher and the NOMAD Dashboard check it the same way, once the Map Watcher service has been updated.
+
 ### The Map Watcher's monitoring
 
 If the Map Watcher service monitors the map, NOMAD shows the Watcher's statuses and uptime, even with Monitor off. These are the same numbers the NOMAD Dashboard shows. The Watcher is always on, so its uptime is the fuller one. The details pane says **Monitored by** and names the Watcher's computer.
@@ -339,6 +351,8 @@ Devices behind a VRF, or with no route back here, can be checked from a router o
 4. Click **Add Probes over SSH**.
 
 NOMAD does a test ping from the router, then puts an IP SLA ICMP echo probe tagged NOMAD on it. A probe already there for the same address and VRF is reused, unless it pings from another source.
+
+A web server, or any device checked on a TCP port or web address, gets an IP SLA TCP connect probe to that port instead (`tcp-connect <address> 443 control disable`). The **Checks** column shows which. There's no test ping for these, so the first result shows whether the router can reach the port. A TCP connect probe can't use a source interface, only a source address, so NOMAD uses the address of the interface you pick.
 
 Monitor then reads each probe's latest result over read-only SNMP, showing the device as up or down "via R5 (vrf X)". A router not answering SNMP makes its devices **Can't check**, not down.
 

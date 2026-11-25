@@ -3,7 +3,7 @@ from PyQt5.QtCore import QPointF, QRectF, Qt
 from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QGridLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
-from ..netmap.model import AP, FIREWALL, ROUTER, SERVER, SHARED_PORT_HOSTS, SWITCH, UNKNOWN, WLC
+from ..netmap.model import AP, FIREWALL, ROUTER, SERVER, SHARED_PORT_HOSTS, SWITCH, UNKNOWN, WEB, WLC
 from ..netmap.monitor import DOWN, UNKNOWN as NOT_CHECKED, UP
 from ..netmap.vlans import ACCESS, NATIVE, ONE_END, TAGGED
 from .netmap_view import KIND_COLORS, KIND_TAGS, PATH_BLOCKED, PATH_CARRIES, PATH_CHOSEN, PATH_GAP, PATH_OFFERED, \
@@ -29,7 +29,7 @@ def rounded(rect, radius):
 
 
 def device(kind=SWITCH, dashed=False, unreachable=False, italic=False, status=None, ring=None, selected=False,
-           news=False, mark=None, locked=False):
+           news=False, mark=None, locked=False, warning=False):
     """A device's box, as the map draws it: its kind's color (or up/down while monitored, or an overlay's color)
     round it and on its tag."""
     def paint(painter, rect):
@@ -80,7 +80,7 @@ def device(kind=SWITCH, dashed=False, unreachable=False, italic=False, status=No
         painter.drawText(box.adjusted(STRIP + 4, 0, -14 if status is not None else -2, 0),
                          Qt.AlignLeft | Qt.AlignVCenter, "name")
         if status is not None:
-            dot = QColor(STATUS_COLORS[status])
+            dot = QColor(COLORS["warning"] if warning else STATUS_COLORS[status])
             painter.setPen(QPen(dot, 1.5))
             painter.setBrush(dot if status != NOT_CHECKED else Qt.NoBrush)
             painter.drawEllipse(QPointF(box.right() - 7, box.top() + 7), 3.5, 3.5)
@@ -219,6 +219,8 @@ SECTIONS = [
         (device(WLC), "Wireless controller (WLC): its access points and their Wi-Fi clients are read from it"),
         (device(AP), "Access point (AP)"),
         (device(SERVER), "Server (SRV): only set by hand"),
+        (device(WEB), "Web server (WEB): only set by hand. Monitored on its web port (TCP 443 unless changed), so it "
+                      "needn't answer ping"),
         (device(UNKNOWN), "Unknown kind (?)"),
     ]),
     ("How a device was found", [
@@ -234,6 +236,8 @@ SECTIONS = [
         (device(status=UP), "Green outline and dot: answers ping (its time is beside its address)"),
         (device(status=DOWN), "Red outline, red tint and dot: down (with how long for)"),
         (device(status=NOT_CHECKED), "Gray outline and an empty dot: not pinged yet"),
+        (device(WEB, status=UP, warning=True), "Amber dot: up with a warning. A device checked on its web address "
+                                               "answered with a server error (HTTP 5xx)"),
         (device(dashed=True, status=UP), "\"Via R5\" under its address: checked from router R5 with an IP SLA ping "
                                          "(Map > Monitor from a Router), as this PC can't reach it"),
     ]),

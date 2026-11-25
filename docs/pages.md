@@ -154,7 +154,7 @@ Walk or get over SNMP v1, v2c or v3 (a user with authentication and privacy), wi
 | Page | What it does |
 | --- | --- |
 | **Ping** | Ping with a running summary, and quick buttons for the gateway and DNS server |
-| **Latency** | Watches several hosts at once, with gauges, a graph over time (lost pings in red) and optional CSV logging |
+| **Latency** | Watches several hosts at once, with gauges, a graph over time (lost pings in red) and optional CSV logging. For a host that drops ping, enter host:port or an https:// address to time a TCP connection to that port instead |
 | **MTU** | Finds the largest MTU that reaches a host without fragmenting, and applies it |
 | **Ports** | Open, closed or filtered, for common port presets or any list and range |
 | **iperf** | Bandwidth tests with a built-in iperf3-compatible client and server |

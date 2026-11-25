@@ -31,6 +31,7 @@
   --kind-wlc: #f78fb3;
   --kind-ap: #c792ea;
   --kind-server: #4ecdc4;
+  --kind-web: #9aa5ff;
   --shadow: none;
   --radius: 6px;
   --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
@@ -60,6 +61,7 @@ button.active, button.active:hover { background: var(--accent-soft); border-colo
 input:focus, select:focus { outline: none; border-color: var(--accent-dim); }
 button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: 1px; }
 .muted { color: var(--muted); }
+.warn-text { color: var(--warn); }
 .small { font-size: 12px; }
 .mono { font-family: var(--mono); font-size: 13px; }
 .nowrap { white-space: nowrap; }
@@ -257,6 +259,7 @@ svg .node.kind-firewall { color: var(--kind-firewall); }
 svg .node.kind-wlc { color: var(--kind-wlc); }
 svg .node.kind-ap { color: var(--kind-ap); }
 svg .node.kind-server { color: var(--kind-server); }
+svg .node.kind-web { color: var(--kind-web); }
 svg .node.up { color: var(--up); }
 svg .node.down { color: var(--down); }
 svg .node.unknown { color: var(--muted); }
@@ -272,6 +275,7 @@ svg .node .tag { fill: currentColor; font-size: 10px; font-weight: 700; text-anc
 svg .node.monitored .tag { fill: var(--text); }
 svg .node .dot { fill: currentColor; stroke: currentColor; stroke-width: 1.5; }
 svg .node.unknown .dot { fill: none; }
+svg .node .dot.warn { fill: var(--warn); stroke: var(--warn); }
 svg .node.stale .dot { fill: none; }
 svg .node.stale .tint { fill: none; }
 svg .node.stale .name { fill: var(--text); }

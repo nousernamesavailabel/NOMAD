@@ -7,13 +7,13 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, \
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QTableWidget, \
-    QTableWidgetItem, QVBoxLayout
+    QSizePolicy, QTableWidgetItem, QVBoxLayout, QWidget
 
-from ..netmap import diff
+from ..netmap import checks, diff
 from ..netmap.crawl import MAX_WORKERS, WORKERS, parse_networks
 from ..netmap.details import shown_value
 from ..netmap.model import AP, CORRECTED_NAMES, FIREWALL, GROUP_KINDS, KIND_NAMES, PARENT_KIND, ROUTER, SERVER, \
-    SITE, SWITCH, UNCHECKED, UNKNOWN, WLC, Device, Host, Link, normalize_name, port_sort_key, short_port
+    SITE, SWITCH, UNCHECKED, UNKNOWN, WEB, WLC, Device, Host, Link, normalize_name, port_sort_key, short_port
 from ..oui import format_mac, vendor
 from ..snmp import VERSIONS, community_is_valid
 from ..snmpv3 import AUTH_NAMES, PRIV_NAMES, V3User, is_v3
@@ -568,7 +568,7 @@ class DeviceDialog(QDialog):
         self.ip_input = QLineEdit(device.mgmt_ip if device else address)
         self.ip_input.setPlaceholderText("To ping and check over SNMP (optional; a name is looked up)")
         self.kind_combo = QComboBox()
-        for kind in (SWITCH, ROUTER, FIREWALL, WLC, AP, SERVER, UNKNOWN):
+        for kind in (SWITCH, ROUTER, FIREWALL, WLC, AP, SERVER, WEB, UNKNOWN):
             self.kind_combo.addItem(KIND_NAMES[kind], kind)
         if device is not None and self.kind_combo.findData(device.kind) < 0:  # Kept as it is unless changed
             self.kind_combo.addItem(KIND_NAMES.get(device.kind, device.kind), device.kind)
@@ -579,6 +579,11 @@ class DeviceDialog(QDialog):
         form.addRow("Name:", self.name_input)
         form.addRow("IP address:", self.ip_input)
         form.addRow("Kind:", self.kind_combo)
+        self.check_row = CheckRow(checks.spec_of(device) if device is not None else
+                                  checks.default_for(self.kind_combo.currentData()))
+        self.check_kind = self.kind_combo.currentData()  # The kind whose own way the check row was last set to
+        self.kind_combo.currentIndexChanged.connect(self.on_kind_changed)
+        form.addRow("Check with:", self.check_row)
         form.addRow("Model:", self.platform_input)
         form.addRow("Note:", self.note_input)
         self.link_combo = self.there_port = self.here_port = None
@@ -596,6 +601,17 @@ class DeviceDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def on_kind_changed(self, _index):
+        """A device still checked its kind's own way is checked the new kind's way (TCP 443 for a web server)."""
+        kind = self.kind_combo.currentData()
+        try:
+            same = self.check_row.spec() == checks.default_for(self.check_kind)
+        except ValueError:
+            same = False
+        if same:
+            self.check_row.set_spec(checks.default_for(kind))
+        self.check_kind = kind
 
     def on_link_changed(self):
         key = self.link_combo.currentData()
@@ -623,15 +639,17 @@ class DeviceDialog(QDialog):
                 raise ValueError(f"There's already a device called {other.label} on the map.")
         key = self.device.key if self.device else ""
         old = self.device
+        kind = self.kind_combo.currentData()
+        check = checks.stored(self.check_row.spec(), kind)
         if old is not None and not old.manual:  # Found by the crawl: corrected, not replaced
             device = replace(old, addresses=list(old.addresses), corrected=dict(old.corrected))
-            entered = {"name": name, "mgmt_ip": ip, "kind": self.kind_combo.currentData(),
+            entered = {"name": name, "mgmt_ip": ip, "kind": kind, "check": check,
                        "platform": self.platform_input.text().strip(), "note": self.note_input.text().strip()}
             for attribute, value in entered.items():
                 if value != getattr(old, attribute):
                     device.correct(attribute, value)
             return device, None
-        device = Device(key=key, name=name, mgmt_ip=ip, kind=self.kind_combo.currentData(),
+        device = Device(key=key, name=name, mgmt_ip=ip, kind=kind, check=check,
                         platform=self.platform_input.text().strip(), note=self.note_input.text().strip(),
                         manual=True, source=UNCHECKED)
         if old is not None and old.mgmt_ip == ip:  # Same address: what was found asking it still holds
@@ -652,6 +670,61 @@ class DeviceDialog(QDialog):
             QMessageBox.warning(self, self.windowTitle(), str(error))
             return
         super().accept()
+
+
+class CheckRow(QWidget):
+    """How monitoring checks a device: Ping, a TCP port, or a web address (Device.check, netmap/checks.py)."""
+
+    def __init__(self, spec, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.method_combo = QComboBox()
+        for method in (checks.PING, checks.TCP, checks.HTTP):
+            self.method_combo.addItem(checks.METHOD_NAMES[method], method)
+        self.method_combo.setToolTip("How Monitor (and the Map Watcher) checks it. A device that drops ping, such as "
+                                     "a web server, can be checked on a TCP port: the time its connection takes to "
+                                     "open is the round trip time. A web address is fetched once per check: any "
+                                     "answer is up, a server error (5xx) is up with a warning.")
+        self.port_spin = QSpinBox()
+        self.port_spin.setRange(1, 65535)
+        self.port_spin.setValue(checks.WEB_PORT)
+        self.port_spin.setToolTip("The TCP port to connect to (443 for HTTPS, 80 for HTTP, 3389 for RDP, 22 for SSH)")
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("https://(its address)/  or such as https://intranet/health")
+        self.url_input.setToolTip("Fetched from the device's own address (asking for this address's host name), so "
+                                  "it checks this device, not another behind the same name")
+        for widget in (self.method_combo, self.port_spin):  # The address gets the room
+            widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout.addWidget(self.method_combo)
+        layout.addWidget(self.port_spin)
+        layout.addWidget(self.url_input, 1)
+        layout.addStretch(0)  # Left-aligned while there's no address box
+        self.method_combo.currentIndexChanged.connect(self.on_method_changed)
+        self.set_spec(spec)
+
+    def set_spec(self, spec):
+        self.method_combo.setCurrentIndex(max(0, self.method_combo.findData(spec.method)))
+        if spec.method == checks.TCP:
+            self.port_spin.setValue(spec.port)
+        if spec.method == checks.HTTP:
+            self.url_input.setText(spec.url)
+        self.on_method_changed()
+
+    def on_method_changed(self, _index=None):
+        method = self.method_combo.currentData()
+        self.port_spin.setVisible(method == checks.TCP)
+        self.url_input.setVisible(method == checks.HTTP)
+
+    def spec(self):
+        """The CheckSpec entered. Raises ValueError for a web address that can't be used."""
+        method = self.method_combo.currentData()
+        if method == checks.TCP:
+            return checks.CheckSpec(checks.TCP, self.port_spin.value())
+        if method == checks.HTTP:
+            text = self.url_input.text().strip()
+            return checks.CheckSpec(checks.HTTP, url=checks.normalize_url(text) if text else "")
+        return checks.CheckSpec(checks.PING)
 
 
 class MapChoiceDialog(QDialog):
