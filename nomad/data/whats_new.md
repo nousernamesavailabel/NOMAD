@@ -8,6 +8,7 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 - **New:** the review log shows who made each change, in a **Changed by** column beside the reviewer. This is in NOMAD's **Review Log** and on the NOMAD Dashboard's Reviews page. Update the NOMAD Dashboard service to get it there.
 - **New:** when you review a config change in the Editor, an arrow in the margin points at the block you're reviewing, on both sides, with a bar beside the rest of its lines. The review bar also gives the block's line numbers.
+- **New:** the NOMAD Dashboard has a **What's New** page with these same notes, and marks the version it runs. Update the NOMAD Dashboard service to get it.
 
 ## [2.12.0] - 2026-11-25
 

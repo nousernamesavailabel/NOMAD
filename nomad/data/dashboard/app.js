@@ -629,6 +629,29 @@
         ], data.log, {empty: "Nobody has reviewed a change yet."})];
     },
 
+    // NOMAD's Help > What's New: **bold** and `code` in a line are drawn as text in <b> and <code>, never as HTML
+    whatsnew(data) {
+      const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+        "November", "December"];
+      const when = (iso) => {
+        if (!iso) return "Not released yet";
+        const [year, month, day] = iso.split("-").map(Number);
+        return `${months[month - 1]} ${day}, ${year}`;
+      };
+      const rich = (line) => line.split(/(\*\*.+?\*\*|`.+?`)/).filter(Boolean).map((part) =>
+        part.startsWith("**") && part.endsWith("**") && part.length > 4 ? h("b", {}, part.slice(2, -2)) :
+        part.startsWith("`") && part.endsWith("`") && part.length > 2 ? h("code", {}, part.slice(1, -1)) : part);
+      return [...notices(data.freshness),
+        head("What's New", `This dashboard runs NOMAD ${data.version}. New features and fixes in each version, newest first`),
+        data.entries.length ? h("div", {class: "releases"}, data.entries.map((entry) =>
+          h("section", {class: "panel release"},
+            h("h2", {}, entry.version, entry.version === data.version ?
+              h("span", {class: "pill new"}, "This dashboard") : null),
+            h("div", {class: "muted small"}, when(entry.date)),
+            h("ul", {}, entry.lines.map((line) => h("li", {}, rich(line))))))) :
+          empty("No release notes were found.")];
+    },
+
     traffic(data) {
       const flows = data.flows;
       const top = (id, title, rows, label) => panel(title, rows.length ? table(id, [
@@ -924,7 +947,8 @@
     for (const link of document.querySelectorAll("#nav a")) {
       link.classList.toggle("current", link.dataset.page === state.page);
     }
-    document.title = `NOMAD Dashboard – ${state.page[0].toUpperCase()}${state.page.slice(1)}`;
+    const current = document.querySelector(`#nav a[data-page="${state.page}"]`);
+    document.title = `NOMAD Dashboard – ${current ? current.textContent : state.page}`;
     load();
   }
 

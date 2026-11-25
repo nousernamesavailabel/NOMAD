@@ -409,6 +409,20 @@ def test_csv_tables_never_start_a_cell_with_a_formula():
     assert "'=HYPERLINK" in text and "\n=HYPERLINK" not in text
 
 
+def test_whats_new_page_has_nomads_notes_and_the_running_version():
+    from nomad import __version__
+    from nomad.whats_new import read_entries
+    page = views.whats_new(snapshot_of(small_map()))
+    assert page["version"] == __version__ and "freshness" in page
+    assert [entry["version"] for entry in page["entries"]] == [version for version, _, _ in read_entries()]
+    assert __version__ in [entry["version"] for entry in page["entries"]]
+    made_up = views.whats_new(snapshot_of(small_map()), entries=[
+        ("Unreleased", None, ["**New:** a `thing`"]), ("1.0.0", datetime.date(2026, 1, 2), ["First."])])
+    assert made_up["entries"] == [{"version": "Unreleased", "date": None, "lines": ["**New:** a `thing`"]},
+                                  {"version": "1.0.0", "date": "2026-01-02", "lines": ["First."]}]
+    json.dumps(made_up)
+
+
 def test_syslog_rows_name_the_sender_and_never_carry_text():
     snapshot = snapshot_of(small_map(), syslog={"available": True, "counts": [["10.0.0.1", 3, 4], ["10.0.0.1", 6, 1]]})
     [row] = views.syslog_rows(snapshot)

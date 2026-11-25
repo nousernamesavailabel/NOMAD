@@ -122,6 +122,8 @@ class DashboardServer:
             return views.trends(snapshot)
         if name == "reviews":
             return views.reviews(snapshot, query.get("show", ""))
+        if name == "whatsnew":
+            return views.whats_new(snapshot)
         raise KeyError(name)
 
 

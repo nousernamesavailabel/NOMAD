@@ -9,6 +9,7 @@ import io
 import ipaddress
 import time
 
+from .. import __version__, whats_new as whats_new_notes
 from ..configs import review as config_review
 from ..netmap import checks, details, layout, monitor, monitor_record, traffic_history, tunnels as tunnel_module
 from ..netmap.monitor import duration_text
@@ -24,7 +25,7 @@ SPANS = traffic_history.SPANS  # NOMAD's Traffic Graphs page offers the same
 STALE_WATCHER = monitor_record.STALE_SECONDS  # Seconds without a poll before the watcher counts as stopped
 KIND_WEIGHTS = {FIREWALL: 3, ROUTER: 2, SWITCH: 1, WLC: 1}
 PAGES = ("overview", "devices", "events", "syslog", "traffic", "vpns", "ipam", "hosts", "sites", "map", "trends",
-         "reviews")
+         "reviews", "whatsnew")
 # The Syslog page's choice: the least severe level a sender's messages must reach to be listed ("" lists every sender).
 # "error" lists the senders the Overview's Syslog errors count comes from
 SYSLOG_LEVELS = {"error": 3, "warning": 4}
@@ -186,6 +187,18 @@ def overview(snapshot, history=None, now=None, engine=None):
             "fullest": fullest, "busiest": busiest, "freshness": freshness(snapshot, now),
             "hosts": {"window": OVERVIEW_WINDOW, "total": seen["total"], "mac_only": seen["mac_only_total"]},
             "map_subnets": on_maps, "reviews": review_counts(snapshot)}
+
+
+# --------------------------------------------------------------------- What's New
+
+def whats_new(snapshot, now=None, entries=None):
+    """NOMAD's Help > What's New: each version's short notes, newest first, and the version this dashboard runs.
+    Lines keep their **bold** and `code` marks for the page to draw as text."""
+    now = time.time() if now is None else now
+    entries = whats_new_notes.read_entries() if entries is None else entries
+    return {"version": __version__, "freshness": freshness(snapshot, now),
+            "entries": [{"version": version, "date": date.isoformat() if date else None, "lines": lines}
+                        for version, date, lines in entries]}
 
 
 # --------------------------------------------------------------------- Config change reviews
@@ -815,4 +828,4 @@ def _safe_cell(value):
 
 
 __all__ = ["PAGES", "overview", "devices", "events", "syslog", "traffic", "vpns", "ipam", "hosts", "sites", "topology",
-           "trends", "series", "csv_table", "reviews", "NETWORK_KINDS"]
+           "trends", "series", "csv_table", "reviews", "whats_new", "NETWORK_KINDS"]
