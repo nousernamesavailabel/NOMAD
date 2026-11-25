@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.12.2] - 2026-11-25
+
+- **Fixed:** after uninstalling the Tribe Server from a computer, NOMAD on that computer (run as administrator) no longer tries to reach a tribe server at 127.0.0.1. It uses the tribe key file you connected with.
+
 ## [2.12.1] - 2026-11-25
 
 - **New:** the review log shows who made each change, in a **Changed by** column beside the reviewer. This is in NOMAD's **Review Log** and on the NOMAD Dashboard's Reviews page. Update the NOMAD Dashboard service to get it there.

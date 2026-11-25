@@ -6,6 +6,11 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.12.2] - 2026-11-25
+
+### Fixed
+- **Uninstalling the tribe server no longer leaves NOMAD looking for it on 127.0.0.1.** The server's data stays in `%ProgramData%\NOMAD\server` after the service is removed, and NOMAD running as administrator took that folder to mean "this computer is the tribe server", so it used the server's admin key at 127.0.0.1 instead of the saved tribe key. `client.admin_key()` now also needs the service installed (`is_tribe_server`), so the saved tribe key is used once it's gone.
+
 ## [2.12.1] - 2026-11-25
 
 ### Added

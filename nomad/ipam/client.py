@@ -188,7 +188,10 @@ def read_key_file(path, viewer=False):
 def admin_key(directory=None):
     """The key for managing the server from the server itself, or None if this isn't the server (or NOMAD isn't
     running as administrator, which reading the server's folder needs). None too once the server has been moved to
-    another computer: this one only points laptops there now."""
+    another computer: this one only points laptops there now. None too once the service has been uninstalled: the
+    data stays in the server's folder, but nothing answers on 127.0.0.1 any more, so the saved tribe key is used."""
+    if directory is None and not is_tribe_server():
+        return None
     directory = Path(directory or server_dir())
     try:
         config = load_config(directory)
