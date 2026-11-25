@@ -4,7 +4,7 @@
 (function () {
   const main = document.getElementById("main");
   const state = {page: "", params: {}, sort: {}, filters: {}, picks: {}, picker: null, map: null, mapKeep: {}, refreshTimer: null,
-    kiosk: null, loading: false, selected: null, mapFull: false, browserFull: false,
+    kiosk: null, loading: false, selected: null, mapFull: false, browserFull: false, selectTouched: 0,
     detailsHidden: readPref("map-details-hidden") === "1", detailsCache: null};
 
   // This browser's own choices (whether the map's details are hidden): may be refused, so never relied on
@@ -922,10 +922,20 @@
     load();
   }
 
+  // Someone is choosing from a dropdown (Port, Subnet, Map...): drawing the page again would replace it and the
+  // browser would close its list. Whether a native list is open can't be read, so it counts as in use while it has
+  // the focus and was touched in the last minute (choosing one draws the page afresh without it focused anyway)
+  function selectBusy() {
+    const active = document.activeElement;
+    return Boolean(active && active.tagName === "SELECT" && main.contains(active) && Date.now() - state.selectTouched < 60000);
+  }
+  function touchSelect(event) { if (event.target && event.target.tagName === "SELECT") state.selectTouched = Date.now(); }
+
   function refreshSoon() {
     clearTimeout(state.refreshTimer);
     state.refreshTimer = setTimeout(() => {
-      if (state.picker) refreshSoon();  // Not while a column's filter list is open: its counts would go stale
+      // Not while a column's filter list is open (its counts would go stale), nor while a dropdown is in use
+      if (state.picker || selectBusy()) refreshSoon();
       else if (!state.loading && !document.hidden) load();
     }, 1200);
   }
@@ -955,7 +965,7 @@
     const every = Math.max(10, Number(params.every) || 30) * 1000;
     let index = 0;
     const show = () => {
-      if (state.picker) return;  // Someone is choosing a column's filter: stay on this page until they're done
+      if (state.picker || selectBusy()) return;  // Someone is choosing a filter or from a dropdown: stay until they're done
       state.page = list[index % list.length];
       state.params = state.page === "map" && params.map ? {id: params.map} : {};
       state.selected = null;
@@ -980,6 +990,7 @@
     if (me.kiosk && !location.hash.startsWith("#kiosk")) document.getElementById("sign-out").hidden = true;
   }).catch(() => {});
   window.addEventListener("hashchange", route);
+  for (const name of ["focusin", "pointerdown", "keydown"]) document.addEventListener(name, touchSelect, true);
   route();
   listen();
 })();

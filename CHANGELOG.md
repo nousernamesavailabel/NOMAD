@@ -6,6 +6,11 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.11.2] - 2026-11-24
+
+### Fixed
+- **The dashboard's dropdowns stay open while the page updates.** Each time the data changed, the page was drawn again with new dropdowns, and the browser closed the one being used (Trends' Port and Subnet, and the Map, Status, Severity and Show dropdowns). The update now waits while a dropdown has the focus and was touched in the last minute (`selectBusy`, `touchSelect` in `data/dashboard/app.js`), as it already did for a column's filter list; kiosk mode stays on the page meanwhile too.
+
 ## [2.11.1] - 2026-11-24
 
 ### Added

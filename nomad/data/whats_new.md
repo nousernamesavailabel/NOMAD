@@ -4,6 +4,10 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.11.2] - 2026-11-24
+
+- **Fixed:** on the NOMAD Dashboard, dropdowns such as **Port** and **Subnet** on the Trends page no longer close by themselves when the page updates. Update the NOMAD Dashboard service to get it.
+
 ## [2.11.1] - 2026-11-24
 
 - **Changed:** **Send to Device...** in the Editor no longer asks which device when it can tell. Fix commands, an archived copy and a Compare side go to the device they came from, and any other tab goes to the device its `hostname` line names. Click **Change...** to pick another device from the same list as **Pull Config...**, saved SSH sessions included.
