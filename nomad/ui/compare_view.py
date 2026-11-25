@@ -14,6 +14,7 @@ from .common import add_action
 from .theme import COLORS, monospace_font
 
 MARK_COPY_BACK = 7
+MARK_HERE, MARK_HERE_BAR = 8, 9  # Reviewing: an arrow at the block being reviewed, and a bar beside the rest of it
 KIND_MARKS = {diff.ADDED: MARK_ADDED, diff.REMOVED: MARK_REMOVED, diff.CHANGED: MARK_CHANGED, diff.MOVED: MARK_MOVED}
 KIND_COLORS = {diff.ADDED: "#35c27a", diff.REMOVED: "#e05d5d", diff.CHANGED: "#d9a53a", diff.MOVED: "#5b8fd6"}
 QUICK_LINES = 20000  # Past this many lines, the comparison waits longer after typing before it runs again
@@ -137,11 +138,30 @@ class ComparePane(QWidget):
         self.editor.setMarginSensitivity(SYMBOL_MARGIN, True)
         self.editor.markerDefine(arrow_pixmap(True), MARK_COPY)
         self.editor.markerDefine(arrow_pixmap(False), MARK_COPY_BACK)
+        here = QColor(COLORS["accent"])
+        self.editor.markerDefine(QsciScintilla.RightArrow, MARK_HERE)
+        self.editor.setMarkerForegroundColor(here, MARK_HERE)
+        self.editor.setMarkerBackgroundColor(here, MARK_HERE)
+        self.bar_height = 0  # The line height MARK_HERE_BAR's picture was drawn for (set when first used)
         layout.addWidget(self.editor, 1)
         self.title, self.path = title, path
         self.context = {}  # Where it came from: {"device_id", "address", "names", "platform", "version_id"}
         self.show_title()
         self.editor.modificationChanged.connect(self.show_title)
+
+    def define_bar(self):
+        """MARK_HERE_BAR: a bar down the middle of the margin, as tall as a line so the lines' bars join up (drawn
+        again when the font size or zoom changes the line height)."""
+        height = max(int(self.editor.SendScintilla(QsciScintilla.SCI_TEXTHEIGHT, 0)), 1)
+        if height == self.bar_height:
+            return
+        self.bar_height = height
+        pixmap = QPixmap(14, height)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.fillRect(5, 0, 4, height, QColor(COLORS["accent"]))
+        painter.end()
+        self.editor.markerDefine(pixmap, MARK_HERE_BAR)
 
     def show_title(self, *_):
         self.title_label.setText(self.title + ("  •" if self.editor.isModified() else ""))
@@ -164,6 +184,7 @@ class CompareView(QWidget):
         self.arrows = ({}, {})  # {line: hunk} on each side
         self.syncing = False
         self.review = None  # A config_review.ReviewController while a change is reviewed here
+        self.here = None  # (a_start, a_end, b_start, b_end) of the block being reviewed, marked in the margins
         self.locked = False  # Reviewing: read-only, so no copy arrows
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -304,6 +325,7 @@ class CompareView(QWidget):
         self.pad(self.left.editor, [row.a for row in result.rows])
         self.pad(self.right.editor, [row.b for row in result.rows])
         self.strip.set_marks(self.strip_marks())
+        self.paint_here()
         self.syncing = True
         self.left.editor.verticalScrollBar().setValue(top)
         self.right.editor.verticalScrollBar().setValue(top)
@@ -511,6 +533,39 @@ class CompareView(QWidget):
 
     def add_review_bar(self, bar):
         self.review_slot.addWidget(bar)
+
+    def mark_here(self, a_start, a_end, b_start, b_end):
+        """Point at the lines being reviewed on both sides: an arrow on the block's first line and a bar beside the
+        rest. A side without lines in the block (a block only added, or only removed) gets the arrow where they'd
+        be."""
+        self.here = (a_start, a_end, b_start, b_end)
+        self.paint_here()
+
+    def paint_here(self):
+        for pane in self.panes():
+            pane.editor.markerDeleteAll(MARK_HERE)
+            pane.editor.markerDeleteAll(MARK_HERE_BAR)
+        if self.here is None:
+            return
+        a_start, a_end, b_start, b_end = self.here
+        for pane, start, end in ((self.left, a_start, a_end), (self.right, b_start, b_end)):
+            editor = pane.editor
+            pane.define_bar()
+            last = editor.lines() - 1
+            first = max(0, min(start, last))
+            editor.markerAdd(first, MARK_HERE)
+            for line in range(first + 1, min(end, last + 1)):
+                editor.markerAdd(line, MARK_HERE_BAR)
+
+    def here_lines(self, pane):
+        """The lines of a side marked as being reviewed (for tests and the bar): [(line, marker)]."""
+        found = []
+        for line in range(pane.editor.lines()):
+            mask = pane.editor.markersAtLine(line)
+            for marker in (MARK_HERE, MARK_HERE_BAR):
+                if mask & (1 << marker):
+                    found.append((line, marker))
+        return found
 
     def lock_for_review(self):
         """Section-aware with noise left out, read-only, side by side: the comparison a review is checked against."""

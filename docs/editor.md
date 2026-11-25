@@ -106,7 +106,7 @@ The **Changes** tab lists the newest changes first. Changes that still need a re
 Opening a change doesn't review it. To review a change:
 
 1. Double-click it on the **Changes** tab. It opens beside the copy before it, in section-aware Compare with noise left out. Both sides are read-only, and the compare mode can't be changed while you review.
-2. NOMAD goes to the first block of the change. A block is one run of lines removed, added or changed in one place. The bar above the two sides says which block you're on and where it is.
+2. NOMAD goes to the first block of the change. A block is one run of lines removed, added or changed in one place. The bar above the two sides says which block you're on, its line numbers and where it is. In the margin of both sides, an arrow points at the block's first line and a bar runs beside the rest of its lines. If the block only removes lines, the arrow on the right side shows where they were.
 3. Read the block, then press **Space** if it was meant to happen (Expected) or **U** if it shouldn't be there (Unexpected). NOMAD goes on to the next block. A block only counts if it's on the screen when you mark it. If you scrolled away, NOMAD shows it again first.
 4. If a block is marked **Sensitive**, it touches a line such as a user, AAA, an SNMP community, crypto, the VTY lines or the default route. It needs a note before you can mark it. Press **N** to add a note to any block.
 5. When every block has a verdict, click **Finish Review...** and give a reason. If every block was expected, give the ticket number or say why the change was made, and the change is **Approved**. If any block was unexpected, say what's wrong, and the change is **Raised**.
@@ -123,9 +123,9 @@ Changes that an older version of NOMAD opened before reviews were kept show as *
 
 The **Reason** column on the **Changes** tab shows why each change was approved, or why it was raised and how it was closed. Hover over the reason to see who did what and when, and the note on each block.
 
-**Reviews** > **Review Log...** lists every review, close and acknowledgement, newest first, with the reason, the number of blocks and unexpected blocks, how long it took, the self-reviewed and quick flags, and the block notes. Type in the box at the top, or use the funnel in a column's header, to show only some of them. Double-click one to open its change.
+**Reviews** > **Review Log...** lists every review, close and acknowledgement, newest first. Each row shows who made the change (**Changed by**, the login the device names as the last to change its configuration, as on the **Changes** tab) and who reviewed or closed it (**Who**), with the reason, the number of blocks and unexpected blocks, how long it took, the self-reviewed and quick flags, and the block notes. Type in the box at the top, or use the funnel in a column's header, to show only some of them. Double-click one to open its change.
 
-**Reviews** > **Export Review Log...** saves every review, close and acknowledgement as a workbook or CSV, with who did it, when, the reason, how long it took and each block's note.
+**Reviews** > **Export Review Log...** saves every review, close and acknowledgement as a workbook or CSV, with who made the change, who reviewed it, when, the reason, how long it took and each block's note.
 
 **Reviews** > **Review Settings...** has two settings. With a tribe, they apply on every computer.
 

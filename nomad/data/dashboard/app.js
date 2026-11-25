@@ -617,6 +617,7 @@
           {key: "at", label: "When", render: (r) => fmtTime(r.at), value: (r) => -(r.at || 0)},
           {key: "device", label: "Device"},
           {key: "change", label: "Change", render: (r) => h("span", {class: "mono"}, r.change)},
+          {key: "changed_by", label: "Changed by"},
           {key: "kind_text", label: "What"},
           {key: "outcome_text", label: "Outcome"},
           {key: "user", label: "Who"},

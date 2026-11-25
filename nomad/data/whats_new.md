@@ -4,6 +4,11 @@ The short version of CHANGELOG.md, shown in NOMAD under Help > What's New. Keep 
 
 ## [Unreleased]
 
+## [2.12.1] - 2026-11-25
+
+- **New:** the review log shows who made each change, in a **Changed by** column beside the reviewer. This is in NOMAD's **Review Log** and on the NOMAD Dashboard's Reviews page. Update the NOMAD Dashboard service to get it there.
+- **New:** when you review a config change in the Editor, an arrow in the margin points at the block you're reviewing, on both sides, with a bar beside the rest of its lines. The review bar also gives the block's line numbers.
+
 ## [2.12.0] - 2026-11-25
 
 - **New:** a **Web server** kind of device on the Network Map. NOMAD checks it by opening a connection to port 443 instead of pinging it, so a web server that drops ping still shows as up, with its response time. A refused port counts as down.

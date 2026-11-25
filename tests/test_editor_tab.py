@@ -241,11 +241,54 @@ def test_archive_changes_review_and_map_flags(page, app, monkeypatch):
     page.window.hide()
 
 
+def test_the_block_being_reviewed_is_marked_in_the_margins(page, app):
+    """An arrow on the first line of the block under review, a bar beside the rest, on both sides; it follows the
+    verdicts from block to block, and the bar names the lines."""
+    configs = page.configs
+    configs.upload("10.0.0.2", "running", CONFIG, "alice", name="R2", address="10.0.0.2")
+    changed = CONFIG.replace(" description A\n", " description B\n shutdown\n") + "logging host 1.1.1.1\n"
+    change = configs.upload("10.0.0.2", "running", changed, "alice", changed_by="bob")
+    page.refresh_views()
+    page.window.resize(1200, 800)
+    page.window.show()
+    page.open_change(change["version_id"])
+    settle(app)
+    view = page.current_document()
+    controller = view.review
+    first, second = controller.state.blocks[:2]
+    here = compare_view.MARK_HERE, compare_view.MARK_HERE_BAR
+    right = view.here_lines(view.right)
+    assert right[0] == (first.b_start, here[0])  # The arrow on its first line
+    assert [line for line, marker in right[1:]] == list(range(first.b_start + 1, first.b_end))
+    assert all(marker == here[1] for _, marker in right[1:])  # A bar beside the rest
+    assert view.here_lines(view.left)[0] == (first.a_start, here[0])
+    assert config_review.block_lines(first) == f"line {first.b_start + 1}"
+    assert config_review.block_lines(first) in controller.bar.block_label.text()
+    QTest.keyClick(view.right.editor, Qt.Key_Space)
+    settle(app)
+    assert view.here_lines(view.right) == [(second.b_start, here[0])]  # On to the next block
+    assert config_review.block_lines(second) in controller.bar.block_label.text()
+    view.paint()  # Painting the comparison again keeps it
+    assert view.here_lines(view.right) == [(second.b_start, here[0])]
+    view.mark_here(2, 2, 1, 4)  # Three lines added on the right, none on the left
+    assert view.here_lines(view.right) == [(1, here[0]), (2, here[1]), (3, here[1])]
+    assert view.here_lines(view.left) == [(2, here[0])]  # Where they'd be
+    page.window.hide()
+
+
+def test_block_lines_names_the_lines_reviewed():
+    from nomad.configs.review import Block
+    assert config_review.block_lines(Block(0, "changed", "", 3, 5, 3, 6, [], [])) == "lines 4–6"
+    assert config_review.block_lines(Block(0, "added", "", 3, 3, 3, 4, [], [])) == "line 4"
+    assert config_review.block_lines(Block(0, "removed", "", 7, 10, 6, 6, [], [])) == "removed: left lines 8–10"
+
+
 def test_review_log_lists_reasons_and_opens_the_change(page, app, monkeypatch):
     from nomad.configs import review
     configs = page.configs
     configs.upload("10.0.0.1", "running", CONFIG, "alice", name="R1", address="10.0.0.1")
-    change = configs.upload("10.0.0.1", "running", CONFIG + "username eve secret x\n", "alice")["version_id"]
+    change = configs.upload("10.0.0.1", "running", CONFIG + "username eve secret x\n", "alice",
+                            changed_by="dave")["version_id"]
     blocks = configs.store.review_blocks(change)
     verdicts = [{"index": block.index, "fingerprint": block.fingerprint, "verdict": "unexpected", "note": "who is eve",
                  "seconds": 2, "seen": True} for block in blocks]
@@ -258,9 +301,11 @@ def test_review_log_lists_reasons_and_opens_the_change(page, app, monkeypatch):
     dialog = page.review_log_dialog
     texts = [[dialog.table.item(row, column).text() for column in range(dialog.table.columnCount())]
              for row in range(dialog.table.rowCount())]
-    assert {(row[3], row[4], row[5], row[6]) for row in texts} == {
+    assert {(row[4], row[5], row[6], row[7]) for row in texts} == {
         ("Review", "Raised", "bob", "Nobody asked for eve"), ("Closed", "Explained", "carol", "Contractor, CHG-9")}
-    assert any("who is eve" in row[11] for row in texts)
+    assert config_review.VIEW_COLUMNS[3] == "Changed by"
+    assert {row[3] for row in texts} == {"dave"}  # Who made the change, beside who reviewed it
+    assert any("who is eve" in row[12] for row in texts)
     dialog.filter_input.setText("contractor")
     assert [dialog.table.isRowHidden(row) for row in range(2)].count(False) == 1
     opened = []

@@ -220,6 +220,7 @@ def review_log_rows(snapshot):
         rows.append({"at": row.get("at"), "device": row.get("device_name") or row.get("device_id") or "",
                      "which": row.get("which") or "", "pulled_at": row.get("pulled_at"),
                      "change": f"+{row.get('added') or 0} −{row.get('removed') or 0}",
+                     "changed_by": row.get("changed_by") or "",
                      "kind": row.get("kind") or "", "kind_text": REVIEW_KINDS.get(row.get("kind"), row.get("kind")),
                      "outcome": row.get("outcome") or "",
                      "outcome_text": config_review.STATE_NAMES.get(row.get("outcome"), row.get("outcome") or ""),
@@ -785,10 +786,10 @@ def csv_table(name, snapshot, history=None, engine=None, query=None):
                  row["unexpected"], row["seconds"], "yes" if row["self_review"] else "",
                  "yes" if row["quick"] else ""] for row in review_change_rows(snapshot, query.get("show", ""))]
     elif name == "review-log":
-        header = ["When", "Device", "Configuration", "Change pulled", "Change", "What", "Outcome", "Who", "Reason",
-                  "Blocks", "Unexpected", "Blocks seen", "Time (s)", "Self-reviewed", "Quick", "Block notes"]
+        header = ["When", "Device", "Configuration", "Change pulled", "Change", "Changed by", "What", "Outcome", "Who",
+                  "Reason", "Blocks", "Unexpected", "Blocks seen", "Time (s)", "Self-reviewed", "Quick", "Block notes"]
         body = [[_when(row["at"]), row["device"], row["which"], _when(row["pulled_at"]), row["change"],
-                 row["kind_text"], row["outcome_text"], row["user"], row["reason"], row["total"], row["unexpected"],
+                 row["changed_by"], row["kind_text"], row["outcome_text"], row["user"], row["reason"], row["total"], row["unexpected"],
                  row["seen"], row["seconds"], "yes" if row["self_review"] else "", "yes" if row["quick"] else "",
                  row["notes"]] for row in review_log_rows(snapshot)]
     elif name == "uptime":

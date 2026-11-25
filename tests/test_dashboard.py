@@ -618,7 +618,7 @@ def review_snapshot():
                             "outcome": "raised", "user": "bob (PC2)", "at": 250.0, "seconds": 2.0,
                             "reason": "=Who is eve?", "blocks": blocks, "total": 2, "seen": 2, "unexpected": 1,
                             "self_review": False, "quick": True, "pulled_at": 200.0, "added": 2, "removed": 1,
-                            "which": "running"}]}
+                            "which": "running", "changed_by": "eve"}]}
     return snapshot_of(small_map(), tribe_reviews=reviews)
 
 
@@ -632,6 +632,7 @@ def test_reviews_page_shows_states_flags_and_notes_never_lines():
                                                                                           True)
     [logged] = page["log"]
     assert logged["notes"] == "1 (top level, unexpected): who is eve"
+    assert (logged["changed_by"], logged["user"]) == ("eve", "bob (PC2)")  # Who made it, and who reviewed it
     assert [row["id"] for row in views.reviews(snapshot, "raised")["changes"]] == [2]
     assert [row["id"] for row in views.reviews(snapshot, "attention")["changes"]] == [3, 2]
     assert [row["id"] for row in views.reviews(snapshot, "flagged")["changes"]] == [2]
@@ -640,5 +641,7 @@ def test_reviews_page_shows_states_flags_and_notes_never_lines():
     assert "'=Who is eve?" in text and "Raised" in text
     _, text = views.csv_table("review-log", snapshot)
     assert "who is eve" in text
+    header, first = text.splitlines()[:2]
+    assert header.split(",")[5] == "Changed by" and first.split(",")[5] == "eve"
     old = views.reviews(snapshot_of(small_map()))  # A tribe server too old to keep reviews
     assert not old["available"] and old["changes"] == []

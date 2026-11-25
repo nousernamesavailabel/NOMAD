@@ -399,8 +399,9 @@ class ReviewController(QObject):
         if not self.state.blocks:
             return
         block = self.state.blocks[self.current]
-        parts = [f"<b>Block {block.index + 1} of {len(self.state.blocks)}</b> · {escape(block.where)} · "
-                 f"{block_size(block)}"]
+        self.view.mark_here(block.a_start, block.a_end, block.b_start, block.b_end)
+        parts = [f"<b>Block {block.index + 1} of {len(self.state.blocks)}</b> · {block_lines(block)} · "
+                 f"{escape(block.where)} · {block_size(block)}"]
         if block.sensitive:
             parts.append(f"<span style='color:{COLORS.get('error', '#e05d5d')}'><b>Sensitive</b>: needs a note</span>")
         push = self.state.suggested.get(block.index)
@@ -425,6 +426,16 @@ class ReviewController(QObject):
 
     def stop(self):
         self.timer.stop()
+
+
+def block_lines(block):
+    """"lines 120–124" (the new copy's, on the right), or for a block only removed "removed: left lines 80–82"
+    (the old copy's, where it was)."""
+    def span(start, end):
+        return f"line {start + 1}" if end - start <= 1 else f"lines {start + 1}–{end}"
+    if block.b_end > block.b_start:
+        return span(block.b_start, block.b_end)
+    return f"removed: left {span(block.a_start, block.a_end)}"
 
 
 def block_size(block):
@@ -686,8 +697,8 @@ class ReviewSettingsDialog(QDialog):
 
 # ----------------------------------------------------------------- The review log in NOMAD
 
-VIEW_COLUMNS = ["When", "Device", "Change", "What", "Outcome", "Who", "Reason", "Blocks", "Unexpected", "Time",
-                "Flags", "Block notes"]
+VIEW_COLUMNS = ["When", "Device", "Change", "Changed by", "What", "Outcome", "Who", "Reason", "Blocks", "Unexpected",
+                "Time", "Flags", "Block notes"]
 WHAT_TEXT = {review.KIND_REVIEW: "Review", review.KIND_CLOSE: "Closed", review.KIND_ACKNOWLEDGE: "Acknowledged",
              review.KIND_SEEN: "Opened (older NOMAD)"}
 
@@ -698,6 +709,7 @@ def view_row(row):
     return [when_text(row.get("at")), row.get("device_name") or row.get("device_id") or "",
             f"+{row.get('added') or 0} −{row.get('removed') or 0}" + (f"  ({when_text(row.get('pulled_at'))})"
                                                                      if row.get("pulled_at") else ""),
+            row.get("changed_by") or "",  # Who made the change (its device login), not who reviewed it
             WHAT_TEXT.get(row.get("kind"), row.get("kind") or ""),
             review.STATE_NAMES.get(row.get("outcome"), row.get("outcome") or ""), row.get("user") or "",
             row.get("reason") or "", "" if row.get("total") is None else str(row["total"]),

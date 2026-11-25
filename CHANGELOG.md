@@ -6,6 +6,12 @@ Add changes under Unreleased as you go; `python -m nomad.version bump <part>` da
 
 ## [Unreleased]
 
+## [2.12.1] - 2026-11-25
+
+### Added
+- **The review log shows who made each change.** NOMAD's Review Log window (**Reviews** > **Review Log...**) and the NOMAD Dashboard's review log, page and CSV, have a **Changed by** column beside the change: the device login that made it, as the Changes tab shows it. **Who** is still the reviewer, or whoever closed or acknowledged it. The archive's and the tribe server's review log rows already carried `changed_by`, so no Tribe API change (`config_review.VIEW_COLUMNS`, `views.review_log_rows`). The export already had it.
+- **Reviewing a change, the block being reviewed is marked in the margins.** Both sides get an arrow on the first line of the block under review and a bar beside the rest of its lines (`compare_view.MARK_HERE`, `MARK_HERE_BAR`; `CompareView.mark_here`, kept when the comparison is painted again). A side with no lines in the block (only added, or only removed) gets the arrow where they'd be. The marker follows Prev/Next and each verdict, and stays while a finished review is looked through. The review bar names the block's lines: "lines 120–124" on the right, or "removed: left lines 80–82" (`config_review.block_lines`).
+
 ## [2.12.0] - 2026-11-25
 
 ### Added
